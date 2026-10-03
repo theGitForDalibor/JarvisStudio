@@ -1,5 +1,5 @@
-# Human-in-the-Loop (HITL) Specification
+# Human-in-the-Loop (HITL) 人机协同规范
 
-> **Note**: This document has been moved to the standardized documentation directory:
+> **注意**：本文档已迁移至全新分类标准化的技术文档目录：
 > 
-> 👉 **[docs/design/hitl-specification.md](file:///d:/myProject/JarvisStudio/docs/design/hitl-specification.md)**
+> 👉 **[docs/design/hitl-specification.md](design/hitl-specification.md)**

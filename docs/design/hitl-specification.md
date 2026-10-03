@@ -1,96 +1,96 @@
-# Human-in-the-Loop (HITL) Specification
+# Human-in-the-Loop (HITL) 人机协同规范
 
-## 1. Motivation & Philosophy
+## 1. 设计初衷与安全哲学
 
-Jarvis Studio operates with direct execution privileges over local files, the terminal shell, and connected external services (MCP). Autonomous execution of destructive commands poses unacceptable risks of data loss, unintended system changes, or security breaches.
+Jarvis Studio 具备直接操作本地文件系统、执行系统终端命令以及调用外部 MCP 服务的强大权限。完全无约束的自主执行存在文件损坏、误删代码、未授权推送或执行破坏性系统命令的极高风险。
 
-**Core Principle**:
-> High-risk operations must never execute without explicit, informed human confirmation.
+**核心准则**：
+> **涉及高风险、不可逆或具有破坏性的操作，绝对不允许未经用户明确确认而自主执行。**
 
 ---
 
-## 2. Risk Classification Matrix
+## 2. 工具风险分类矩阵 (Risk Classification Matrix)
 
-Tools registered in Jarvis Studio are assigned a safety rating:
+Jarvis Studio 中的每个工具都强制赋予明确的风险等级：
 
-| Risk Level | Description | Examples | Execution Policy |
+| 风险等级 | 说明 | 典型示例 | 执行策略 |
 | :--- | :--- | :--- | :--- |
-| **SAFE** | Read-only operations without side effects | `read_file`, `list_directory`, `web_search` | Automated execution |
-| **MEDIUM** | Non-destructive writes or ephemeral modifications | Creating temporary scratch files | Policy-dependent (configurable) |
-| **HIGH** | File deletion, system mutation, shell execution, external API write | `execute_shell_command`, `write_file`, `delete_file`, `git_push` | **HITL Required (Mandatory Interrupt)** |
+| **SAFE (安全)** | 只读操作，零副作用，不改变任何系统状态 | `read_file`, `list_directory`, `web_search` | **自主自动执行** |
+| **MEDIUM (中度)** | 产生临时或非破坏性写入，影响可控可逆 | 创建临时分析文件、记录 scratch 笔记 | 根据配置决定是否确认 |
+| **HIGH (高危)** | 文件写入覆盖、文件删除、终端命令执行、外部服务变更 | `execute_shell_command`, `write_file`, `delete_file`, `git_push` | **强制中断确认 (Mandatory HITL)** |
 
 ---
 
-## 3. LangGraph Interrupt & Resume Mechanism
+## 3. LangGraph 原生中断与恢复时序
 
-Jarvis Studio uses LangGraph's native `interrupt()` function rather than relying on brittle polling or blocking threads:
+Jarvis Studio 采用 LangGraph 原生 `interrupt()` 协议，彻底告别了传统阻塞线程或长轮询的脆弱实现：
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as User / Client
-    participant API as FastAPI Gateway
-    participant Svc as AgentService
-    participant Graph as LangGraph Engine
-    participant Gate as Approval Gate Node
-    participant DB as SQLite Checkpointer
-    participant Tool as Tool Executor
+    actor User as 用户 / 客户端
+    participant API as FastAPI 网关
+    participant Svc as AgentService 服务层
+    participant Graph as LangGraph 引擎
+    participant Gate as Approval Gate 审查节点
+    participant DB as SQLite 检查点
+    participant Tool as Tool Executor 安全执行器
 
-    User->>API: POST /api/v1/chat ("Run git pull")
+    User->>API: POST /api/v1/chat ("运行 git push")
     API->>Svc: invoke_agent(thread_id, message)
     Svc->>Graph: ainvoke(state, thread_id)
-    Graph->>Gate: Evaluates tool call 'execute_shell_command'
-    Note over Gate: Tool requires approval!
-    Gate->>DB: Checkpoint current state
-    Gate->>Graph: interrupt(approval_payload)
-    Graph-->>Svc: Returns paused state
+    Graph->>Gate: 检测到高危工具 'execute_shell_command'
+    Note over Gate: 触发高危拦截！
+    Gate->>DB: 自动保存当前图状态快照
+    Gate->>Graph: 调用 interrupt(approval_payload)
+    Graph-->>Svc: 返回挂起状态 (interrupted)
     Svc-->>API: AgentExecutionResult(status="interrupted")
-    API-->>User: 200 OK (status="interrupted", pending_approval)
+    API-->>User: 200 OK (返回审批待办信息与 approval_id)
 
-    Note over User: User reviews command & arguments
+    Note over User: 用户审查要执行的 Shell 命令与参数
     User->>API: POST /api/v1/approvals/{id}/decision (decision="approve")
     API->>Svc: resume_approval(thread_id, approval_id, decision)
     Svc->>Graph: ainvoke(Command(resume=decision), thread_id)
-    DB->>Graph: Restores checkpoint
-    Gate-->>Graph: Resumes with user decision
-    Graph->>Tool: Executes 'execute_shell_command'
-    Tool-->>Graph: ToolMessage with output
-    Graph-->>Svc: Final response
+    DB->>Graph: 从 SQLite 还原断点现场
+    Gate-->>Graph: interrupt() 返回用户决策数据
+    Graph->>Tool: 执行 'execute_shell_command'
+    Tool-->>Graph: 返回执行结果 ToolMessage
+    Graph-->>Svc: 完成后续思考并输出总结
     Svc-->>API: AgentExecutionResult(status="completed")
-    API-->>User: 200 OK (status="completed", output_text)
+    API-->>User: 200 OK (最终结果输出)
 ```
 
 ---
 
-## 4. Rejection & Argument Modification Protocol
+## 4. 拒绝执行与参数修改协议
 
-### 4.1 Safe Rejection Handling
-Modern LLM APIs (OpenAI, Anthropic, DeepSeek) strictly enforce that every `tool_call_id` emitted in an assistant message must be followed by a matching `ToolMessage`.
+### 4.1 协议合规的拒绝处理 (Safe Rejection Handling)
+现代大模型 API（OpenAI、DeepSeek、Anthropic 等）严格要求：**Assistant 消息中生成的每一个 `tool_call_id`，在后续的消息序列中必须有对应的 `ToolMessage` 予以闭环**，否则接口直接报错崩溃。
 
-If the user selects **REJECT**:
-- The tool is **not** executed.
-- `create_tool_executor_node` emits a synthesized `ToolMessage`:
+当用户选择 **拒绝 (Reject)** 时：
+- 系统**绝对不会**调用真实系统工具。
+- `create_tool_executor_node` 会自动生成一条合规的合意回复：
   ```python
   ToolMessage(
-      content=f"Operation cancelled: User rejected execution of '{tool_name}'. Reason: {decision_reason}",
+      content=f"操作已取消：用户拒绝执行工具 '{tool_name}'。拒绝原因：{decision_reason}",
       tool_call_id=call_id,
       name=tool_name,
   )
   ```
-- The graph transitions back to `assistant`. The LLM receives the rejection notice and adjusts its plan without throwing API protocol errors.
+- 大模型收到此通知后，获知操作已被用户拒绝，从而能够合规地自我调整计划或向用户寻求其他方案。
 
-### 4.2 Argument Modification
-If the user selects **MODIFY**:
-- The user provides updated parameters in `modified_arguments` (e.g. changing `git push --force` to `git push origin feature/dev`).
-- The tool executor uses `modified_arguments` instead of the original parameters.
+### 4.2 人工参数修改 (Argument Modification)
+当用户选择 **修改 (Modify)** 时：
+- 用户可以在审查载荷中提供 `modified_arguments`（例如将 `git push origin main --force` 修改为 `git push origin feature/dev`）。
+- 执行节点会用人工订正后的参数替换大模型最初的入参执行，兼顾效率与安全。
 
 ---
 
-## 5. REST API Contract
+## 5. REST API 接口契约
 
-### List Pending Approvals
-- **Endpoint**: `GET /api/v1/approvals`
-- **Response**:
+### 查询当前挂起的审批待办
+- **请求方法与路径**: `GET /api/v1/approvals`
+- **响应示例**:
 ```json
 [
   {
@@ -103,30 +103,30 @@ If the user selects **MODIFY**:
     },
     "risk_level": "HIGH",
     "status": "PENDING",
-    "description": "Action 'execute_shell_command' requires confirmation",
+    "description": "执行危险工具 'execute_shell_command' 需要人工确认",
     "created_at": 1727950000.0
   }
 ]
 ```
 
-### Submit Decision & Resume
-- **Endpoint**: `POST /api/v1/approvals/{approval_id}/decision`
-- **Request Payload**:
+### 提交审查决策并唤醒执行
+- **请求方法与路径**: `POST /api/v1/approvals/{approval_id}/decision`
+- **请求载荷**:
 ```json
 {
   "thread_id": "sess_4f8b21c0",
-  "decision": "approve",
-  "reason": "Verified commit history",
+  "decision": "approve", // 可选: "approve" (批准), "reject" (拒绝), "modify" (修改参数)
+  "reason": "已人工确认提交记录无误",
   "modified_arguments": null
 }
 ```
-- **Response**:
+- **响应示例**:
 ```json
 {
   "thread_id": "sess_4f8b21c0",
   "run_id": "run_9a12b3c4",
   "status": "completed",
-  "output_text": "Git push completed successfully: Everything up-to-date.",
+  "output_text": "Git 推送成功：Everything up-to-date.",
   "pending_approval": null,
   "error": null
 }

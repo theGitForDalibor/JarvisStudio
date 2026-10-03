@@ -12,6 +12,10 @@
 [![Tests](https://img.shields.io/badge/Tests-13%20Passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+<p align="center">
+  <b>English</b> | <a href="README.zh-CN.md">简体中文</a>
+</p>
+
 </div>
 
 ---

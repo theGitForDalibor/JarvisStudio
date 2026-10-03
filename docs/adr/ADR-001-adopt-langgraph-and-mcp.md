@@ -1,49 +1,49 @@
-# ADR-001: Adopt LangGraph and Model Context Protocol (MCP) as Production Foundation
+# ADR-001: 采用 LangGraph 与 Model Context Protocol (MCP) 作为生产基座
 
-- **Status**: Accepted
-- **Date**: 2026-10-03
-- **Deciders**: Principal Engineer / Tech Lead
-
----
-
-## Context
-
-Prior iterations of the personal assistant project served specific educational purposes:
-- **Jarvis Agent**: Implemented a custom Python Agent Runtime from scratch to explore the internals of ReAct, memory management, and prompt engineering.
-- **Jarvis Agent Plus**: Studied LangChain framework abstractions.
-- **Jarvis Agent Pro**: Explored graph-based agent orchestration.
-
-**Jarvis Studio** is created with a fundamentally different goal: to serve as a long-term, production-grade personal AI Operating Assistant for real daily work. Continuing to maintain and reinvent a custom agent loop, checkpointing mechanism, and tool registry introduces substantial technical debt and fragility.
+- **状态**: 已接受 (Accepted)
+- **决策日期**: 2026-10-03
+- **决策人**: Principal Engineer / Tech Lead
 
 ---
 
-## Decision
+## 1. 背景与上下文 (Context)
 
-We decide to:
-1. **Adopt LangGraph** as the primary runtime for agent state machines, cyclic workflows, checkpointing, and human-in-the-loop interruptions.
-2. **Adopt LangChain Core** for standardized message schemas (`HumanMessage`, `AIMessage`, `ToolMessage`) and tool interfaces.
-3. **Adopt Model Context Protocol (MCP)** as the primary standard for integrating external tools and local system services.
+在此前的探索阶段，团队先后完成了三代学习型项目：
+- **Jarvis Agent**：从零自研纯 Python Agent Runtime，深入学习了 ReAct 循环、内存管理与工具执行机制。
+- **Jarvis Agent Plus**：专注于学习 LangChain 框架抽象。
+- **Jarvis Agent Pro**：专注于学习基于 LangGraph 的图循环编排。
 
----
-
-## Alternatives Considered
-
-1. **Continue Maintaining the Custom Jarvis Agent Runtime**:
-   - *Rejected*: Incurs immense maintenance overhead for edge cases (checkpoint serialization, token streaming, cyclic recovery, error propagation).
-2. **Raw LangChain AgentExecutor**:
-   - *Rejected*: Legacy `AgentExecutor` is rigid, lacks fine-grained checkpointing, and cannot natively handle human-in-the-loop pauses with state snapshots.
-3. **Custom Tool Integration per External Service**:
-   - *Rejected*: Leads to high coupling and fragmentation. MCP provides an open, vendor-neutral standard supported by a growing ecosystem of servers.
+**Jarvis Studio 的定位是生产级个人应用**，目标是长期稳定服务于日常开发工作，而非为了学习继续重复手写底层 Runtime。自研 Agent Loop 在断点快照、并发安全、异常重试、流式传输与跨进程恢复等复杂场景下需要付出巨大的边角维护成本。
 
 ---
 
-## Consequences
+## 2. 架构决策 (Decision)
 
-### Positive
-- Built-in, battle-tested state graph execution with durable checkpointing.
-- Native `interrupt()` and `Command(resume=...)` support for human review.
-- Access to the MCP ecosystem (filesystem, database, GitHub, browser automation) without writing custom adapters for every service.
+我们决定：
+1. **采用 LangGraph 作为核心图运行时**，负责 Agent 的状态机管理、条件路由、检查点持久化以及人机协同中断。
+2. **采用 LangChain Core 基础组件**，统一抽象消息协议（`HumanMessage`, `AIMessage`, `ToolMessage`）与标准工具接口。
+3. **采用 Model Context Protocol (MCP) 官方标准**，作为未来接入外部系统（文件、数据库、GitHub、浏览器）的首选扩展方式。
 
-### Negative / Trade-offs
-- Dependency on external framework release lifecycles.
-- Learning curve for graph-based state reduction semantics (`add_messages`).
+---
+
+## 3. 备选方案权衡 (Alternatives Considered)
+
+1. **继续维护自研的 Jarvis Agent Runtime**：
+   - *否决理由*：维护自研状态机与持久化引擎耗费大量精力，且生态扩展性弱，违背“产品优先”原则。
+2. **使用旧版 LangChain AgentExecutor**：
+   - *否决理由*：旧版 `AgentExecutor` 过于黑盒、缺乏细粒度的单步快照，难以优雅实现多分支人机协同审查。
+3. **为每个外部服务定制私有 Agent 逻辑**：
+   - *否决理由*：造成高度耦合与代码膨胀，违背 MCP 开放生态理念。
+
+---
+
+## 4. 决策影响与后果 (Consequences)
+
+### 正向收益
+- 获得工业级稳定的图执行引擎与现成的 SQLite 检查点持久化。
+- 获得原生的 `interrupt()` 与 `Command(resume=...)` 支持，优雅解决人机协同审批。
+- 能够无缝兼容不断扩大的开源 MCP Server 生态。
+
+### 权衡与代价
+- 产生对 LangGraph / LangChain 外部依赖库版本迭代的追踪成本。
+- 需要遵循状态图的增量归约范式（`add_messages`）。
