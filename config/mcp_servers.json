@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./data/workspace"],
+      "enabled": false,
+      "description": "Local filesystem access via MCP"
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "enabled": false,
+      "description": "Web fetch and content extraction via MCP"
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "./data/jarvis_studio.db"],
+      "enabled": false,
+      "description": "Direct database query access via MCP"
+    }
+  }
+}

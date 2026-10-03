@@ -1,0 +1,29 @@
+# Jarvis Studio Default Runtime Configuration
+
+app:
+  name: "Jarvis Studio"
+  version: "0.1.0"
+  description: "Personal Production AI Operating Assistant"
+
+llm:
+  default_provider: "openai"
+  default_model: "gpt-4o-mini"
+  temperature: 0.2
+  streaming: true
+
+security:
+  hitl_enabled: true
+  dangerous_tools:
+    - "execute_shell_command"
+    - "write_file"
+    - "delete_file"
+    - "git_push"
+
+storage:
+  checkpoint_backend: "sqlite"
+  sqlite_path: "data/jarvis_studio.db"
+  workspace_root: "./data/workspace"
+
+observability:
+  enable_rich_logging: true
+  log_level: "INFO"
