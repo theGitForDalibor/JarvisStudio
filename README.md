@@ -1,99 +1,215 @@
 # Jarvis Studio
 
-> **Personal Production AI Operating Assistant**  
-> Built for long-term real-world utility, continuous extensibility, and daily engineering/knowledge workflows.
+<div align="center">
+
+**Personal Production AI Operating Assistant**
+
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-1.2+-blueviolet.svg)](https://github.com/langchain-ai/langgraph)
+[![LangChain](https://img.shields.io/badge/LangChain-1.4+-1C3C3C.svg)](https://github.com/langchain-ai/langchain)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
+[![MCP](https://img.shields.io/badge/MCP-2.3+-orange.svg)](https://modelcontextprotocol.io/)
+[![Tests](https://img.shields.io/badge/Tests-13%20Passed-brightgreen.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+</div>
 
 ---
 
-## 1. Project Background & Evolution
+## 1. Overview
 
-Jarvis Studio is the culmination of iterative learning and exploration across personal agent architectures:
+### What is Jarvis Studio?
+**Jarvis Studio** is a personal AI Operating Assistant designed for daily engineering, file management, system automation, and knowledge retrieval. 
 
-| Project | Core Tech | Objective | Status |
+It runs locally or as a personal background service, executing instructions through modular tools, connected [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers, and swappable language models.
+
+### Why does it exist?
+Jarvis Studio represents the evolution from educational prototypes to a reliable production assistant:
+
+| Project | Foundation | Purpose | Status |
 | :--- | :--- | :--- | :--- |
-| **Jarvis Agent** | Custom Python Runtime | Deep understanding of Agent Loop & ReAct internals | Complete (Archived) |
-| **Jarvis Agent Plus** | LangChain Core | Framework abstraction and tool binding mechanics | Separate Project |
+| **Jarvis Agent** | Custom Python Runtime | Deep exploration of ReAct and loop internals | Archived |
+| **Jarvis Agent Plus** | LangChain Core | Framework abstraction study | Separate Project |
 | **Jarvis Agent Pro** | LangGraph | Graph-based state machine orchestration | Separate Project |
-| **Jarvis Studio** | **LangGraph + LangChain + MCP** | **Production personal AI assistant for daily engineering use** | **Active Project** |
+| **Jarvis Studio** | **LangGraph + LangChain + MCP** | **Reliable, personal AI assistant for daily work** | **Active Project** |
 
-Jarvis Studio does **not** reinvent the runtime. It leverages mature, production-grade frameworks to deliver reliability, safety, and extensibility.
-
----
-
-## 2. Core Architectural Principles
-
-1. **Product First**: Every feature solves a real problem in daily work, coding, research, or system automation.
-2. **Don't Reinvent the Runtime**: Uses official LangGraph, LangChain, and MCP protocols.
-3. **Decoupled Architecture**: Strict 5-tier separation:
-   ```text
-   UI  ──▶  Application API  ──▶  Agent Service  ──▶  LangGraph Runtime  ──▶  Tools / MCP
-   ```
-4. **Swappable LLM Adapters**: First-class support for OpenAI-compatible APIs, DeepSeek, Anthropic Claude, Google Gemini, and local Ollama without hardcoded provider dependencies.
-5. **Tool First**: Agent capabilities are extended through modular tools, not endless prompt bloat.
-6. **MCP First-Class**: Standardized integration with external tools and ecosystems via Model Context Protocol (MCP).
-7. **Human-in-the-Loop (HITL)**: High-risk operations (shell execution, destructive writes, git push) pause via LangGraph checkpoints for user approval/modification.
-8. **End-to-End Observability**: Tracing across Session ID, Run ID, Graph Node, Tool Execution, Latency, and Token Consumption.
+> **Design Tenet**: Do not reinvent the agent runtime. Leverage mature, battle-tested frameworks (**LangGraph**, **LangChain**, and **MCP**) to focus on real utility, safety, and personal extensibility.
 
 ---
 
-## 3. Directory Layout
+## 2. Core Capabilities (Implemented)
 
-```text
-JarvisStudio/
-├── docs/                   # System design, architecture, HITL, and roadmaps
-├── config/                 # YAML and MCP server configurations
-├── src/jarvis_studio/
-│   ├── config/             # Pydantic Settings & environment validation
-│   ├── core/
-│   │   ├── llm/            # Multi-provider LLM adapter factory
-│   │   ├── observability/  # Tracing, run IDs, and structured logging
-│   │   └── errors.py       # Custom typed domain exceptions
-│   ├── tools/
-│   │   ├── base.py         # Tool metadata, risk classification
-│   │   ├── registry.py     # Dynamic Tool Registry
-│   │   ├── builtin/        # Shell, File, and Web tools
-│   │   └── mcp/            # Model Context Protocol client manager & adapter
-│   ├── agent/
-│   │   ├── state.py        # LangGraph AgentState definitions
-│   │   ├── graph.py        # StateGraph builder & orchestrator
-│   │   ├── nodes/          # Assistant, Router, Approval, and Tool nodes
-│   │   ├── checkpoints/    # SQLite and Memory checkpointers
-│   │   └── hitl/           # Human-in-the-loop approval management
-│   ├── service/            # Application service layer (AgentService, SessionService)
-│   ├── api/                # FastAPI routes, schemas, and SSE streaming
-│   └── cli/                # Interactive developer CLI
-├── tests/                  # Unit and integration test suite
-├── .env.example            # Environment configuration template
-└── pyproject.toml          # uv / PEP 621 project configuration
+- **Decoupled 5-Tier Architecture**: Clean separation across API Gateway, Application Service, Agent Runtime, Tools/MCP, and LLM Adapters.
+- **Swappable LLM Adapters**: Zero vendor lock-in. Switch between OpenAI, DeepSeek, local Ollama, and custom endpoints via configuration without altering graph code.
+- **Human-in-the-Loop (HITL) Safety**: Dangerous tools (`execute_shell_command`, `write_file`) automatically trigger LangGraph `interrupt()`, snapshotting state to SQLite for human review (`approve`, `reject`, `modify`).
+- **Resilient Rejection Protocol**: User rejections generate valid `ToolMessage` payloads, allowing the LLM to replan gracefully without breaking API schema contracts.
+- **Tool System & Safety Matrix**: Central `ToolRegistry` enforces `RiskLevel` boundaries (`SAFE`, `MEDIUM`, `HIGH`).
+- **Dynamic MCP Bridge**: Converts external MCP tool JSON Schemas dynamically into strongly-typed LangChain `BaseTool` models at runtime.
+- **Durable Checkpointing**: Powered by `langgraph-checkpoint-sqlite` for state serialization and crash-resilient session resumption.
+- **End-to-End Tracing**: Contextual `session_id` and `run_id` correlation, execution latency measurement (`timed_step`), and structured logging with Loguru.
+- **Dual Interfaces**: Native developer CLI (`jarvis-studio info`, `serve`, `chat`) and FastAPI REST gateway (`/chat`, `/approvals`, `/system`).
+
+---
+
+## 3. Architecture Snapshot
+
+```mermaid
+flowchart TD
+    subgraph UI ["User Interfaces"]
+        CLI["Developer CLI (jarvis-studio)"]
+        CLIENT["REST / Web Client"]
+    end
+
+    subgraph API ["1. Application API Gateway (FastAPI)"]
+        ENDPOINT_CHAT["/api/v1/chat"]
+        ENDPOINT_APPR["/api/v1/approvals"]
+        ENDPOINT_SYS["/api/v1/system"]
+    end
+
+    subgraph SVC ["2. Application Service Layer"]
+        AGENT_SVC["AgentService"]
+        SESS_SVC["SessionService"]
+    end
+
+    subgraph RUNTIME ["3. LangGraph Runtime (StateGraph)"]
+        ASST["Assistant Node"]
+        GATE["Approval Gate (HITL interrupt)"]
+        EXEC["Tool Executor Node"]
+        CHECKPOINTER[("SqliteSaver (data/jarvis_studio.db)")]
+    end
+
+    subgraph CORE ["4. Multi-Provider LLM & 5. Tools"]
+        LLM["LLMFactory (OpenAI / DeepSeek / Ollama)"]
+        REGISTRY["ToolRegistry (Built-in + MCP Tools)"]
+    end
+
+    CLI --> AGENT_SVC
+    CLIENT --> API --> AGENT_SVC
+    AGENT_SVC --> SESS_SVC
+    AGENT_SVC --> RUNTIME
+    ASST --> GATE --> EXEC --> ASST
+    RUNTIME -. Persistent State .-> CHECKPOINTER
+    ASST --> LLM
+    GATE & EXEC --> REGISTRY
 ```
 
 ---
 
-## 4. Quickstart
+## 4. Project Structure
+
+```text
+JarvisStudio/
+├── docs/                        # Complete technical documentation hub
+│   ├── architecture/            # System blueprints and execution lifecycle
+│   ├── design/                  # HITL, Tool system, and LLM adapter specs
+│   ├── development/             # Setup, testing, and configuration guide
+│   ├── adr/                     # Architecture Decision Records (ADRs)
+│   └── roadmap/                 # Phase-by-phase engineering milestones
+├── config/                      # YAML runtime settings and MCP definitions
+├── src/jarvis_studio/
+│   ├── api/                     # FastAPI app, routers (/chat, /approvals), schemas
+│   ├── service/                 # AgentService and SessionService (Decoupled orchestration)
+│   ├── agent/                   # LangGraph StateGraph, nodes, HITL manager, checkpointers
+│   ├── tools/                   # ToolRegistry, built-in tools (file, shell), MCP adapter
+│   ├── core/                    # LLMFactory, observability (Loguru, tracer), errors
+│   ├── config/                  # Pydantic Settings and environment validation
+│   └── cli/                     # Click-based developer CLI
+├── tests/                       # Automated pytest suite (13 integration & unit tests)
+├── .env.example                 # Comprehensive environment variable template
+└── pyproject.toml               # uv / PEP 621 build configuration
+```
+
+---
+
+## 5. Quickstart
 
 ### Prerequisites
-- Python 3.12+
+- Python `3.12+`
 - [`uv`](https://docs.astral.sh/uv/) package manager
 
-### Installation
+### 1. Installation
 ```bash
-# Clone the repository
+# Clone repository
 git clone <repo-url>
 cd JarvisStudio
 
-# Install all dependencies (including dev tools)
+# Install all dependencies into virtual environment
 uv sync --extra dev
 
 # Copy environment configuration
 cp .env.example .env
 ```
 
-### Running Tests
+### 2. Configure Credentials
+Edit `.env` to configure your preferred LLM provider:
+```bash
+DEFAULT_LLM_PROVIDER=openai
+OPENAI_API_KEY=your_api_key_here
+
+# Or use DeepSeek
+# DEFAULT_LLM_PROVIDER=deepseek
+# DEEPSEEK_API_KEY=your_deepseek_key
+
+# Or use local Ollama
+# DEFAULT_LLM_PROVIDER=ollama
+# OLLAMA_MODEL_NAME=llama3.1:8b
+```
+
+### 3. Verify Setup
+Run the automated test suite:
 ```bash
 uv run pytest
 ```
 
-### Starting the Server
+### 4. Run the Project
 ```bash
-uv run uvicorn jarvis_studio.api.app:create_app --factory --reload --port 8000
+# View active status and registered tools
+uv run jarvis-studio info
+
+# Start the FastAPI REST Gateway (Swagger docs at http://localhost:8000/docs)
+uv run jarvis-studio serve --port 8000 --reload
+
+# Start an interactive terminal chat session
+uv run jarvis-studio chat
 ```
+
+---
+
+## 6. Documentation Hub
+
+Detailed specifications and architectural guides are organized in the [`docs/`](file:///d:/myProject/JarvisStudio/docs/README.md) directory:
+
+| Document | Purpose |
+| :--- | :--- |
+| **[System Architecture](file:///d:/myProject/JarvisStudio/docs/architecture/system-architecture.md)** | 5-tier decoupled architecture, component boundaries, and data flow |
+| **[Execution Lifecycle](file:///d:/myProject/JarvisStudio/docs/architecture/execution-lifecycle.md)** | StateGraph runtime flow, checkpoint persistence, and resume mechanics |
+| **[HITL Specification](file:///d:/myProject/JarvisStudio/docs/design/hitl-specification.md)** | Human-in-the-loop state machine, interrupt protocol, and REST API |
+| **[Tool System & Safety](file:///d:/myProject/JarvisStudio/docs/design/tool-system-and-safety.md)** | `RiskLevel` matrix, built-in tools catalog, and MCP schema bridge |
+| **[LLM Adapter Layer](file:///d:/myProject/JarvisStudio/docs/design/llm-adapter-layer.md)** | `LLMFactory`, provider configurations, and protocol neutrality |
+| **[Configuration Reference](file:///d:/myProject/JarvisStudio/docs/development/configuration-reference.md)** | Full catalog of `.env` variables and YAML configuration keys |
+| **[Setup & Development](file:///d:/myProject/JarvisStudio/docs/development/setup-and-development.md)** | Development environment, testing, and contribution standards |
+| **[Architecture Decisions (ADRs)](file:///d:/myProject/JarvisStudio/docs/adr/)** | Accepted architectural decisions (LangGraph, Decoupling, HITL) |
+| **[Engineering Roadmap](file:///d:/myProject/JarvisStudio/docs/roadmap/engineering-roadmap.md)** | Milestone schedule from M0 (Scaffolding) to M5 (Production UI) |
+
+---
+
+## 7. Engineering Roadmap Summary
+
+- **Milestone 0: Architecture Baseline & Scaffolding** `[Completed]`  
+  5-tier decoupled architecture, Python 3.12 + `uv` environment, automated test scaffold.
+- **Milestone 1: Core LangGraph Agent & Multi-Provider Engine** `[In Progress]`  
+  `LLMFactory` (OpenAI, DeepSeek, Ollama), `AgentState` schema, basic reasoning loop `[Done]`; live Anthropic/Gemini key tests `[In Progress]`.
+- **Milestone 2: Tool Subsystem & MCP Client Integration** `[In Progress]`  
+  `ToolRegistry`, built-in file/shell tools, dynamic MCP schema converter `[Done]`; live stdio/SSE sub-process manager `[In Progress]`.
+- **Milestone 3: Human-in-the-Loop & Execution Checkpoints** `[In Progress]`  
+  LangGraph `interrupt()`, SQLite checkpointing, approval REST API `[Done]`; approval timeout policies `[Planned]`.
+- **Milestone 4: Personal Memory & Local Knowledge Base (RAG)** `[Planned]`  
+  Long-Term Memory (LTM), semantic user profile, local vector store with `sqlite-vec`.
+- **Milestone 5: Application Gateway, Streaming & User Interface** `[Planned]`  
+  Server-Sent Events (SSE) token streaming, Web UI frontend (Chat + HITL Review Center), containerization.
+
+---
+
+## 8. License
+
+This project is licensed under the [MIT License](LICENSE).
