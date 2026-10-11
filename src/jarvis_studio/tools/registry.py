@@ -44,6 +44,13 @@ class ToolRegistry:
         """Return all registered tools."""
         return list(self._tools.values())
 
+    def unregister(self, name: str) -> Optional[BaseTool]:
+        """Remove a tool by name from the registry."""
+        tool = self._tools.pop(name, None)
+        if tool:
+            logger.info(f"Unregistered tool '{name}'")
+        return tool
+
     def requires_approval(self, tool_name: str) -> bool:
         """Check whether invoking the given tool requires human confirmation."""
         tool = self._tools.get(tool_name)

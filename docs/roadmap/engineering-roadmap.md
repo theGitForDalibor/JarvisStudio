@@ -13,9 +13,9 @@
 
 ```mermaid
 flowchart LR
-    M0["M0: 架构基线与脚手架\n(已完成)"] --> M1["M1: 核心 Agent 与模型底座\n(进行中)"]
-    M1 --> M2["M2: 工具子系统与 MCP\n(进行中)"]
-    M2 --> M3["M3: HITL 与持久化检查点\n(进行中)"]
+    M0["M0: 架构基线与脚手架\n(已完成)"] --> M1["M1: 核心 Agent 与模型底座\n(已完成)"]
+    M1 --> M2["M2: 工具子系统与 MCP\n(已完成)"]
+    M2 --> M3["M3: HITL 与持久化检查点\n(已完成)"]
     M3 --> M4["M4: 长期记忆与 RAG\n(计划中)"]
     M4 --> M5["M5: Web 界面与流式输出\n(计划中)"]
 ```
@@ -62,11 +62,11 @@ flowchart LR
 - [x] 内置高频终端操作工具：
   - [x] `execute_shell_command` (高危执行、超时熔断保护、强制 HITL 确认)
 - [x] 动态 MCP JSON Schema 强类型转换器 (`MCPToolAdapter`, `create_dynamic_args_schema`)。
-- [~] Model Context Protocol (MCP) 客户端管理器：
+- [x] Model Context Protocol (MCP) 客户端管理器：
   - [x] 配置文件加载与解析 (`config/mcp_servers.json`)
-  - [ ] stdio 长连接子进程生命周期管理
-  - [ ] SSE 远程传输客户端支持
-  - [ ] 本地与工作区 MCP 服务自发现机制
+  - [x] stdio 长连接子进程生命周期管理 (`MCPConnection`)
+  - [x] SSE 远程传输客户端支持
+  - [x] 本地与工作区 MCP 服务自发现机制 (`auto_discover_configs`)
 
 ---
 

@@ -1,4 +1,4 @@
-"""System information and health check endpoints."""
+"""System information, health check, and MCP inspection endpoints."""
 
 from typing import Any, Dict, List
 from fastapi import APIRouter
@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from jarvis_studio.api.schemas.response import SystemStatusResponse
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.tools.base import get_tool_metadata
+from jarvis_studio.tools.mcp.client import get_mcp_manager
 from jarvis_studio.tools.registry import get_default_registry
 
 router = APIRouter(prefix="/system", tags=["System"])
@@ -22,6 +23,9 @@ async def system_status() -> SystemStatusResponse:
     """Retrieve runtime configuration and component health."""
     settings = get_settings()
     registry = get_default_registry()
+    mcp_mgr = get_mcp_manager()
+
+    active_count = len([c for c in mcp_mgr.connections.values() if c.is_connected])
 
     return SystemStatusResponse(
         version=settings.app.version,
@@ -29,7 +33,7 @@ async def system_status() -> SystemStatusResponse:
         default_model=settings.llm.default_model,
         hitl_enabled=settings.security.hitl_enabled,
         registered_tools_count=len(registry.list_tools()),
-        active_mcp_servers_count=0,
+        active_mcp_servers_count=active_count,
     )
 
 
@@ -50,3 +54,9 @@ async def list_registered_tools() -> List[Dict[str, Any]]:
             }
         )
     return tools_info
+
+
+@router.get("/mcp")
+async def get_mcp_status() -> Dict[str, Any]:
+    """Inspect configured MCP servers and active connections."""
+    return get_mcp_manager().get_status()

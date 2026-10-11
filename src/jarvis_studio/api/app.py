@@ -10,6 +10,7 @@ from jarvis_studio.api.routes.system import router as system_router
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.tools.builtin import register_builtin_tools
+from jarvis_studio.tools.mcp.client import get_mcp_manager
 from jarvis_studio.tools.registry import get_default_registry
 
 
@@ -18,13 +19,25 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle hook."""
     settings = get_settings()
     logger.info(f"Starting {settings.app.name} v{settings.app.version} ({settings.app.environment})")
-    
+
     # Auto-register builtin tools
-    register_builtin_tools(get_default_registry())
-    
+    registry = get_default_registry()
+    register_builtin_tools(registry)
+
+    # Initialize enabled MCP servers
+    mcp_mgr = get_mcp_manager()
+    try:
+        await mcp_mgr.connect_and_register_all(registry)
+    except Exception as e:
+        logger.error(f"Error during MCP servers initialization: {e}")
+
     yield
 
     logger.info(f"Shutting down {settings.app.name}")
+    try:
+        await mcp_mgr.disconnect_all(registry)
+    except Exception as e:
+        logger.error(f"Error during MCP servers shutdown: {e}")
 
 
 def create_app() -> FastAPI:

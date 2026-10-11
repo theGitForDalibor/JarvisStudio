@@ -46,3 +46,13 @@ def test_list_tools(client):
     tool_names = [t["name"] for t in tools]
     assert "read_file" in tool_names
     assert "execute_shell_command" in tool_names
+
+
+def test_system_mcp_status(client):
+    """Verify MCP servers status inspection endpoint."""
+    response = client.get("/api/v1/system/mcp")
+    assert response.status_code == 200
+    data = response.json()
+    assert "servers" in data
+    assert "total_servers" in data
+    assert "active_servers" in data
