@@ -50,6 +50,14 @@ class AgentService:
         self.session_service = get_session_service()
         self.hitl_manager = get_hitl_manager()
 
+    def rebuild_graph(self, registry=None, model=None, checkpointer=None) -> None:
+        """Rebuild and recompile the StateGraph with updated tools or configuration."""
+        self.graph = build_agent_graph(
+            model=model,
+            registry=registry,
+            checkpointer=checkpointer,
+        )
+
     async def invoke_agent(
         self,
         thread_id: str,
