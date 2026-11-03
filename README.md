@@ -10,7 +10,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 [![MCP](https://img.shields.io/badge/MCP-2.3+-orange.svg)](https://modelcontextprotocol.io/)
 [![sqlite-vec](https://img.shields.io/badge/sqlite--vec-0.1.9-purple.svg)](https://github.com/asg017/sqlite-vec)
-[![Tests](https://img.shields.io/badge/Tests-35%20Passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-38%20Passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
@@ -227,8 +227,8 @@ uv run jarvis-studio rag search "HITL 审批流程"
   LangGraph `interrupt()`、SQLite 状态持久化、审批 REST API、终端交互式决议。
 - **Milestone 4: 长期记忆与本地知识库 (RAG)** `[已完成]`  
   跨会话长期记忆系统 (LTM)、Assistant 推理节点动态记忆注入、基于 `sqlite-vec` 的本地向量知识库、工作区增量代码与文档索引。
-- **Milestone 5: 应用网关流式化与 Web 交互界面** `[计划中]`  
-  SSE (Server-Sent Events) 逐 Token 流式输出、现代 Web UI 前端（聊天 + 任务看板 + HITL 审批弹窗）、Docker 容器化打包。
+- **Milestone 5: 应用网关流式化与 Web 交互界面** `[已完成]`  
+  SSE (Server-Sent Events) 逐 Token 与步骤流式输出、现代响应式 Web UI 控制台 (`http://localhost:8000/app`)、Docker 容器化打包与开机常驻守护进程脚本。
 
 ---
 

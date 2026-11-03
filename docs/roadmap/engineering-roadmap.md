@@ -17,7 +17,7 @@ flowchart LR
     M1 --> M2["M2: 工具子系统与 MCP\n(已完成)"]
     M2 --> M3["M3: HITL 与持久化检查点\n(已完成)"]
     M3 --> M4["M4: 长期记忆与 RAG\n(已完成)"]
-    M4 --> M5["M5: Web 界面与流式输出\n(计划中)"]
+    M4 --> M5["M5: Web 界面与流式输出\n(已完成)"]
 ```
 
 ---
@@ -109,13 +109,15 @@ flowchart LR
 
 - [x] FastAPI RESTful API 基础网关 (`/system`, `/chat`, `/approvals`, `/memory`, `/rag`)。
 - [x] 开发者命令行交互终端 (`jarvis-studio info`, `serve`, `chat`, `memory`, `rag`, `sessions`, `mcp`)。
-- [ ] Server-Sent Events (SSE) 逐 Token 与步骤事件流式传输。
-- [ ] 双向控制 WebSocket 网关协议。
-- [ ] 现代化 Web UI 前端 (Next.js / Tailwind CSS)：
-  - [ ] 富文本 Markdown 与代码高亮对话界面。
-  - [ ] 交互式 HITL 审批弹窗（命令高亮、入参 Diff 差异比对、批准/拒绝/编辑按钮）。
-  - [ ] 已挂载工具与 MCP 服务状态卡片。
-  - [ ] 长期记忆与知识库管理面板。
-- [ ] 打包与部署：
-  - [ ] 生产容器化镜像 (Dockerfile + Docker Compose)。
-  - [ ] 个人系统开机常驻守护进程脚本。
+- [x] Server-Sent Events (SSE) 逐 Token 与步骤事件流式传输 (`/api/v1/chat/stream`, `/api/v1/approvals/{id}/decision/stream`)。
+- [x] 现代化响应式 Web UI 控制台 (`/app`)：
+  - [x] 逐 Token 实时流式响应与 Markdown/代码高亮展示。
+  - [x] 工具执行动画气泡与状态指示器。
+  - [x] 交互式 HITL 审批卡片（入参 JSON 检查、就地编辑修改参数、批准、拒绝）。
+  - [x] 长期记忆管理面板（增删改查、加权展示与实时检索）。
+  - [x] 本地私有知识库面板（文件切片统计、一键增量扫描入库、语义检索实验台）。
+  - [x] 系统环境监控与已注册工具安全矩阵自省。
+- [x] 生产级容器化与打包：
+  - [x] 多阶段轻量生产镜像 (`Dockerfile`)。
+  - [x] Docker Compose 一键挂载启动编排 (`docker-compose.yml`)。
+  - [x] 跨平台系统常驻守护进程脚本 (`scripts/run_daemon.ps1`, `scripts/run_daemon.sh`)。

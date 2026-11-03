@@ -1,5 +1,6 @@
 """High-level Agent Application Service decoupling API/UI from LangGraph."""
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -65,7 +66,7 @@ class AgentService:
         run_id: str | None = None,
     ) -> AgentExecutionResult:
         """Execute the agent on a specific thread with user input."""
-        session = self.session_service.get_or_create_session(thread_id)
+        self.session_service.get_or_create_session(thread_id)
         effective_run_id = set_trace_context(thread_id, run_id)
 
         config = {"configurable": {"thread_id": thread_id}}
@@ -123,6 +124,84 @@ class AgentService:
                 error=str(e),
             )
 
+    async def stream_agent(
+        self,
+        thread_id: str,
+        user_message: str,
+        run_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream token-by-token and tool execution steps from the StateGraph."""
+        self.session_service.get_or_create_session(thread_id)
+        effective_run_id = set_trace_context(thread_id, run_id)
+        config = {"configurable": {"thread_id": thread_id}}
+        input_state = {
+            "messages": [HumanMessage(content=user_message)],
+            "run_context": {
+                "session_id": thread_id,
+                "run_id": effective_run_id,
+            },
+        }
+
+        try:
+            async for event in self.graph.astream_events(
+                input_state, config=config, version="v2"
+            ):
+                kind = event.get("event")
+                if kind == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        yield {"event": "token", "data": {"token": str(chunk.content)}}
+                elif kind == "on_tool_start":
+                    yield {
+                        "event": "tool_start",
+                        "data": {
+                            "tool": event.get("name"),
+                            "input": event.get("data", {}).get("input"),
+                        },
+                    }
+                elif kind == "on_tool_end":
+                    raw_out = event.get("data", {}).get("output")
+                    out_str = str(raw_out)[:2000] if raw_out is not None else ""
+                    yield {
+                        "event": "tool_end",
+                        "data": {
+                            "tool": event.get("name"),
+                            "output": out_str,
+                        },
+                    }
+
+            state_snapshot = await self.graph.aget_state(config)
+            if state_snapshot.next:
+                tasks = state_snapshot.tasks
+                interrupt_val = None
+                for task in tasks:
+                    if task.interrupts:
+                        interrupt_val = task.interrupts[0].value
+                        break
+                yield {
+                    "event": "approval_required",
+                    "data": interrupt_val or {"status": "pending_approval"},
+                }
+            else:
+                messages = state_snapshot.values.get("messages", [])
+                output = ""
+                for m in reversed(messages):
+                    if isinstance(m, AIMessage) and m.content:
+                        output = str(m.content)
+                        break
+                yield {
+                    "event": "completed",
+                    "data": {
+                        "thread_id": thread_id,
+                        "run_id": effective_run_id,
+                        "output_text": output,
+                    },
+                }
+
+        except Exception as e:
+            logger.error(f"Error during streaming execution on thread {thread_id}: {e}")
+            yield {"event": "error", "data": {"error": str(e)}}
+
     async def resume_approval(
         self,
         thread_id: str,
@@ -138,7 +217,6 @@ class AgentService:
         )
 
         try:
-            # Resume graph using Command(resume=decision_dict)
             resume_payload = {
                 "decision": decision.decision,
                 "reason": decision.reason,
@@ -149,7 +227,6 @@ class AgentService:
                 config=config,
             )
 
-            # Check if another interrupt followed
             state_snapshot = await self.graph.aget_state(config)
             if state_snapshot.next:
                 tasks = state_snapshot.tasks
@@ -186,6 +263,80 @@ class AgentService:
                 status="error",
                 error=str(e),
             )
+
+    async def stream_resume_approval(
+        self,
+        thread_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Resume an interrupted agent run with real-time SSE event streaming."""
+        effective_run_id = set_trace_context(thread_id)
+        config = {"configurable": {"thread_id": thread_id}}
+        resume_payload = {
+            "decision": decision.decision,
+            "reason": decision.reason,
+            "modified_arguments": decision.modified_arguments,
+        }
+
+        try:
+            async for event in self.graph.astream_events(
+                Command(resume=resume_payload), config=config, version="v2"
+            ):
+                kind = event.get("event")
+                if kind == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        yield {"event": "token", "data": {"token": str(chunk.content)}}
+                elif kind == "on_tool_start":
+                    yield {
+                        "event": "tool_start",
+                        "data": {
+                            "tool": event.get("name"),
+                            "input": event.get("data", {}).get("input"),
+                        },
+                    }
+                elif kind == "on_tool_end":
+                    raw_out = event.get("data", {}).get("output")
+                    out_str = str(raw_out)[:2000] if raw_out is not None else ""
+                    yield {
+                        "event": "tool_end",
+                        "data": {
+                            "tool": event.get("name"),
+                            "output": out_str,
+                        },
+                    }
+
+            state_snapshot = await self.graph.aget_state(config)
+            if state_snapshot.next:
+                tasks = state_snapshot.tasks
+                interrupt_val = None
+                for task in tasks:
+                    if task.interrupts:
+                        interrupt_val = task.interrupts[0].value
+                        break
+                yield {
+                    "event": "approval_required",
+                    "data": interrupt_val or {"status": "pending_approval"},
+                }
+            else:
+                messages = state_snapshot.values.get("messages", [])
+                output = ""
+                for m in reversed(messages):
+                    if isinstance(m, AIMessage) and m.content:
+                        output = str(m.content)
+                        break
+                yield {
+                    "event": "completed",
+                    "data": {
+                        "thread_id": thread_id,
+                        "run_id": effective_run_id,
+                        "output_text": output,
+                    },
+                }
+        except Exception as e:
+            logger.error(f"Error during streaming resume on thread {thread_id}: {e}")
+            yield {"event": "error", "data": {"error": str(e)}}
 
 
 _global_agent_service: AgentService | None = None

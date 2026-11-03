@@ -1,0 +1,22 @@
+services:
+  jarvis-studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jarvis-studio
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=production
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+      - CHECKPOINT_BACKEND=sqlite
+      - SQLITE_DB_PATH=/app/data/jarvis_studio.db
+      - VECTOR_DB_PATH=/app/data/jarvis_vec.db
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config

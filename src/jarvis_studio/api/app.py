@@ -1,9 +1,12 @@
 """FastAPI Application factory for Jarvis Studio."""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from jarvis_studio.api.routes.approvals import router as approvals_router
 from jarvis_studio.api.routes.chat import router as chat_router
@@ -73,13 +76,25 @@ def create_app() -> FastAPI:
     app.include_router(memory_router, prefix=api_prefix)
     app.include_router(rag_router, prefix=api_prefix)
 
+    static_dir = Path(__file__).parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    @app.get("/app", response_class=FileResponse, include_in_schema=False)
+    async def web_ui():
+        """Serve the modern Jarvis Studio Single-Page Web UI."""
+        index_file = static_dir / "index.html"
+        return FileResponse(index_file)
+
     @app.get("/")
     async def root():
+        """Root API metadata and entrypoints."""
         return {
             "name": settings.app.name,
             "version": settings.app.version,
             "status": "online",
             "docs_url": "/docs",
+            "app_url": "/app",
         }
 
     return app

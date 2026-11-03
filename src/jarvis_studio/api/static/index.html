@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jarvis Studio - 个人生产级 AI 操作系统助理</title>
+  <!-- Tailwind CSS & Fonts -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' },
+            darkbg: '#0f172a',
+            darkcard: '#1e293b',
+            darkborder: '#334155'
+          }
+        }
+      }
+    }
+  </script>
+  <!-- Marked.js & Highlight.js for Markdown & Code -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <style>
+    /* Custom Scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    .markdown-body pre { background-color: #0f172a !important; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin: 0.5rem 0; border: 1px solid #334155; }
+    .markdown-body code { font-family: monospace; }
+    .markdown-body p { margin-bottom: 0.5rem; line-height: 1.6; }
+    .markdown-body ul, .markdown-body ol { margin-left: 1.5rem; margin-bottom: 0.5rem; }
+    .markdown-body ul { list-style-type: disc; }
+    .markdown-body ol { list-style-type: decimal; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 flex flex-col h-screen overflow-hidden">
+
+  <!-- Top Navigation Header -->
+  <header class="h-14 border-b border-slate-800 bg-slate-900/80 backdrop-blur px-4 flex items-center justify-between shrink-0 z-20">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">
+        J
+      </div>
+      <div>
+        <h1 class="font-bold text-sm tracking-wide flex items-center gap-2">
+          Jarvis Studio
+          <span class="text-xs font-normal px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">v0.1.0</span>
+        </h1>
+      </div>
+    </div>
+
+    <!-- Active Navigation Tabs -->
+    <nav class="flex items-center space-x-1 bg-slate-800/60 p-1 rounded-lg border border-slate-700/50 text-xs font-medium">
+      <button onclick="switchTab('chat')" id="tab-btn-chat" class="px-3 py-1.5 rounded-md transition bg-blue-600 text-white shadow">
+        💬 对话终端
+      </button>
+      <button onclick="switchTab('approvals')" id="tab-btn-approvals" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white flex items-center gap-1.5">
+        🛡️ HITL 审批 <span id="pending-badge" class="hidden px-1.5 py-0.2 text-[10px] bg-red-500 text-white rounded-full">0</span>
+      </button>
+      <button onclick="switchTab('memory')" id="tab-btn-memory" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        🧠 长期记忆 (LTM)
+      </button>
+      <button onclick="switchTab('rag')" id="tab-btn-rag" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        📚 本地知识库 (RAG)
+      </button>
+      <button onclick="switchTab('system')" id="tab-btn-system" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        ⚙️ 系统工具
+      </button>
+    </nav>
+
+    <!-- Top Status Info -->
+    <div class="flex items-center gap-3 text-xs">
+      <div class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-300">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="header-provider">LLM: loading...</span>
+      </div>
+      <a href="/docs" target="_blank" class="text-slate-400 hover:text-blue-400 transition" title="OpenAPI Docs">API 文档 ↗</a>
+    </div>
+  </header>
+
+  <!-- Main View Container -->
+  <main class="flex-1 relative overflow-hidden flex flex-col">
+
+    <!-- 1. CHAT TAB -->
+    <div id="view-chat" class="flex-1 flex flex-col h-full overflow-hidden">
+      <!-- Session Bar -->
+      <div class="h-10 px-4 bg-slate-900/50 border-b border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+        <div class="flex items-center gap-2">
+          <span>当前会话:</span>
+          <span id="current-thread-id" class="font-mono text-blue-400 font-medium">default</span>
+          <button onclick="newSession()" class="text-xs text-slate-400 hover:text-white underline ml-2">+ 新建会话</button>
+        </div>
+        <div class="flex items-center gap-3">
+          <span id="streaming-indicator" class="hidden text-amber-400 flex items-center gap-1 font-mono">
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span> 思考生成中...
+          </span>
+          <button onclick="clearChatUI()" class="hover:text-red-400 transition">清空屏幕</button>
+        </div>
+      </div>
+
+      <!-- Messages Stream Window -->
+      <div id="messages-container" class="flex-1 overflow-y-auto p-4 space-y-4">
+        <!-- Welcome Message -->
+        <div class="flex items-start gap-3 max-w-4xl mx-auto">
+          <div class="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center font-bold text-xs shrink-0">
+            AI
+          </div>
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm leading-relaxed max-w-2xl shadow-sm">
+            <p class="font-medium text-slate-200 mb-1">你好！我是 Jarvis Studio 个人 AI 操作系统助理。</p>
+            <p class="text-slate-400 text-xs">我已接入 <strong>LangGraph</strong> 运行时、<strong>HITL 安全审批</strong>、<strong>长期记忆 (LTM)</strong> 与 <strong>本地轻量向量知识库 (sqlite-vec)</strong>。请随时向我发送任务！</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- HITL Interception Floating Banner -->
+      <div id="hitl-modal-card" class="hidden px-4 py-3 bg-red-950/80 border-t border-b border-red-500/30 backdrop-blur max-w-4xl mx-auto w-full my-2 rounded-xl shadow-lg shadow-red-950/50">
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center gap-2 text-red-400 font-semibold text-sm">
+            <span>⚠️ 敏感操作拦截 (Human-in-the-Loop)</span>
+            <span id="hitl-tool-tag" class="px-2 py-0.5 text-xs bg-red-900/60 rounded border border-red-500/40 text-red-200"></span>
+          </div>
+          <span class="text-xs text-red-300">需开发者人工审查授权</span>
+        </div>
+        <p id="hitl-desc" class="text-xs text-slate-300 mb-2"></p>
+        <div class="mb-3">
+          <div class="text-[11px] text-slate-400 mb-1">执行入参:</div>
+          <textarea id="hitl-args-editor" class="w-full bg-slate-950 text-xs font-mono p-2 rounded border border-slate-700 text-slate-200 h-20 outline-none focus:border-red-400 resize-none"></textarea>
+        </div>
+        <div class="flex items-center justify-end gap-2 text-xs">
+          <input type="text" id="hitl-reject-reason" placeholder="拒绝原因 (可选)" class="bg-slate-900 text-xs px-2.5 py-1.5 rounded border border-slate-700 text-slate-200 flex-1 outline-none">
+          <button onclick="resolveApproval('reject')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-medium transition">拒绝 (Reject)</button>
+          <button onclick="resolveApproval('modify')" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium transition">改参后恢复 (Modify)</button>
+          <button onclick="resolveApproval('approve')" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium shadow transition">批准执行 (Approve)</button>
+        </div>
+      </div>
+
+      <!-- Chat Input Area -->
+      <div class="p-4 bg-slate-900 border-t border-slate-800">
+        <form id="chat-form" onsubmit="handleSend(event)" class="max-w-4xl mx-auto flex items-end gap-2">
+          <textarea
+            id="chat-input"
+            rows="2"
+            placeholder="输入自然语言指令（例如：'请在 docs 知识库中检索关于 HITL 的设计' 或 '帮我保存偏好：使用 Python 3.12'）..."
+            class="flex-1 bg-slate-950 text-sm text-slate-100 rounded-xl p-3 border border-slate-800 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-none"
+            onkeydown="if(event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleSend(event); }"
+          ></textarea>
+          <button
+            type="submit"
+            id="send-btn"
+            class="h-11 px-5 bg-blue-600 hover:bg-blue-500 text-white font-medium text-sm rounded-xl transition flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/20 disabled:opacity-50"
+          >
+            发送 ↵
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- 2. APPROVALS TAB -->
+    <div id="view-approvals" class="hidden flex-1 p-6 overflow-y-auto max-w-5xl mx-auto w-full">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-lg font-bold">HITL 人工审批中心</h2>
+          <p class="text-xs text-slate-400">所有触发系统高危防护等级（HIGH/MEDIUM）的工具操作均挂起等待人工审核。</p>
+        </div>
+        <button onclick="loadApprovals()" class="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-700 rounded transition">刷新</button>
+      </div>
+      <div id="approvals-list" class="space-y-3">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- 3. MEMORY TAB -->
+    <div id="view-memory" class="hidden flex-1 p-6 overflow-y-auto max-w-5xl mx-auto w-full">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-lg font-bold">长期个人记忆 (Long-Term Memory)</h2>
+          <p class="text-xs text-slate-400">跨会话持久化的开发者习惯、偏好与项目约定，在每次对话前自动动态注入系统提示词。</p>
+        </div>
+        <button onclick="openAddMemoryModal()" class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition">+ 新增记忆</button>
+      </div>
+
+      <!-- Search Memory -->
+      <div class="flex gap-2 mb-4">
+        <input type="text" id="memory-search-input" placeholder="输入关键词检索长期记忆..." class="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-blue-500">
+        <button onclick="searchMemory()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded transition">搜索</button>
+        <button onclick="loadMemories()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs rounded transition">全部</button>
+      </div>
+
+      <div id="memory-list" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- 4. RAG TAB -->
+    <div id="view-rag" class="hidden flex-1 p-6 overflow-y-auto max-w-5xl mx-auto w-full">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-lg font-bold">本地私有知识库 (Local RAG)</h2>
+          <p class="text-xs text-slate-400">基于 sqlite-vec 向量虚拟表与 SHA-256 增量文件哈希，提供本地无额外服务依赖的高效代码与文档索引检索。</p>
+        </div>
+        <button onclick="triggerIndexModal()" class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition">⚡ 扫描入库 (Index)</button>
+      </div>
+
+      <!-- Semantic Search Test Box -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 mb-6">
+        <h3 class="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">语义向量检索实验台</h3>
+        <div class="flex gap-2 mb-3">
+          <input type="text" id="rag-query-input" placeholder="输入自然语言或技术术语进行向量检索 (如: '如何配置 MCP 服务器')..." class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-blue-500">
+          <button onclick="testRagSearch()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg font-medium transition">向量搜索</button>
+        </div>
+        <div id="rag-results" class="space-y-2 max-h-60 overflow-y-auto"></div>
+      </div>
+
+      <!-- Indexed Files List -->
+      <h3 class="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">已索引文件列表</h3>
+      <div id="rag-files-table" class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden text-xs">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- 5. SYSTEM TAB -->
+    <div id="view-system" class="hidden flex-1 p-6 overflow-y-auto max-w-5xl mx-auto w-full">
+      <div class="mb-6">
+        <h2 class="text-lg font-bold mb-1">系统环境与已注册工具安全矩阵</h2>
+        <p class="text-xs text-slate-400">监控当前活跃模型提供商、安全三级风险控制状态与 MCP 外部长连接服务。</p>
+      </div>
+
+      <!-- Cards Grid -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div class="text-xs text-slate-400 mb-1">LLM 引擎</div>
+          <div id="sys-model" class="text-sm font-bold text-blue-400">-</div>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div class="text-xs text-slate-400 mb-1">HITL 安全防护</div>
+          <div id="sys-hitl" class="text-sm font-bold text-emerald-400">-</div>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div class="text-xs text-slate-400 mb-1">活跃 MCP 连接</div>
+          <div id="sys-mcp" class="text-sm font-bold text-amber-400">-</div>
+        </div>
+      </div>
+
+      <!-- Tools Table -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+        <div class="p-3 border-b border-slate-800 font-semibold text-xs text-slate-300">
+          已挂载工具 (Tool Registry)
+        </div>
+        <div id="sys-tools-list" class="divide-y divide-slate-800 text-xs">
+          <!-- Rendered by JS -->
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Modal: Add Memory -->
+  <div id="add-memory-modal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-md w-full shadow-2xl">
+      <h3 class="text-sm font-bold mb-3">新增长期记忆 / 开发者画像</h3>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-400 mb-1">记忆分类</label>
+          <select id="new-mem-cat" class="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-200 outline-none">
+            <option value="preference">偏好 (preference) - 编码风格、常用工具</option>
+            <option value="profile">画像 (profile) - 操作系统、技术栈</option>
+            <option value="project">项目 (project) - 架构规则、约定</option>
+            <option value="fact">事实 (fact) - 关键常数、部署地址</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">内容描述</label>
+          <textarea id="new-mem-content" rows="3" placeholder="例如：在编写 Python 代码时，严格使用类型注解与 Ruff 格式化规范..." class="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-200 outline-none"></textarea>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 mt-4 text-xs">
+        <button onclick="closeAddMemoryModal()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded transition">取消</button>
+        <button onclick="submitNewMemory()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Inline Application Logic -->
+  <script>
+    let activeTab = 'chat';
+    let currentThreadId = 'session_' + Math.random().toString(36).substring(2, 9);
+    let activePendingApproval = null;
+    let isStreaming = false;
+
+    document.getElementById('current-thread-id').innerText = currentThreadId;
+
+    // --- Tab Switching ---
+    function switchTab(tab) {
+      ['chat', 'approvals', 'memory', 'rag', 'system'].forEach(t => {
+        document.getElementById(`view-${t}`).classList.add('hidden');
+        const btn = document.getElementById(`tab-btn-${t}`);
+        btn.classList.remove('bg-blue-600', 'text-white', 'shadow');
+        btn.classList.add('text-slate-400');
+      });
+
+      document.getElementById(`view-${tab}`).classList.remove('hidden');
+      const activeBtn = document.getElementById(`tab-btn-${tab}`);
+      activeBtn.classList.remove('text-slate-400');
+      activeBtn.classList.add('bg-blue-600', 'text-white', 'shadow');
+      activeTab = tab;
+
+      if (tab === 'approvals') loadApprovals();
+      if (tab === 'memory') loadMemories();
+      if (tab === 'rag') loadRagDocs();
+      if (tab === 'system') loadSystemInfo();
+    }
+
+    function newSession() {
+      currentThreadId = 'session_' + Math.random().toString(36).substring(2, 9);
+      document.getElementById('current-thread-id').innerText = currentThreadId;
+      clearChatUI();
+    }
+
+    function clearChatUI() {
+      const container = document.getElementById('messages-container');
+      container.innerHTML = '';
+      hideHitlCard();
+    }
+
+    // --- Chat & SSE Streaming ---
+    async function handleSend(e) {
+      if (e) e.preventDefault();
+      if (isStreaming) return;
+
+      const input = document.getElementById('chat-input');
+      const message = input.value.trim();
+      if (!message) return;
+
+      input.value = '';
+      hideHitlCard();
+
+      // Render User Message
+      appendMessage('user', message);
+
+      // Start Assistant Message with live cursor
+      const aiMsgEl = appendMessage('assistant', '');
+      const contentEl = aiMsgEl.querySelector('.msg-content');
+      const statusIndicator = document.getElementById('streaming-indicator');
+      statusIndicator.classList.remove('hidden');
+      isStreaming = true;
+
+      let fullResponseText = '';
+
+      try {
+        const response = await fetch('/api/v1/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: message,
+            session_id: currentThreadId
+          })
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // keep last unfinished piece
+
+          let currentEvent = 'message';
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              currentEvent = line.substring(6).trim();
+            } else if (line.startsWith('data:')) {
+              const rawData = line.substring(5).trim();
+              if (!rawData) continue;
+              try {
+                const parsed = JSON.parse(rawData);
+                handleStreamEvent(currentEvent, parsed, contentEl, () => {
+                  fullResponseText += (parsed.token || '');
+                  contentEl.innerHTML = marked.parse(fullResponseText);
+                  hljs.highlightAll();
+                });
+              } catch (err) {
+                console.error("Error parsing event:", err, rawData);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        contentEl.innerHTML += `<div class="text-red-400 font-mono text-xs mt-2">[网络/执行错误: ${err}]</div>`;
+      } finally {
+        statusIndicator.classList.add('hidden');
+        isStreaming = false;
+        // Refresh approvals in case one was queued
+        checkPendingApprovals();
+      }
+    }
+
+    function handleStreamEvent(event, data, contentEl, onToken) {
+      if (event === 'token') {
+        onToken();
+      } else if (event === 'tool_start') {
+        const toolBubble = document.createElement('div');
+        toolBubble.className = "text-[11px] font-mono text-amber-400 bg-slate-950/60 border border-amber-500/30 px-2 py-1 rounded inline-block my-1";
+        toolBubble.innerText = `⚙️ [调用工具] ${data.tool}`;
+        contentEl.appendChild(toolBubble);
+      } else if (event === 'tool_end') {
+        const finishBubble = document.createElement('div');
+        finishBubble.className = "text-[11px] font-mono text-emerald-400 bg-slate-950/60 border border-emerald-500/30 px-2 py-1 rounded inline-block my-1 ml-2";
+        finishBubble.innerText = `✓ [完成] ${data.tool}`;
+        contentEl.appendChild(finishBubble);
+      } else if (event === 'approval_required') {
+        showHitlCard(data);
+      } else if (event === 'error') {
+        contentEl.innerHTML += `<div class="text-red-400 text-xs mt-1">❌ 错误: ${data.error}</div>`;
+      }
+    }
+
+    function appendMessage(role, text) {
+      const container = document.getElementById('messages-container');
+      const wrapper = document.createElement('div');
+      wrapper.className = "flex items-start gap-3 max-w-4xl mx-auto";
+
+      const avatar = document.createElement('div');
+      avatar.className = `w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
+        role === 'user' ? 'bg-indigo-600 text-white' : 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
+      }`;
+      avatar.innerText = role === 'user' ? '我' : 'AI';
+
+      const bubble = document.createElement('div');
+      bubble.className = `rounded-xl p-4 text-sm max-w-2xl shadow-sm ${
+        role === 'user' ? 'bg-indigo-950/70 border border-indigo-800 text-indigo-100' : 'bg-slate-900 border border-slate-800 text-slate-200'
+      }`;
+
+      const content = document.createElement('div');
+      content.className = "msg-content markdown-body";
+      content.innerHTML = text ? marked.parse(text) : '<span class="inline-block w-2 h-4 bg-blue-500 animate-pulse"></span>';
+
+      bubble.appendChild(content);
+      wrapper.appendChild(avatar);
+      wrapper.appendChild(bubble);
+      container.appendChild(wrapper);
+      container.scrollTop = container.scrollHeight;
+
+      return wrapper;
+    }
+
+    // --- HITL Modal & Floating Card ---
+    function showHitlCard(approvalData) {
+      activePendingApproval = approvalData;
+      const card = document.getElementById('hitl-modal-card');
+      document.getElementById('hitl-tool-tag').innerText = approvalData.tool_name || 'Action';
+      document.getElementById('hitl-desc').innerText = approvalData.description || '执行高风险操作，需要人工确认。';
+      document.getElementById('hitl-args-editor').value = JSON.stringify(approvalData.arguments || {}, null, 2);
+      card.classList.remove('hidden');
+    }
+
+    function hideHitlCard() {
+      document.getElementById('hitl-modal-card').classList.add('hidden');
+      activePendingApproval = null;
+    }
+
+    async function resolveApproval(decision) {
+      if (!activePendingApproval) return;
+
+      const approvalId = activePendingApproval.approval_id;
+      const reason = document.getElementById('hitl-reject-reason').value;
+      let modifiedArgs = null;
+
+      if (decision === 'modify') {
+        try {
+          modifiedArgs = JSON.parse(document.getElementById('hitl-args-editor').value);
+        } catch (e) {
+          alert("入参不是合法 JSON，请修改后再提交！");
+          return;
+        }
+      }
+
+      hideHitlCard();
+
+      // Start streaming response for resumption
+      const aiMsgEl = appendMessage('assistant', '');
+      const contentEl = aiMsgEl.querySelector('.msg-content');
+      document.getElementById('streaming-indicator').classList.remove('hidden');
+      isStreaming = true;
+
+      let fullResponseText = '';
+
+      try {
+        const response = await fetch(`/api/v1/approvals/${approvalId}/decision/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            thread_id: currentThreadId,
+            decision: decision,
+            reason: reason,
+            modified_arguments: modifiedArgs
+          })
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+
+          let currentEvent = 'message';
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              currentEvent = line.substring(6).trim();
+            } else if (line.startsWith('data:')) {
+              const rawData = line.substring(5).trim();
+              if (!rawData) continue;
+              const parsed = JSON.parse(rawData);
+              handleStreamEvent(currentEvent, parsed, contentEl, () => {
+                fullResponseText += (parsed.token || '');
+                contentEl.innerHTML = marked.parse(fullResponseText);
+                hljs.highlightAll();
+              });
+            }
+          }
+        }
+      } catch (err) {
+        contentEl.innerHTML += `<div class="text-red-400 text-xs">恢复失败: ${err}</div>`;
+      } finally {
+        document.getElementById('streaming-indicator').classList.add('hidden');
+        isStreaming = false;
+        checkPendingApprovals();
+      }
+    }
+
+    async function checkPendingApprovals() {
+      try {
+        const res = await fetch('/api/v1/approvals');
+        const list = await res.json();
+        const badge = document.getElementById('pending-badge');
+        if (list.length > 0) {
+          badge.innerText = list.length;
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+      } catch (e) {}
+    }
+
+    async function loadApprovals() {
+      const listEl = document.getElementById('approvals-list');
+      listEl.innerHTML = '<div class="text-xs text-slate-500">加载中...</div>';
+      try {
+        const res = await fetch('/api/v1/approvals');
+        const list = await res.json();
+        if (list.length === 0) {
+          listEl.innerHTML = '<div class="text-xs text-slate-500 bg-slate-900 border border-slate-800 p-8 rounded-xl text-center">当前暂无待审批请求。所有工具执行均处于放行或静息状态。</div>';
+          return;
+        }
+        listEl.innerHTML = list.map(item => `
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-2">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-sm text-red-400">${item.tool_name}</span>
+              <span class="px-2 py-0.5 rounded text-[10px] bg-red-950 text-red-300 border border-red-800">ID: ${item.approval_id}</span>
+            </div>
+            <p class="text-xs text-slate-300">${item.description}</p>
+            <pre class="bg-slate-950 p-2 text-xs font-mono rounded text-slate-300 overflow-x-auto">${JSON.stringify(item.arguments, null, 2)}</pre>
+          </div>
+        `).join('');
+      } catch (e) {
+        listEl.innerHTML = `<div class="text-xs text-red-400">加载失败: ${e}</div>`;
+      }
+    }
+
+    // --- Memory (LTM) ---
+    async function loadMemories() {
+      const container = document.getElementById('memory-list');
+      container.innerHTML = '<div class="text-xs text-slate-500 col-span-2">加载中...</div>';
+      try {
+        const res = await fetch('/api/v1/memory');
+        const list = await res.json();
+        if (list.length === 0) {
+          container.innerHTML = '<div class="text-xs text-slate-500 col-span-2 text-center py-8">记忆库为空。你可以点击右上角新增记忆或在聊天中告诉 Jarvis。</div>';
+          return;
+        }
+        container.innerHTML = list.map(m => `
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col justify-between hover:border-slate-700 transition">
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <span class="px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                  m.category === 'preference' ? 'bg-blue-900/60 text-blue-300 border border-blue-700' :
+                  m.category === 'profile' ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700' :
+                  'bg-purple-900/60 text-purple-300 border border-purple-700'
+                }">${m.category}</span>
+                <button onclick="deleteMemory('${m.id}')" class="text-slate-500 hover:text-red-400 text-xs">删除</button>
+              </div>
+              <p class="text-xs text-slate-200 leading-relaxed">${m.content}</p>
+            </div>
+            <div class="text-[10px] text-slate-500 mt-3 font-mono">ID: ${m.id} | 权重: ${m.importance}</div>
+          </div>
+        `).join('');
+      } catch (e) {
+        container.innerHTML = `<div class="text-xs text-red-400 col-span-2">加载失败: ${e}</div>`;
+      }
+    }
+
+    async function searchMemory() {
+      const q = document.getElementById('memory-search-input').value.trim();
+      if (!q) return loadMemories();
+      const container = document.getElementById('memory-list');
+      try {
+        const res = await fetch('/api/v1/memory/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: q })
+        });
+        const list = await res.json();
+        container.innerHTML = list.map(m => `
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div>
+              <span class="px-2 py-0.5 rounded text-[10px] font-semibold uppercase bg-blue-900 text-blue-300">${m.category}</span>
+              <p class="text-xs text-slate-200 mt-2">${m.content}</p>
+            </div>
+            <button onclick="deleteMemory('${m.id}')" class="text-slate-500 hover:text-red-400 text-xs mt-3 self-end">删除</button>
+          </div>
+        `).join('') || '<div class="text-xs text-slate-500 col-span-2 text-center py-4">无匹配结果</div>';
+      } catch (e) {}
+    }
+
+    function openAddMemoryModal() {
+      document.getElementById('add-memory-modal').classList.remove('hidden');
+    }
+    function closeAddMemoryModal() {
+      document.getElementById('add-memory-modal').classList.add('hidden');
+    }
+    async function submitNewMemory() {
+      const cat = document.getElementById('new-mem-cat').value;
+      const content = document.getElementById('new-mem-content').value.trim();
+      if (!content) return alert("内容不能为空！");
+      await fetch('/api/v1/memory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: cat, content: content, importance: 1.0 })
+      });
+      document.getElementById('new-mem-content').value = '';
+      closeAddMemoryModal();
+      loadMemories();
+    }
+    async function deleteMemory(id) {
+      if (!confirm("确定删除该条记忆吗？")) return;
+      await fetch(`/api/v1/memory/${id}`, { method: 'DELETE' });
+      loadMemories();
+    }
+
+    // --- RAG ---
+    async function loadRagDocs() {
+      const table = document.getElementById('rag-files-table');
+      table.innerHTML = '<div class="p-4 text-slate-500">加载中...</div>';
+      try {
+        const res = await fetch('/api/v1/rag/documents');
+        const docs = await res.json();
+        if (docs.length === 0) {
+          table.innerHTML = '<div class="p-6 text-center text-slate-500">知识库中暂无已索引文档。点击右上角“扫描入库”将代码或 Markdown 文件构建为向量索引。</div>';
+          return;
+        }
+        table.innerHTML = `
+          <table class="w-full text-left border-collapse">
+            <thead>
+              <tr class="border-b border-slate-800 text-slate-400 bg-slate-950/40">
+                <th class="p-2.5 font-medium">文件路径</th>
+                <th class="p-2.5 font-medium">切片分块</th>
+                <th class="p-2.5 font-medium">内容哈希</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800">
+              ${docs.map(d => `
+                <tr class="hover:bg-slate-800/40 transition">
+                  <td class="p-2.5 font-mono text-slate-300">${d.doc_path}</td>
+                  <td class="p-2.5 text-blue-400">${d.chunk_count}</td>
+                  <td class="p-2.5 text-slate-500 font-mono">${d.file_hash.substring(0, 10)}...</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } catch (e) {
+        table.innerHTML = `<div class="p-4 text-red-400">加载错误: ${e}</div>`;
+      }
+    }
+
+    async function triggerIndexModal() {
+      const dir = prompt("请输入要扫描索引的目录路径 (留空默认使用 workspace):", "docs");
+      if (dir === null) return;
+      alert("正在后台执行增量扫描与向量嵌入，请稍候查看通知...");
+      try {
+        const res = await fetch('/api/v1/rag/index', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ directory_path: dir })
+        });
+        const summary = await res.json();
+        alert(`索引完成！\n扫描文件: ${summary.scanned}\n新入库文件: ${summary.indexed}\n跳过未变动: ${summary.skipped}\n添加向量块: ${summary.chunks_added}`);
+        loadRagDocs();
+      } catch (e) {
+        alert("索引失败: " + e);
+      }
+    }
+
+    async function testRagSearch() {
+      const q = document.getElementById('rag-query-input').value.trim();
+      if (!q) return;
+      const resContainer = document.getElementById('rag-results');
+      resContainer.innerHTML = '<div class="text-xs text-slate-500">向量检索中...</div>';
+      try {
+        const res = await fetch('/api/v1/rag/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: q, top_k: 3 })
+        });
+        const matches = await res.json();
+        if (matches.length === 0) {
+          resContainer.innerHTML = '<div class="text-xs text-slate-500">未检索到相关内容</div>';
+          return;
+        }
+        resContainer.innerHTML = matches.map((m, idx) => `
+          <div class="bg-slate-950 border border-slate-800 p-2.5 rounded text-xs font-mono">
+            <div class="flex items-center justify-between text-blue-400 font-semibold mb-1">
+              <span>#${idx+1} ${m.doc_path} (分块 ${m.chunk_index})</span>
+              <span class="text-emerald-400">相似度: ${(m.score * 100).toFixed(1)}%</span>
+            </div>
+            <p class="text-slate-300 whitespace-pre-wrap">${m.content}</p>
+          </div>
+        `).join('');
+      } catch (e) {
+        resContainer.innerHTML = `<div class="text-xs text-red-400">搜索失败: ${e}</div>`;
+      }
+    }
+
+    // --- System & Tools ---
+    async function loadSystemInfo() {
+      try {
+        const [sysRes, toolsRes, mcpRes] = await Promise.all([
+          fetch('/api/v1/system/status'),
+          fetch('/api/v1/system/tools'),
+          fetch('/api/v1/system/mcp')
+        ]);
+        const sys = await sysRes.json();
+        const tools = await toolsRes.json();
+        const mcp = await mcpRes.json();
+
+        document.getElementById('sys-model').innerText = `${sys.default_provider} (${sys.default_model})`;
+        document.getElementById('sys-hitl').innerText = sys.hitl_enabled ? '已开启 (ACTIVE)' : '未开启';
+        document.getElementById('sys-mcp').innerText = `${sys.active_mcp_servers_count} 活跃 / ${mcp.total_servers} 已配置`;
+
+        const toolsList = document.getElementById('sys-tools-list');
+        toolsList.innerHTML = tools.map(t => `
+          <div class="p-3 flex items-center justify-between">
+            <div>
+              <span class="font-bold text-slate-200">${t.name}</span>
+              <span class="text-[10px] text-slate-500 ml-2 font-mono">[${t.category}]</span>
+              <p class="text-slate-400 text-[11px] mt-0.5">${t.description}</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold ${
+                t.risk_level === 'HIGH' ? 'bg-red-950 text-red-400 border border-red-800' :
+                t.risk_level === 'MEDIUM' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                'bg-emerald-950 text-emerald-400 border border-emerald-800'
+              }">${t.risk_level}</span>
+              <span class="text-[10px] ${t.requires_approval ? 'text-red-400' : 'text-emerald-400'}">
+                ${t.requires_approval ? '强制审批' : '自动放行'}
+              </span>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {}
+    }
+
+    // Initial on-load checks
+    fetch('/api/v1/system/status').then(r => r.json()).then(s => {
+      document.getElementById('header-provider').innerText = `LLM: ${s.default_provider} (${s.default_model})`;
+    }).catch(() => {});
+    checkPendingApprovals();
+    setInterval(checkPendingApprovals, 10000);
+  </script>
+</body>
+</html>

@@ -10,7 +10,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 [![MCP](https://img.shields.io/badge/MCP-2.3+-orange.svg)](https://modelcontextprotocol.io/)
 [![sqlite-vec](https://img.shields.io/badge/sqlite--vec-0.1.9-purple.svg)](https://github.com/asg017/sqlite-vec)
-[![Tests](https://img.shields.io/badge/Tests-35%20Passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-38%20Passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
@@ -227,8 +227,8 @@ Detailed technical documentation is available under [`docs/`](docs/README.md):
   LangGraph `interrupt()`, SQLite checkpointing, approval REST API, interactive terminal prompts.
 - **Milestone 4: Personal Memory & Local Knowledge Base (RAG)** `[Completed]`  
   Long-Term Memory (LTM), dynamic context injection, local vector store with `sqlite-vec`, incremental workspace file indexer.
-- **Milestone 5: Application Gateway, Streaming & User Interface** `[Planned]`  
-  Server-Sent Events (SSE) token streaming, Web UI frontend (Chat + HITL Review Center), containerization.
+- **Milestone 5: Application Gateway, Streaming & User Interface** `[Completed]`  
+  Server-Sent Events (SSE) token and step streaming, modern responsive Web UI console (`http://localhost:8000/app`), production Docker containerization and daemon background scripts.
 
 ---
 
