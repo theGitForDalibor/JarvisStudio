@@ -1,11 +1,14 @@
 """FastAPI Application factory for Jarvis Studio."""
 
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from jarvis_studio.api.routes.approvals import router as approvals_router
 from jarvis_studio.api.routes.chat import router as chat_router
+from jarvis_studio.api.routes.memory import router as memory_router
+from jarvis_studio.api.routes.rag import router as rag_router
 from jarvis_studio.api.routes.system import router as system_router
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
@@ -18,7 +21,9 @@ from jarvis_studio.tools.registry import get_default_registry
 async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle hook."""
     settings = get_settings()
-    logger.info(f"Starting {settings.app.name} v{settings.app.version} ({settings.app.environment})")
+    logger.info(
+        f"Starting {settings.app.name} v{settings.app.version} ({settings.app.environment})"
+    )
 
     # Auto-register builtin tools
     registry = get_default_registry()
@@ -65,6 +70,8 @@ def create_app() -> FastAPI:
     app.include_router(system_router, prefix=api_prefix)
     app.include_router(chat_router, prefix=api_prefix)
     app.include_router(approvals_router, prefix=api_prefix)
+    app.include_router(memory_router, prefix=api_prefix)
+    app.include_router(rag_router, prefix=api_prefix)
 
     @app.get("/")
     async def root():

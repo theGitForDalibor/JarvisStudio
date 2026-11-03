@@ -3,7 +3,8 @@
 import time
 import uuid
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from jarvis_studio.core.observability.logger import logger
@@ -12,6 +13,7 @@ from jarvis_studio.tools.base import RiskLevel
 
 class ApprovalStatus(str, Enum):
     """Status of an approval request."""
+
     PENDING = "PENDING"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
@@ -20,41 +22,43 @@ class ApprovalStatus(str, Enum):
 
 class ApprovalRequest(BaseModel):
     """Record of an operation requiring human confirmation."""
+
     id: str = Field(default_factory=lambda: f"appr_{uuid.uuid4().hex[:8]}")
     thread_id: str
     run_id: str
     tool_name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
     risk_level: RiskLevel = RiskLevel.HIGH
     status: ApprovalStatus = ApprovalStatus.PENDING
     description: str = "High-risk tool call intercepted"
     created_at: float = Field(default_factory=time.time)
-    resolved_at: Optional[float] = None
-    resolution_reason: Optional[str] = None
-    modified_arguments: Optional[Dict[str, Any]] = None
+    resolved_at: float | None = None
+    resolution_reason: str | None = None
+    modified_arguments: dict[str, Any] | None = None
 
 
 class ApprovalDecision(BaseModel):
     """User decision payload to resolve a pending approval."""
+
     decision: str = Field(
         description="'approve', 'reject', or 'modify'",
     )
-    reason: Optional[str] = None
-    modified_arguments: Optional[Dict[str, Any]] = None
+    reason: str | None = None
+    modified_arguments: dict[str, Any] | None = None
 
 
 class HITLManager:
     """In-memory manager tracking active and historical approval requests."""
 
     def __init__(self) -> None:
-        self._requests: Dict[str, ApprovalRequest] = {}
+        self._requests: dict[str, ApprovalRequest] = {}
 
     def create_request(
         self,
         thread_id: str,
         run_id: str,
         tool_name: str,
-        arguments: Dict[str, Any],
+        arguments: dict[str, Any],
         risk_level: RiskLevel = RiskLevel.HIGH,
         description: str = "",
     ) -> ApprovalRequest:
@@ -73,22 +77,24 @@ class HITLManager:
         )
         return req
 
-    def get_request(self, approval_id: str) -> Optional[ApprovalRequest]:
+    def get_request(self, approval_id: str) -> ApprovalRequest | None:
         """Look up an approval request by its ID."""
         return self._requests.get(approval_id)
 
-    def list_pending(self, thread_id: Optional[str] = None) -> List[ApprovalRequest]:
+    def list_pending(self, thread_id: str | None = None) -> list[ApprovalRequest]:
         """List all pending approval requests, optionally filtered by thread ID."""
         return [
-            r for r in self._requests.values()
-            if r.status == ApprovalStatus.PENDING and (thread_id is None or r.thread_id == thread_id)
+            r
+            for r in self._requests.values()
+            if r.status == ApprovalStatus.PENDING
+            and (thread_id is None or r.thread_id == thread_id)
         ]
 
     def resolve_request(
         self,
         approval_id: str,
         decision: ApprovalDecision,
-    ) -> Optional[ApprovalRequest]:
+    ) -> ApprovalRequest | None:
         """Apply user decision to resolve a pending approval."""
         req = self._requests.get(approval_id)
         if not req:
@@ -113,7 +119,7 @@ class HITLManager:
         return req
 
 
-_global_hitl_manager: Optional[HITLManager] = None
+_global_hitl_manager: HITLManager | None = None
 
 
 def get_hitl_manager() -> HITLManager:

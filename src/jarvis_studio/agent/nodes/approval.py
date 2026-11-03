@@ -1,12 +1,12 @@
 """Approval gate node leveraging LangGraph interrupt for HITL."""
 
-from typing import Any, Dict
+from typing import Any
+
 from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
 from jarvis_studio.agent.hitl.manager import (
     ApprovalDecision,
-    ApprovalStatus,
     get_hitl_manager,
 )
 from jarvis_studio.agent.state import AgentState
@@ -19,7 +19,7 @@ def create_approval_node(registry: ToolRegistry = None):
     tool_registry = registry or get_default_registry()
     hitl_mgr = get_hitl_manager()
 
-    def approval_node(state: AgentState) -> Dict[str, Any]:
+    def approval_node(state: AgentState) -> dict[str, Any]:
         """Intercept high-risk tool calls and trigger LangGraph interrupt."""
         messages = state.get("messages", [])
         if not messages:
@@ -76,7 +76,11 @@ def create_approval_node(registry: ToolRegistry = None):
         user_response = interrupt(approval_payload)
 
         # Parse user response
-        decision_data = user_response if isinstance(user_response, dict) else {"decision": str(user_response)}
+        decision_data = (
+            user_response
+            if isinstance(user_response, dict)
+            else {"decision": str(user_response)}
+        )
         decision_obj = ApprovalDecision(
             decision=decision_data.get("decision", "reject"),
             reason=decision_data.get("reason"),

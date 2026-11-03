@@ -1,8 +1,6 @@
 """LangGraph Agent StateGraph construction and compilation."""
 
-from typing import List, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
@@ -18,10 +16,10 @@ from jarvis_studio.tools.registry import ToolRegistry, get_default_registry
 
 
 def build_agent_graph(
-    model: Optional[BaseChatModel] = None,
-    registry: Optional[ToolRegistry] = None,
-    checkpointer: Optional[BaseCheckpointSaver] = None,
-    system_prompt: Optional[str] = None,
+    model: BaseChatModel | None = None,
+    registry: ToolRegistry | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    system_prompt: str | None = None,
 ):
     """Construct, link, and compile the production LangGraph StateGraph."""
     tool_registry = registry or get_default_registry()

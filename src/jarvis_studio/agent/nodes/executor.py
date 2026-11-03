@@ -1,7 +1,7 @@
 """Tool execution node handling normal and HITL-resolved tool calls."""
 
-import json
-from typing import Any, Dict, List
+from typing import Any
+
 from langchain_core.messages import AIMessage, ToolMessage
 
 from jarvis_studio.agent.state import AgentState
@@ -14,7 +14,7 @@ def create_tool_executor_node(registry: ToolRegistry = None):
     """Factory creating the tool execution node."""
     tool_registry = registry or get_default_registry()
 
-    async def tool_executor_node(state: AgentState) -> Dict[str, Any]:
+    async def tool_executor_node(state: AgentState) -> dict[str, Any]:
         """Execute pending tool calls in the latest AIMessage."""
         messages = state.get("messages", [])
         if not messages:
@@ -29,7 +29,7 @@ def create_tool_executor_node(registry: ToolRegistry = None):
         decision_reason = approval_decision.get("reason", "No reason provided")
         modified_args = approval_decision.get("modified_arguments")
 
-        tool_messages: List[ToolMessage] = []
+        tool_messages: list[ToolMessage] = []
 
         for call in last_message.tool_calls:
             tool_name = call.get("name", "")
@@ -50,8 +50,14 @@ def create_tool_executor_node(registry: ToolRegistry = None):
 
             # Check if arguments were modified
             effective_args = tool_args
-            if tool_registry.requires_approval(tool_name) and decision_type == "modify" and modified_args:
-                logger.info(f"Applying modified arguments for tool '{tool_name}': {modified_args}")
+            if (
+                tool_registry.requires_approval(tool_name)
+                and decision_type == "modify"
+                and modified_args
+            ):
+                logger.info(
+                    f"Applying modified arguments for tool '{tool_name}': {modified_args}"
+                )
                 effective_args = modified_args
 
             # Lookup tool

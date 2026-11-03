@@ -10,11 +10,11 @@ from jarvis_studio.core.observability.tracer import (
 )
 
 __all__ = [
-    "logger",
-    "setup_logger",
     "StepMetrics",
     "get_current_run_id",
     "get_current_session_id",
+    "logger",
     "set_trace_context",
+    "setup_logger",
     "timed_step",
 ]

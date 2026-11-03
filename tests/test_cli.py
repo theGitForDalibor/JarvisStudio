@@ -1,6 +1,7 @@
 """Automated tests for Jarvis Studio Developer CLI."""
 
 from click.testing import CliRunner
+
 from jarvis_studio.cli.main import cli
 
 

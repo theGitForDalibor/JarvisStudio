@@ -58,16 +58,27 @@ class MCPConnection:
             self._exit_stack = AsyncExitStack()
             try:
                 transport_type = self.config.transport.lower()
-                if transport_type == "sse" or (self.config.url and not self.config.command):
+                if transport_type == "sse" or (
+                    self.config.url and not self.config.command
+                ):
                     if not self.config.url:
-                        raise ValueError(f"SSE transport requires 'url' for server '{self.name}'")
-                    logger.info(f"Connecting to MCP SSE endpoint: {self.config.url} ({self.name})")
-                    read_stream, write_stream = await self._exit_stack.enter_async_context(
+                        raise ValueError(
+                            f"SSE transport requires 'url' for server '{self.name}'"
+                        )
+                    logger.info(
+                        f"Connecting to MCP SSE endpoint: {self.config.url} ({self.name})"
+                    )
+                    (
+                        read_stream,
+                        write_stream,
+                    ) = await self._exit_stack.enter_async_context(
                         sse_client(self.config.url)
                     )
                 else:
                     if not self.config.command:
-                        raise ValueError(f"stdio transport requires 'command' for server '{self.name}'")
+                        raise ValueError(
+                            f"stdio transport requires 'command' for server '{self.name}'"
+                        )
 
                     merged_env = os.environ.copy()
                     if self.config.env:
@@ -82,7 +93,10 @@ class MCPConnection:
                         env=merged_env,
                         cwd=self.config.cwd,
                     )
-                    read_stream, write_stream = await self._exit_stack.enter_async_context(
+                    (
+                        read_stream,
+                        write_stream,
+                    ) = await self._exit_stack.enter_async_context(
                         stdio_client(server_params)
                     )
 
@@ -94,7 +108,9 @@ class MCPConnection:
                 self.server_info = getattr(init_result, "server_info", None)
                 self.is_connected = True
                 self.error_message = None
-                logger.info(f"Successfully initialized MCP server session for '{self.name}'")
+                logger.info(
+                    f"Successfully initialized MCP server session for '{self.name}'"
+                )
 
             except Exception as e:
                 self.error_message = str(e)
@@ -108,7 +124,9 @@ class MCPConnection:
             try:
                 await self._exit_stack.aclose()
             except Exception as e:
-                logger.warning(f"Error while closing MCP connection stack '{self.name}': {e}")
+                logger.warning(
+                    f"Error while closing MCP connection stack '{self.name}': {e}"
+                )
             finally:
                 self._exit_stack = None
                 self.session = None
@@ -139,9 +157,11 @@ class MCPConnection:
         target_name = tool_name
         prefix = f"{self.name}_"
         if tool_name.startswith(prefix):
-            target_name = tool_name[len(prefix):]
+            target_name = tool_name[len(prefix) :]
 
-        logger.debug(f"Calling MCP tool '{target_name}' on server '{self.name}' with args: {arguments}")
+        logger.debug(
+            f"Calling MCP tool '{target_name}' on server '{self.name}' with args: {arguments}"
+        )
         result = await self.session.call_tool(
             target_name,
             arguments=arguments,
@@ -194,11 +214,15 @@ class MCPClientManager:
                 servers = data.get("mcpServers", {})
                 for name, srv in servers.items():
                     self.server_configs[name] = MCPServerConfig(**srv)
-            logger.info(f"Loaded {len(self.server_configs)} MCP server definition(s) from {target_path}")
+            logger.info(
+                f"Loaded {len(self.server_configs)} MCP server definition(s) from {target_path}"
+            )
         except Exception as e:
             logger.error(f"Failed to load MCP config from {target_path}: {e}")
 
-    def auto_discover_configs(self, search_paths: list[str | Path] | None = None) -> dict[str, MCPServerConfig]:
+    def auto_discover_configs(
+        self, search_paths: list[str | Path] | None = None
+    ) -> dict[str, MCPServerConfig]:
         """Discover and load MCP configurations from standard workspace locations."""
         default_search = [
             Path("config/mcp_servers.json"),
@@ -225,7 +249,9 @@ class MCPClientManager:
                     logger.debug(f"Skipping auto-discovery from {cand}: {e}")
 
         if discovered_count > 0:
-            logger.info(f"Auto-discovered {discovered_count} additional MCP server definition(s)")
+            logger.info(
+                f"Auto-discovered {discovered_count} additional MCP server definition(s)"
+            )
 
         return self.server_configs
 
@@ -344,7 +370,9 @@ class MCPClientManager:
             }
         return {
             "total_servers": len(self.server_configs),
-            "active_servers": len([c for c in self.connections.values() if c.is_connected]),
+            "active_servers": len(
+                [c for c in self.connections.values() if c.is_connected]
+            ),
             "servers": status_info,
         }
 

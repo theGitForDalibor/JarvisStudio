@@ -1,6 +1,7 @@
 """System information, health check, and MCP inspection endpoints."""
 
-from typing import Any, Dict, List
+from typing import Any
+
 from fastapi import APIRouter
 
 from jarvis_studio.api.schemas.response import SystemStatusResponse
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/system", tags=["System"])
 
 
 @router.get("/health")
-async def health_check() -> Dict[str, str]:
+async def health_check() -> dict[str, str]:
     """Basic liveness probe."""
     return {"status": "ok"}
 
@@ -38,7 +39,7 @@ async def system_status() -> SystemStatusResponse:
 
 
 @router.get("/tools")
-async def list_registered_tools() -> List[Dict[str, Any]]:
+async def list_registered_tools() -> list[dict[str, Any]]:
     """Inspect all active tools and their safety profiles."""
     registry = get_default_registry()
     tools_info = []
@@ -57,6 +58,6 @@ async def list_registered_tools() -> List[Dict[str, Any]]:
 
 
 @router.get("/mcp")
-async def get_mcp_status() -> Dict[str, Any]:
+async def get_mcp_status() -> dict[str, Any]:
     """Inspect configured MCP servers and active connections."""
     return get_mcp_manager().get_status()

@@ -1,7 +1,7 @@
 """Unit tests for the LLM Factory."""
 
-import pytest
 from langchain_openai import ChatOpenAI
+
 from jarvis_studio.config.models import LLMConfig, LLMProviderType
 from jarvis_studio.core.llm.factory import LLMFactory
 

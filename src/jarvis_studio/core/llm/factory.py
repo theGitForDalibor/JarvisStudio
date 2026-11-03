@@ -1,6 +1,5 @@
 """Unified Factory to instantiate LangChain ChatModels across swappable providers."""
 
-from typing import Any, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
@@ -16,11 +15,11 @@ class LLMFactory:
     @classmethod
     def create_model(
         cls,
-        provider: Optional[LLMProviderType] = None,
-        model_name: Optional[str] = None,
-        temperature: Optional[float] = None,
-        streaming: Optional[bool] = None,
-        config: Optional[LLMConfig] = None,
+        provider: LLMProviderType | None = None,
+        model_name: str | None = None,
+        temperature: float | None = None,
+        streaming: bool | None = None,
+        config: LLMConfig | None = None,
     ) -> BaseChatModel:
         """Create a BaseChatModel instance based on parameters and application settings."""
         cfg = config or get_settings().llm
@@ -89,8 +88,8 @@ class LLMFactory:
     @staticmethod
     def _create_openai_model(
         model_name: str,
-        api_key: Optional[str],
-        base_url: Optional[str],
+        api_key: str | None,
+        base_url: str | None,
         temperature: float,
         streaming: bool,
     ) -> BaseChatModel:
@@ -106,13 +105,15 @@ class LLMFactory:
     @staticmethod
     def _create_openai_compatible_model(
         model_name: str,
-        api_key: Optional[str],
-        base_url: Optional[str],
+        api_key: str | None,
+        base_url: str | None,
         temperature: float,
         streaming: bool,
     ) -> BaseChatModel:
         if not base_url:
-            raise ConfigurationError("base_url is required for OpenAI-compatible providers")
+            raise ConfigurationError(
+                "base_url is required for OpenAI-compatible providers"
+            )
         return ChatOpenAI(
             model=model_name,
             api_key=api_key or "placeholder",
@@ -124,12 +125,13 @@ class LLMFactory:
     @staticmethod
     def _create_anthropic_model(
         model_name: str,
-        api_key: Optional[str],
+        api_key: str | None,
         temperature: float,
         streaming: bool,
     ) -> BaseChatModel:
         try:
             from langchain_anthropic import ChatAnthropic
+
             return ChatAnthropic(
                 model=model_name,
                 api_key=api_key,
@@ -144,12 +146,13 @@ class LLMFactory:
     @staticmethod
     def _create_gemini_model(
         model_name: str,
-        api_key: Optional[str],
+        api_key: str | None,
         temperature: float,
         streaming: bool,
     ) -> BaseChatModel:
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
+
             return ChatGoogleGenerativeAI(
                 model=model_name,
                 google_api_key=api_key,

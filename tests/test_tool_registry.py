@@ -1,6 +1,7 @@
 """Unit tests for ToolRegistry and safety tagging."""
 
 from langchain_core.tools import tool
+
 from jarvis_studio.tools.base import RiskLevel, get_tool_metadata, tag_tool_safety
 from jarvis_studio.tools.builtin.file_tools import read_file, write_file
 from jarvis_studio.tools.builtin.shell_tools import execute_shell_command

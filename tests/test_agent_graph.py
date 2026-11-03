@@ -8,11 +8,9 @@ from langgraph.types import Command
 
 from jarvis_studio.agent.graph import build_agent_graph
 from jarvis_studio.agent.hitl.manager import (
-    ApprovalDecision,
     ApprovalStatus,
     get_hitl_manager,
 )
-from jarvis_studio.tools.builtin.file_tools import read_file
 from jarvis_studio.tools.builtin.shell_tools import execute_shell_command
 from jarvis_studio.tools.registry import ToolRegistry
 

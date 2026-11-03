@@ -17,7 +17,10 @@ def test_custom_settings_override():
     """Verify settings allow overriding values."""
     custom = Settings(
         app={"name": "Custom Jarvis", "port": 9000},
-        llm={"default_provider": LLMProviderType.DEEPSEEK, "default_model": "deepseek-coder"},
+        llm={
+            "default_provider": LLMProviderType.DEEPSEEK,
+            "default_model": "deepseek-coder",
+        },
     )
     assert custom.app.name == "Custom Jarvis"
     assert custom.app.port == 9000

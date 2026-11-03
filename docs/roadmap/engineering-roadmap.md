@@ -16,7 +16,7 @@ flowchart LR
     M0["M0: 架构基线与脚手架\n(已完成)"] --> M1["M1: 核心 Agent 与模型底座\n(已完成)"]
     M1 --> M2["M2: 工具子系统与 MCP\n(已完成)"]
     M2 --> M3["M3: HITL 与持久化检查点\n(已完成)"]
-    M3 --> M4["M4: 长期记忆与 RAG\n(计划中)"]
+    M3 --> M4["M4: 长期记忆与 RAG\n(已完成)"]
     M4 --> M5["M5: Web 界面与流式输出\n(计划中)"]
 ```
 
@@ -88,28 +88,34 @@ flowchart LR
 *目标：为智能体赋予长期偏好适应能力与本地私有代码/文档检索能力。*
 
 - [x] 基于会话 Thread 的短时上下文检查点持久化。
-- [ ] 长期个人记忆系统 (LTM)：
-  - [ ] 开发者习惯、编程风格与常用系统环境提取。
-  - [ ] 跨会话重要用户事实持久化。
-- [ ] 本地 RAG 知识库系统：
-  - [ ] 文本切分与向量 Embedding 管道。
-  - [ ] 基于 `sqlite-vec` 的本地无额外服务依赖轻量向量存储。
-  - [ ] 工作区本地文档与代码工程索引。
-  - [ ] 知识检索与引用工具封装。
+- [x] 长期个人记忆系统 (LTM)：
+  - [x] 开发者习惯、编程风格与常用系统环境持久化 (`src/jarvis_studio/memory`)。
+  - [x] 跨会话重要用户事实与偏好提取、存储与检索 (`MemoryStore` + `MemoryManager`)。
+  - [x] Assistant 推理节点动态记忆上下文注入 (`[User Long-Term Memory & Preferences]`)。
+  - [x] 内置长期记忆管理工具 (`save_personal_memory`, `recall_personal_memory`)。
+  - [x] 记忆 REST API (`/api/v1/memory`) 与 CLI 终端命令 (`jarvis-studio memory add/list/delete`)。
+- [x] 本地 RAG 知识库系统：
+  - [x] 文本与代码语义切分器 (`DocumentSplitter`)。
+  - [x] 多源 Embedding 统一工厂 (`EmbeddingsFactory`，支持 OpenAI 与零依赖确定性离线嵌入)。
+  - [x] 基于 `sqlite-vec` 的本地高效向量 KNN 检索存储引擎 (`SqliteVecStore`)。
+  - [x] 工作区文件哈希增量扫描与向量入库索引器 (`WorkspaceIndexer`)。
+  - [x] 本地知识检索与索引工具 (`search_knowledge_base`, `index_workspace_directory`, `list_indexed_documents`)。
+  - [x] 知识库 REST API (`/api/v1/rag`) 与 CLI 命令 (`jarvis-studio rag index/search/list`)。
 
 ---
 
 ### Milestone 5: 应用网关流式化与 Web 交互界面 (Application Gateway, Streaming & UI)
 *目标：打造兼顾终端效率与现代可视化体验的全功能个人 AI 助手。*
 
-- [x] FastAPI RESTful API 基础网关 (`/system`, `/chat`, `/approvals`)。
-- [x] 开发者命令行交互终端 (`jarvis-studio info`, `serve`, `chat`)。
+- [x] FastAPI RESTful API 基础网关 (`/system`, `/chat`, `/approvals`, `/memory`, `/rag`)。
+- [x] 开发者命令行交互终端 (`jarvis-studio info`, `serve`, `chat`, `memory`, `rag`, `sessions`, `mcp`)。
 - [ ] Server-Sent Events (SSE) 逐 Token 与步骤事件流式传输。
 - [ ] 双向控制 WebSocket 网关协议。
 - [ ] 现代化 Web UI 前端 (Next.js / Tailwind CSS)：
   - [ ] 富文本 Markdown 与代码高亮对话界面。
   - [ ] 交互式 HITL 审批弹窗（命令高亮、入参 Diff 差异比对、批准/拒绝/编辑按钮）。
   - [ ] 已挂载工具与 MCP 服务状态卡片。
+  - [ ] 长期记忆与知识库管理面板。
 - [ ] 打包与部署：
   - [ ] 生产容器化镜像 (Dockerfile + Docker Compose)。
   - [ ] 个人系统开机常驻守护进程脚本。

@@ -1,7 +1,6 @@
 """Pytest fixtures and configuration."""
 
 import os
-import pytest
 
 # Pre-set test environment variables before tests run
 os.environ["OPENAI_API_KEY"] = "sk-test-mock-key"

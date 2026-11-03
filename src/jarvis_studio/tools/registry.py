@@ -1,23 +1,27 @@
 """Dynamic tool registry for Jarvis Studio."""
 
-from typing import Dict, List, Optional
 from langchain_core.tools import BaseTool
 
 from jarvis_studio.core.observability.logger import logger
-from jarvis_studio.tools.base import RiskLevel, ToolMetadata, get_tool_metadata, tag_tool_safety
+from jarvis_studio.tools.base import (
+    RiskLevel,
+    ToolMetadata,
+    get_tool_metadata,
+    tag_tool_safety,
+)
 
 
 class ToolRegistry:
     """Registry maintaining active agent tools and their safety policies."""
 
     def __init__(self) -> None:
-        self._tools: Dict[str, BaseTool] = {}
+        self._tools: dict[str, BaseTool] = {}
 
     def register(
         self,
         tool: BaseTool,
-        risk_level: Optional[RiskLevel] = None,
-        requires_approval: Optional[bool] = None,
+        risk_level: RiskLevel | None = None,
+        requires_approval: bool | None = None,
         category: str = "general",
     ) -> BaseTool:
         """Register a LangChain tool with safety metadata."""
@@ -36,15 +40,15 @@ class ToolRegistry:
         )
         return tool
 
-    def get(self, name: str) -> Optional[BaseTool]:
+    def get(self, name: str) -> BaseTool | None:
         """Look up a tool by name."""
         return self._tools.get(name)
 
-    def list_tools(self) -> List[BaseTool]:
+    def list_tools(self) -> list[BaseTool]:
         """Return all registered tools."""
         return list(self._tools.values())
 
-    def unregister(self, name: str) -> Optional[BaseTool]:
+    def unregister(self, name: str) -> BaseTool | None:
         """Remove a tool by name from the registry."""
         tool = self._tools.pop(name, None)
         if tool:
@@ -59,7 +63,7 @@ class ToolRegistry:
         meta = get_tool_metadata(tool)
         return meta.requires_approval
 
-    def get_metadata(self, tool_name: str) -> Optional[ToolMetadata]:
+    def get_metadata(self, tool_name: str) -> ToolMetadata | None:
         """Retrieve safety and catalog metadata for a tool."""
         tool = self._tools.get(tool_name)
         if not tool:
@@ -67,7 +71,7 @@ class ToolRegistry:
         return get_tool_metadata(tool)
 
 
-_global_registry: Optional[ToolRegistry] = None
+_global_registry: ToolRegistry | None = None
 
 
 def get_default_registry() -> ToolRegistry:

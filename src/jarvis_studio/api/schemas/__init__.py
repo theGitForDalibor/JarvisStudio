@@ -4,8 +4,8 @@ from jarvis_studio.api.schemas.request import ApprovalDecisionRequest, ChatReque
 from jarvis_studio.api.schemas.response import ChatResponse, SystemStatusResponse
 
 __all__ = [
-    "ChatRequest",
     "ApprovalDecisionRequest",
+    "ChatRequest",
     "ChatResponse",
     "SystemStatusResponse",
 ]

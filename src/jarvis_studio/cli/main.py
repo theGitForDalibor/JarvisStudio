@@ -42,6 +42,7 @@ def info():
             f"[dim]LLM Provider:[/dim] [yellow]{settings.llm.default_provider.value}[/yellow] ({settings.llm.default_model})\n"
             f"[dim]HITL Security:[/dim] [{'green' if settings.security.hitl_enabled else 'red'}]{'ENABLED' if settings.security.hitl_enabled else 'DISABLED'}[/]\n"
             f"[dim]MCP Servers:[/dim] [cyan]{mcp_status['active_servers']}[/cyan] active / [dim]{mcp_status['total_servers']} configured[/dim]\n"
+            f"[dim]RAG Knowledge:[/dim] [{'green' if settings.rag.enabled else 'red'}]{'ENABLED' if settings.rag.enabled else 'DISABLED'}[/] (backend: sqlite-vec)\n"
             f"[dim]Checkpointer:[/dim] {settings.storage.checkpoint_backend} ({settings.storage.sqlite_path})",
             title="Jarvis Studio Status",
             border_style="cyan",
@@ -62,13 +63,17 @@ def info():
             if meta.risk_level.value == "HIGH"
             else ("yellow" if meta.risk_level.value == "MEDIUM" else "green")
         )
-        approval_str = "[red]Required[/red]" if meta.requires_approval else "[green]Auto[/green]"
+        approval_str = (
+            "[red]Required[/red]" if meta.requires_approval else "[green]Auto[/green]"
+        )
         table.add_row(
             meta.name,
             meta.category,
             f"[{risk_color}]{meta.risk_level.value}[/{risk_color}]",
             approval_str,
-            meta.description[:60] + "..." if len(meta.description) > 60 else meta.description,
+            meta.description[:60] + "..."
+            if len(meta.description) > 60
+            else meta.description,
         )
 
     console.print(table)
@@ -95,10 +100,21 @@ def mcp_list():
 
     for name, srv in status["servers"].items():
         enabled_str = "[green]Yes[/green]" if srv["enabled"] else "[dim]No[/dim]"
-        conn_str = "[green]Connected[/green]" if srv["connected"] else "[yellow]Disconnected[/yellow]"
+        conn_str = (
+            "[green]Connected[/green]"
+            if srv["connected"]
+            else "[yellow]Disconnected[/yellow]"
+        )
         tools_count = len(srv.get("registered_tools", []))
         desc = srv.get("description") or "-"
-        table.add_row(name, srv.get("transport", "stdio"), enabled_str, conn_str, str(tools_count), desc)
+        table.add_row(
+            name,
+            srv.get("transport", "stdio"),
+            enabled_str,
+            conn_str,
+            str(tools_count),
+            desc,
+        )
 
     console.print(table)
 
@@ -108,9 +124,196 @@ def mcp_discover():
     """Search workspace and standard paths for MCP configurations."""
     mcp_mgr = get_mcp_manager()
     discovered = mcp_mgr.auto_discover_configs()
-    console.print(f"[bold green]Discovered {len(discovered)} MCP server definition(s):[/bold green]")
+    console.print(
+        f"[bold green]Discovered {len(discovered)} MCP server definition(s):[/bold green]"
+    )
     for name, cfg in discovered.items():
-        console.print(f"  - [cyan]{name}[/cyan] (transport: {cfg.transport}, enabled: {cfg.enabled})")
+        console.print(
+            f"  - [cyan]{name}[/cyan] (transport: {cfg.transport}, enabled: {cfg.enabled})"
+        )
+
+
+@cli.group()
+def memory():
+    """Manage user Long-Term Memory (LTM), preferences, and profile notes."""
+
+
+@memory.command("list")
+@click.option(
+    "--category",
+    default=None,
+    help="Filter by category (preference, profile, project, fact)",
+)
+def memory_list(category: str):
+    """List all stored user long-term memories."""
+    from jarvis_studio.memory.manager import get_memory_manager
+    from jarvis_studio.memory.models import MemoryCategory
+
+    mgr = get_memory_manager()
+    cat_enum = None
+    if category:
+        try:
+            cat_enum = MemoryCategory(category.lower())
+        except ValueError:
+            cat_enum = None
+
+    items = mgr.list_all(category=cat_enum)
+    if not items:
+        console.print("[dim]No long-term memories found.[/dim]")
+        return
+
+    table = Table(title="User Long-Term Memory & Preferences")
+    table.add_column("ID", style="bold yellow")
+    table.add_column("Category", style="cyan")
+    table.add_column("Importance", justify="center")
+    table.add_column("Content")
+
+    for m in items:
+        table.add_row(m.id, m.category.value, f"{m.importance:.1f}", m.content)
+
+    console.print(table)
+
+
+@memory.command("add")
+@click.argument("content")
+@click.option(
+    "--category", default="preference", help="preference, profile, project, or fact"
+)
+@click.option(
+    "--importance", default=1.0, type=float, help="Importance weight (0.0 - 1.0)"
+)
+def memory_add(content: str, category: str, importance: float):
+    """Add a new memory record."""
+    from jarvis_studio.memory.manager import get_memory_manager
+    from jarvis_studio.memory.models import MemoryCategory
+
+    mgr = get_memory_manager()
+    try:
+        cat_enum = MemoryCategory(category.lower())
+    except ValueError:
+        cat_enum = MemoryCategory.PREFERENCE
+
+    item = mgr.remember(content=content, category=cat_enum, importance=importance)
+    console.print(
+        f"[bold green]Stored memory [[/bold green]{item.id}[bold green]]:[/bold green] {item.content}"
+    )
+
+
+@memory.command("delete")
+@click.argument("memory_id")
+def memory_delete(memory_id: str):
+    """Delete a memory record by ID."""
+    from jarvis_studio.memory.manager import get_memory_manager
+
+    mgr = get_memory_manager()
+    if mgr.forget(memory_id):
+        console.print(f"[bold green]Deleted memory '{memory_id}'[/bold green]")
+    else:
+        console.print(f"[bold red]Memory '{memory_id}' not found[/bold red]")
+
+
+def _safe_str(text: str) -> str:
+    """Sanitize strings containing multi-byte emojis for Windows console compatibility."""
+    enc = console.encoding or "utf-8"
+    return text.encode(enc, errors="replace").decode(enc, errors="replace")
+
+
+@cli.group()
+def rag():
+    """Local RAG knowledge base indexing and semantic search."""
+
+
+@rag.command("index")
+@click.argument("path", default=None, required=False)
+@click.option(
+    "--force", is_flag=True, default=False, help="Force re-indexing unchanged files"
+)
+def rag_index(path: str, force: bool):
+    """Index files in a directory or workspace into the vector store."""
+    from jarvis_studio.rag.indexer import WorkspaceIndexer
+
+    indexer = WorkspaceIndexer()
+    with console.status(
+        "[cyan]Scanning and indexing files into vector store...[/cyan]"
+    ):
+        res = indexer.index_directory(directory_path=path, force=force)
+
+    if res.get("status") == "error":
+        console.print(f"[bold red]Indexing failed:[/bold red] {res.get('error')}")
+        return
+
+    console.print(
+        Panel.fit(
+            f"[bold green]Indexing Finished[/bold green]\n"
+            f"[dim]Directory:[/dim] {res['directory']}\n"
+            f"[dim]Scanned:[/dim] {res['scanned']} files\n"
+            f"[dim]Indexed:[/dim] [green]{res['indexed']}[/green] files\n"
+            f"[dim]Skipped (Unchanged):[/dim] [dim]{res['skipped']}[/dim] files\n"
+            f"[dim]Total Chunks Added:[/dim] [cyan]{res['chunks_added']}[/cyan] chunks",
+            title="RAG Indexing Summary",
+            border_style="green",
+        )
+    )
+
+
+@rag.command("search")
+@click.argument("query")
+@click.option("--top-k", default=4, type=int, help="Number of results to return")
+@click.option("--path", default=None, help="Filter by path prefix")
+def rag_search(query: str, top_k: int, path: str):
+    """Perform semantic vector retrieval on the knowledge base."""
+    from jarvis_studio.rag.embeddings import EmbeddingsFactory
+    from jarvis_studio.rag.store import SqliteVecStore
+
+    store = SqliteVecStore()
+    embeddings = EmbeddingsFactory.create_embeddings()
+
+    with console.status("[cyan]Searching vector knowledge base...[/cyan]"):
+        q_vec = embeddings.embed_query(query)
+        matches = store.search(query_embedding=q_vec, top_k=top_k, doc_path_prefix=path)
+
+    if not matches:
+        console.print(f"[dim]No matches found for query: '{query}'[/dim]")
+        return
+
+    for i, m in enumerate(matches, 1):
+        clean_content = _safe_str(m["content"])
+        clean_path = _safe_str(m["doc_path"])
+        console.print(
+            Panel(
+                f"[dim]{clean_content}[/dim]",
+                title=f"[cyan]#{i} Score: {m['score']:.4f} | {clean_path} (chunk {m['chunk_index']})[/cyan]",
+                border_style="cyan",
+            )
+        )
+
+
+@rag.command("list")
+def rag_list():
+    """List indexed documents in the local vector store."""
+    from jarvis_studio.rag.store import SqliteVecStore
+
+    store = SqliteVecStore()
+    docs = store.list_indexed_files()
+    if not docs:
+        console.print(
+            "[dim]No documents indexed yet. Run 'jarvis-studio rag index' to index files.[/dim]"
+        )
+        return
+
+    table = Table(title="Indexed Documents in Vector Store")
+    table.add_column("Document Path", style="bold")
+    table.add_column("Chunks", justify="center", style="cyan")
+    table.add_column("Hash", style="dim")
+    table.add_column("Last Indexed", style="dim")
+
+    for d in docs:
+        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(d["updated_at"]))
+        table.add_row(
+            d["doc_path"], str(d["chunk_count"]), d["file_hash"][:10] + "...", time_str
+        )
+
+    console.print(table)
 
 
 @cli.command("sessions")
@@ -122,7 +325,9 @@ def list_sessions_cmd():
     sessions = session_service.list_sessions()
 
     if not sessions:
-        console.print("[dim]No active sessions found. Run 'jarvis-studio chat' to start one.[/dim]")
+        console.print(
+            "[dim]No active sessions found. Run 'jarvis-studio chat' to start one.[/dim]"
+        )
         return
 
     table = Table(title="Conversation Sessions")
@@ -146,13 +351,27 @@ def list_sessions_cmd():
 def serve(host: str, port: int, reload: bool):
     """Start the FastAPI HTTP & SSE application server."""
     import uvicorn
-    console.print(f"[bold green]Starting Jarvis Studio API Gateway on http://{host}:{port}...[/bold green]")
-    uvicorn.run("jarvis_studio.api.app:create_app", host=host, port=port, reload=reload, factory=True)
+
+    console.print(
+        f"[bold green]Starting Jarvis Studio API Gateway on http://{host}:{port}...[/bold green]"
+    )
+    uvicorn.run(
+        "jarvis_studio.api.app:create_app",
+        host=host,
+        port=port,
+        reload=reload,
+        factory=True,
+    )
 
 
 @cli.command()
 @click.option("--session", default=None, help="Specific session/thread ID to resume")
-@click.option("--mcp/--no-mcp", "connect_mcp", default=True, help="Auto-connect enabled MCP servers")
+@click.option(
+    "--mcp/--no-mcp",
+    "connect_mcp",
+    default=True,
+    help="Auto-connect enabled MCP servers",
+)
 def chat(session: str, connect_mcp: bool):
     """Launch an interactive terminal chat session with Jarvis."""
     from jarvis_studio.service.agent_service import get_agent_service
@@ -184,7 +403,13 @@ def chat(session: str, connect_mcp: bool):
             f"[bold red]Description:[/bold red] {desc}\n"
             f"[bold cyan]Arguments  :[/bold cyan]\n[dim]{args_str}[/dim]"
         )
-        console.print(Panel(box_text, title="[bold red]⚠️ HITL Approval Intercepted[/bold red]", border_style="red"))
+        console.print(
+            Panel(
+                box_text,
+                title="[bold red]⚠️ HITL Approval Intercepted[/bold red]",
+                border_style="red",
+            )
+        )
 
         prompt_str = (
             "\n[bold yellow]Authorize execution?[/bold yellow] "
@@ -199,7 +424,9 @@ def chat(session: str, connect_mcp: bool):
                 return ApprovalDecision(decision="approve")
 
             if choice in ("n", "no"):
-                reason = console.input("[dim]Reason for rejection (optional): [/dim]").strip()
+                reason = console.input(
+                    "[dim]Reason for rejection (optional): [/dim]"
+                ).strip()
                 return ApprovalDecision(
                     decision="reject",
                     reason=reason or "Rejected by developer in terminal",
@@ -209,22 +436,34 @@ def chat(session: str, connect_mcp: bool):
                 console.print(
                     "[dim]Enter modified arguments (JSON format or raw string if single parameter):[/dim]"
                 )
-                raw_mod = console.input("[bold blue]New Arguments > [/bold blue]").strip()
+                raw_mod = console.input(
+                    "[bold blue]New Arguments > [/bold blue]"
+                ).strip()
                 if not raw_mod:
-                    console.print("[yellow]Modification cancelled. Reverting to rejection.[/yellow]")
-                    return ApprovalDecision(decision="reject", reason="Cancelled modification")
+                    console.print(
+                        "[yellow]Modification cancelled. Reverting to rejection.[/yellow]"
+                    )
+                    return ApprovalDecision(
+                        decision="reject", reason="Cancelled modification"
+                    )
 
                 try:
                     parsed_mod = json.loads(raw_mod)
-                    return ApprovalDecision(decision="modify", modified_arguments=parsed_mod)
+                    return ApprovalDecision(
+                        decision="modify", modified_arguments=parsed_mod
+                    )
                 except json.JSONDecodeError:
                     if len(args) == 1:
                         single_key = next(iter(args.keys()))
-                        return ApprovalDecision(decision="modify", modified_arguments={single_key: raw_mod})
+                        return ApprovalDecision(
+                            decision="modify", modified_arguments={single_key: raw_mod}
+                        )
                     console.print("[red]Invalid JSON! Please try again.[/red]")
                     continue
 
-            console.print("[yellow]Invalid option. Please enter 'y', 'n', or 'm'.[/yellow]")
+            console.print(
+                "[yellow]Invalid option. Please enter 'y', 'n', or 'm'.[/yellow]"
+            )
 
     async def _chat_loop():
         if connect_mcp:
@@ -253,7 +492,9 @@ def chat(session: str, connect_mcp: bool):
         try:
             while True:
                 try:
-                    user_input = console.input("\n[bold green]You > [/bold green]").strip()
+                    user_input = console.input(
+                        "\n[bold green]You > [/bold green]"
+                    ).strip()
                 except (KeyboardInterrupt, EOFError):
                     console.print("\n[yellow]Session terminated by user.[/yellow]")
                     break
@@ -262,17 +503,22 @@ def chat(session: str, connect_mcp: bool):
                     continue
 
                 if user_input.lower() in ("exit", "quit", "/q"):
-                    console.print("[yellow]Goodbye! Session state preserved in SQLite.[/yellow]")
+                    console.print(
+                        "[yellow]Goodbye! Session state preserved in SQLite.[/yellow]"
+                    )
                     break
 
                 if user_input.lower() == "/tools":
                     t_table = Table(title="Currently Registered Tools")
                     t_table.add_column("Name", style="bold")
+                    t_table.add_column("Category", style="cyan")
                     t_table.add_column("Risk", justify="center")
                     t_table.add_column("Description")
                     for t in registry.list_tools():
                         m = get_tool_metadata(t)
-                        t_table.add_row(m.name, m.risk_level.value, m.description[:60])
+                        t_table.add_row(
+                            m.name, m.category, m.risk_level.value, m.description[:50]
+                        )
                     console.print(t_table)
                     continue
 
@@ -281,7 +527,9 @@ def chat(session: str, connect_mcp: bool):
                     continue
 
                 if user_input.lower() == "/help":
-                    console.print("[dim]Commands: /tools (list tools), /clear (clear screen), exit (quit)[/dim]")
+                    console.print(
+                        "[dim]Commands: /tools (list tools), /clear (clear screen), exit (quit)[/dim]"
+                    )
                     continue
 
                 with console.status("[cyan]Jarvis is thinking...[/cyan]"):
@@ -290,7 +538,9 @@ def chat(session: str, connect_mcp: bool):
                 # Process any HITL approvals in a loop (supports chained tool calls)
                 while result.status == "interrupted" and result.pending_approval:
                     decision = await _handle_approval_decision(result.pending_approval)
-                    with console.status("[cyan]Resuming execution with decision...[/cyan]"):
+                    with console.status(
+                        "[cyan]Resuming execution with decision...[/cyan]"
+                    ):
                         result = await agent_service.resume_approval(
                             thread_id=thread_id,
                             approval_id=result.pending_approval.get("approval_id", ""),
@@ -298,9 +548,13 @@ def chat(session: str, connect_mcp: bool):
                         )
 
                 if result.status == "error":
-                    console.print(f"[bold red]Execution Error:[/bold red] {result.error}")
+                    console.print(
+                        f"[bold red]Execution Error:[/bold red] {result.error}"
+                    )
                 else:
-                    console.print(f"\n[bold cyan]Jarvis > [/bold cyan]{result.output_text}")
+                    console.print(
+                        f"\n[bold cyan]Jarvis > [/bold cyan]{result.output_text}"
+                    )
 
         finally:
             if connect_mcp:

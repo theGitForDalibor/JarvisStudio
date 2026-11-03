@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional
+
 import yaml
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -10,6 +10,7 @@ from jarvis_studio.config.models import (
     AppConfig,
     LLMConfig,
     ObservabilityConfig,
+    RAGConfig,
     SecurityConfig,
     StorageConfig,
 )
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
     llm: LLMConfig = LLMConfig()
     security: SecurityConfig = SecurityConfig()
     storage: StorageConfig = StorageConfig()
+    rag: RAGConfig = RAGConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
 
     model_config = SettingsConfigDict(
@@ -32,7 +34,9 @@ class Settings(BaseSettings):
     )
 
     @classmethod
-    def load_from_env_and_yaml(cls, yaml_path: Optional[str] = "config/settings.yaml") -> "Settings":
+    def load_from_env_and_yaml(
+        cls, yaml_path: str | None = "config/settings.yaml"
+    ) -> "Settings":
         """Load settings from environment variables with optional YAML overrides."""
         settings_kwargs = {}
         if yaml_path and os.path.exists(yaml_path):
@@ -41,12 +45,11 @@ class Settings(BaseSettings):
                     yaml_data = yaml.safe_load(f)
                     if isinstance(yaml_data, dict):
                         settings_kwargs = yaml_data
-            except Exception as e:
-                # Log error or fallback silently
+            except Exception:
                 pass
 
         instance = cls(**settings_kwargs)
-        
+
         # Override flat env variables if present
         if openai_key := os.getenv("OPENAI_API_KEY"):
             instance.llm.openai_api_key = openai_key
@@ -64,16 +67,20 @@ class Settings(BaseSettings):
             instance.storage.sqlite_path = sqlite_path
         if checkpoint_backend := os.getenv("CHECKPOINT_BACKEND"):
             instance.storage.checkpoint_backend = checkpoint_backend
+        if vector_db_path := os.getenv("VECTOR_DB_PATH"):
+            instance.rag.vector_db_path = vector_db_path
 
         # Ensure directories exist
         Path(instance.storage.workspace_root).mkdir(parents=True, exist_ok=True)
         if instance.storage.checkpoint_backend == "sqlite":
             Path(instance.storage.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+        if instance.rag.enabled and instance.rag.vector_db_path != ":memory:":
+            Path(instance.rag.vector_db_path).parent.mkdir(parents=True, exist_ok=True)
 
         return instance
 
 
-_global_settings: Optional[Settings] = None
+_global_settings: Settings | None = None
 
 
 def get_settings() -> Settings:

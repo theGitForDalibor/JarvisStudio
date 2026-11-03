@@ -2,7 +2,7 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Optional
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -10,11 +10,12 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
 
+_cached_checkpointer: BaseCheckpointSaver | None = None
 
-_cached_checkpointer: Optional[BaseCheckpointSaver] = None
 
-
-def get_checkpointer(backend: Optional[str] = None, db_path: Optional[str] = None) -> BaseCheckpointSaver:
+def get_checkpointer(
+    backend: str | None = None, db_path: str | None = None
+) -> BaseCheckpointSaver:
     """Retrieve or create the designated checkpointer instance."""
     global _cached_checkpointer
     if _cached_checkpointer is not None:

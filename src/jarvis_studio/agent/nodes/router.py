@@ -1,6 +1,7 @@
 """Router logic for LangGraph conditional edges."""
 
 from typing import Literal
+
 from langchain_core.messages import AIMessage
 from langgraph.graph import END
 

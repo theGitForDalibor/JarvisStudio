@@ -1,7 +1,7 @@
 """Bridge adapting Model Context Protocol (MCP) tools to LangChain BaseTool."""
 
 from collections.abc import Callable, Coroutine
-from typing import Any, Optional
+from typing import Any
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, create_model
@@ -10,7 +10,9 @@ from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.tools.base import RiskLevel, tag_tool_safety
 
 
-def create_dynamic_args_schema(tool_name: str, input_schema: dict[str, Any]) -> type[BaseModel]:
+def create_dynamic_args_schema(
+    tool_name: str, input_schema: dict[str, Any]
+) -> type[BaseModel]:
     """Convert an MCP JSON Schema dict into a Pydantic model for LangChain argument validation."""
     properties = input_schema.get("properties", {})
     required_fields = set(input_schema.get("required", []))
@@ -37,7 +39,10 @@ def create_dynamic_args_schema(tool_name: str, input_schema: dict[str, Any]) -> 
         if prop_name in required_fields:
             field_definitions[prop_name] = (prop_type, Field(description=prop_desc))
         else:
-            field_definitions[prop_name] = (prop_type | None, Field(default=None, description=prop_desc))
+            field_definitions[prop_name] = (
+                prop_type | None,
+                Field(default=None, description=prop_desc),
+            )
 
     sanitized_name = "".join(c if c.isalnum() else "_" for c in tool_name).capitalize()
     schema_name = f"{sanitized_name}Input"
@@ -66,13 +71,17 @@ class MCPToolAdapter(BaseTool):
 
         if loop and loop.is_running():
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                return executor.submit(lambda: asyncio.run(self._arun(*args, **kwargs))).result()
+                return executor.submit(
+                    lambda: asyncio.run(self._arun(*args, **kwargs))
+                ).result()
         return asyncio.run(self._arun(*args, **kwargs))
 
     async def _arun(self, *args: Any, **kwargs: Any) -> str:
         """Execute the tool through the underlying MCP client."""
         target_name = self.raw_name or self.name
-        logger.info(f"Calling MCP tool '{target_name}' (registered as '{self.name}') on server '{self.server_name}'")
+        logger.info(
+            f"Calling MCP tool '{target_name}' (registered as '{self.name}') on server '{self.server_name}'"
+        )
         try:
             if not self.call_mcp_func:
                 return f"Error: No MCP client function bound for '{self.name}'"
@@ -91,9 +100,8 @@ def convert_mcp_tool_to_langchain(
     risk_level: RiskLevel = RiskLevel.SAFE,
 ) -> BaseTool:
     """Transform an MCP tool definition into a registered LangChain BaseTool."""
-    raw_name = (
-        getattr(mcp_tool, "name", None)
-        or (mcp_tool.get("name") if isinstance(mcp_tool, dict) else str(mcp_tool))
+    raw_name = getattr(mcp_tool, "name", None) or (
+        mcp_tool.get("name") if isinstance(mcp_tool, dict) else str(mcp_tool)
     )
     tool_name = f"{server_name}_{raw_name}"
     tool_desc = (

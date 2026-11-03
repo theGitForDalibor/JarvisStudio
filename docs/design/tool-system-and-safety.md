@@ -14,9 +14,10 @@ Jarvis Studio 内的每一个工具必须通过 `tag_tool_safety` 标注安全�
 
 ```python
 class RiskLevel(str, Enum):
-    SAFE = "SAFE"        # 只读操作，零副作用，不改变任何系统状态
-    MEDIUM = "MEDIUM"    # 局部、临时或可逆的写入变动
-    HIGH = "HIGH"        # 破坏性修改、文件覆盖/删除、终端执行、网络写请求
+    SAFE = "SAFE"  # 只读操作，零副作用，不改变任何系统状态
+    MEDIUM = "MEDIUM"  # 局部、临时或可逆的写入变动
+    HIGH = "HIGH"  # 破坏性修改、文件覆盖/删除、终端执行、网络写请求
+
 
 class ToolMetadata(BaseModel):
     name: str

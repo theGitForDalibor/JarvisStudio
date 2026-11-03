@@ -14,8 +14,8 @@ from jarvis_studio.service.session_service import (
 __all__ = [
     "AgentExecutionResult",
     "AgentService",
-    "get_agent_service",
     "SessionMetadata",
     "SessionService",
+    "get_agent_service",
     "get_session_service",
 ]

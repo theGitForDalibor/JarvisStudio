@@ -1,21 +1,24 @@
 """API Response Schemas."""
 
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel
 
 
 class ChatResponse(BaseModel):
     """Standardized response from an agent invocation."""
+
     thread_id: str
     run_id: str
     status: str  # "completed" | "interrupted" | "error"
     output_text: str = ""
-    pending_approval: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
+    pending_approval: dict[str, Any] | None = None
+    error: str | None = None
 
 
 class SystemStatusResponse(BaseModel):
     """System health and runtime status."""
+
     status: str = "ok"
     version: str
     default_provider: str

@@ -1,7 +1,7 @@
 """High-level Agent Application Service decoupling API/UI from LangGraph."""
 
-import uuid
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any
+
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
@@ -21,8 +21,8 @@ class AgentExecutionResult:
         run_id: str,
         status: str,  # "completed" | "interrupted" | "error"
         output_text: str = "",
-        pending_approval: Optional[Dict[str, Any]] = None,
-        error: Optional[str] = None,
+        pending_approval: dict[str, Any] | None = None,
+        error: str | None = None,
     ):
         self.thread_id = thread_id
         self.run_id = run_id
@@ -31,7 +31,7 @@ class AgentExecutionResult:
         self.pending_approval = pending_approval
         self.error = error
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "thread_id": self.thread_id,
             "run_id": self.run_id,
@@ -62,7 +62,7 @@ class AgentService:
         self,
         thread_id: str,
         user_message: str,
-        run_id: Optional[str] = None,
+        run_id: str | None = None,
     ) -> AgentExecutionResult:
         """Execute the agent on a specific thread with user input."""
         session = self.session_service.get_or_create_session(thread_id)
@@ -188,7 +188,7 @@ class AgentService:
             )
 
 
-_global_agent_service: Optional[AgentService] = None
+_global_agent_service: AgentService | None = None
 
 
 def get_agent_service() -> AgentService:

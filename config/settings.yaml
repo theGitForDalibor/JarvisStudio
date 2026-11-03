@@ -24,6 +24,16 @@ storage:
   sqlite_path: "data/jarvis_studio.db"
   workspace_root: "./data/workspace"
 
+rag:
+  enabled: true
+  embedding_provider: "auto"
+  embedding_model: "text-embedding-3-small"
+  embedding_dimension: 1536
+  vector_db_path: "data/jarvis_vec.db"
+  chunk_size: 600
+  chunk_overlap: 100
+  top_k: 4
+
 observability:
   enable_rich_logging: true
   log_level: "INFO"

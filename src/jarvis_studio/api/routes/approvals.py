@@ -1,6 +1,7 @@
 """Human-in-the-Loop approval resolution endpoints."""
 
-from typing import Any, Dict, List
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 
 from jarvis_studio.agent.hitl.manager import ApprovalDecision, get_hitl_manager
@@ -11,8 +12,8 @@ from jarvis_studio.service.agent_service import get_agent_service
 router = APIRouter(prefix="/approvals", tags=["Approvals (HITL)"])
 
 
-@router.get("", response_model=List[Dict[str, Any]])
-async def list_pending_approvals() -> List[Dict[str, Any]]:
+@router.get("", response_model=list[dict[str, Any]])
+async def list_pending_approvals() -> list[dict[str, Any]]:
     """List all currently pending human approval requests."""
     hitl_mgr = get_hitl_manager()
     requests = hitl_mgr.list_pending()

@@ -1,9 +1,11 @@
 """Agent state definitions for LangGraph execution."""
 
-from typing import Annotated, Any, Dict, List, Optional, Sequence
-from typing_extensions import TypedDict
+from collections.abc import Sequence
+from typing import Annotated, Any
+
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+from typing_extensions import TypedDict
 
 
 class AgentState(TypedDict):
@@ -13,10 +15,10 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
     # Contextual metadata (session_id, user_id, active run_id, etc.)
-    run_context: Dict[str, Any]
+    run_context: dict[str, Any]
 
     # Pending HITL approval information if paused
-    pending_approval: Optional[Dict[str, Any]]
+    pending_approval: dict[str, Any] | None
 
     # Resolution received from user upon HITL resumption
-    approval_decision: Optional[Dict[str, Any]]
+    approval_decision: dict[str, Any] | None

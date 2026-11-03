@@ -1,22 +1,23 @@
 """LLM Provider specifications and adapters."""
 
-from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
+
 from jarvis_studio.config.models import LLMProviderType
 
 
 class ProviderSpec(BaseModel):
     """Specification describing an LLM provider and its default capabilities."""
+
     provider_type: LLMProviderType
     default_model: str
     supports_streaming: bool = True
     supports_tool_calling: bool = True
     base_url_required: bool = False
     description: str = ""
-    extra_headers: Dict[str, str] = Field(default_factory=dict)
+    extra_headers: dict[str, str] = Field(default_factory=dict)
 
 
-PROVIDER_REGISTRY: Dict[LLMProviderType, ProviderSpec] = {
+PROVIDER_REGISTRY: dict[LLMProviderType, ProviderSpec] = {
     LLMProviderType.OPENAI: ProviderSpec(
         provider_type=LLMProviderType.OPENAI,
         default_model="gpt-4o-mini",

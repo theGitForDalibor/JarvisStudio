@@ -1,8 +1,7 @@
 """Production filesystem tools with safety policies."""
 
-import os
 from pathlib import Path
-from typing import Optional
+
 from langchain_core.tools import tool
 
 from jarvis_studio.config.settings import get_settings
@@ -13,7 +12,11 @@ def _resolve_safe_path(target_path: str) -> Path:
     """Resolve target path against the configured workspace root."""
     settings = get_settings()
     workspace = Path(settings.storage.workspace_root).resolve()
-    resolved = (workspace / target_path).resolve() if not Path(target_path).is_absolute() else Path(target_path).resolve()
+    resolved = (
+        (workspace / target_path).resolve()
+        if not Path(target_path).is_absolute()
+        else Path(target_path).resolve()
+    )
     return resolved
 
 
@@ -29,7 +32,10 @@ def read_file(file_path: str, max_chars: int = 20000) -> str:
 
         content = path.read_text(encoding="utf-8", errors="replace")
         if len(content) > max_chars:
-            return content[:max_chars] + f"\n... [Truncated: {len(content) - max_chars} characters omitted]"
+            return (
+                content[:max_chars]
+                + f"\n... [Truncated: {len(content) - max_chars} characters omitted]"
+            )
         return content
     except Exception as e:
         return f"Error reading file {file_path}: {e}"

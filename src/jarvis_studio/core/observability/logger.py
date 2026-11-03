@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+
 from loguru import logger
 
 # Remove default handler
@@ -15,7 +16,9 @@ _LOG_FORMAT = (
 )
 
 
-def setup_logger(log_level: str = "INFO", log_file: str = "logs/jarvis_studio.log") -> None:
+def setup_logger(
+    log_level: str = "INFO", log_file: str = "logs/jarvis_studio.log"
+) -> None:
     """Initialize structured console and rotating file logger."""
     # Ensure logs directory exists
     Path(log_file).parent.mkdir(parents=True, exist_ok=True)
