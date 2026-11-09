@@ -12,6 +12,7 @@ from jarvis_studio.api.routes.approvals import router as approvals_router
 from jarvis_studio.api.routes.chat import router as chat_router
 from jarvis_studio.api.routes.memory import router as memory_router
 from jarvis_studio.api.routes.rag import router as rag_router
+from jarvis_studio.api.routes.sessions import router as sessions_router
 from jarvis_studio.api.routes.system import router as system_router
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     # Register Routers
     api_prefix = "/api/v1"
     app.include_router(system_router, prefix=api_prefix)
+    app.include_router(sessions_router, prefix=api_prefix)
     app.include_router(chat_router, prefix=api_prefix)
     app.include_router(approvals_router, prefix=api_prefix)
     app.include_router(memory_router, prefix=api_prefix)

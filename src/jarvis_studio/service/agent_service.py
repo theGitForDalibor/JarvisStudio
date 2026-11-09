@@ -67,11 +67,27 @@ class AgentService:
     ) -> AgentExecutionResult:
         """Execute the agent on a specific thread with user input."""
         self.session_service.get_or_create_session(thread_id)
+        self.session_service.add_message(thread_id, role="user", content=user_message)
         effective_run_id = set_trace_context(thread_id, run_id)
 
         config = {"configurable": {"thread_id": thread_id}}
+        
+        # Check if state needs historical context from SQLite
+        state_snapshot = await self.graph.aget_state(config)
+        messages_input = [HumanMessage(content=user_message)]
+        if not state_snapshot.values.get("messages"):
+            past_records = self.session_service.get_messages(thread_id)
+            if len(past_records) > 1:
+                history_msgs = []
+                for rec in past_records[:-1]:
+                    if rec.role == "user":
+                        history_msgs.append(HumanMessage(content=rec.content))
+                    elif rec.role == "assistant":
+                        history_msgs.append(AIMessage(content=rec.content))
+                messages_input = history_msgs + [HumanMessage(content=user_message)]
+
         input_state = {
-            "messages": [HumanMessage(content=user_message)],
+            "messages": messages_input,
             "run_context": {
                 "session_id": thread_id,
                 "run_id": effective_run_id,
@@ -108,6 +124,9 @@ class AgentService:
                     output = str(m.content)
                     break
 
+            if output:
+                self.session_service.add_message(thread_id, role="assistant", content=output)
+
             return AgentExecutionResult(
                 thread_id=thread_id,
                 run_id=effective_run_id,
@@ -132,10 +151,26 @@ class AgentService:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream token-by-token and tool execution steps from the StateGraph."""
         self.session_service.get_or_create_session(thread_id)
+        self.session_service.add_message(thread_id, role="user", content=user_message)
         effective_run_id = set_trace_context(thread_id, run_id)
         config = {"configurable": {"thread_id": thread_id}}
+
+        # Check if state needs historical context from SQLite
+        state_snapshot = await self.graph.aget_state(config)
+        messages_input = [HumanMessage(content=user_message)]
+        if not state_snapshot.values.get("messages"):
+            past_records = self.session_service.get_messages(thread_id)
+            if len(past_records) > 1:
+                history_msgs = []
+                for rec in past_records[:-1]:
+                    if rec.role == "user":
+                        history_msgs.append(HumanMessage(content=rec.content))
+                    elif rec.role == "assistant":
+                        history_msgs.append(AIMessage(content=rec.content))
+                messages_input = history_msgs + [HumanMessage(content=user_message)]
+
         input_state = {
-            "messages": [HumanMessage(content=user_message)],
+            "messages": messages_input,
             "run_context": {
                 "session_id": thread_id,
                 "run_id": effective_run_id,
@@ -189,6 +224,8 @@ class AgentService:
                     if isinstance(m, AIMessage) and m.content:
                         output = str(m.content)
                         break
+                if output:
+                    self.session_service.add_message(thread_id, role="assistant", content=output)
                 yield {
                     "event": "completed",
                     "data": {
@@ -248,6 +285,9 @@ class AgentService:
                 if isinstance(m, AIMessage) and m.content:
                     output = str(m.content)
                     break
+
+            if output:
+                self.session_service.add_message(thread_id, role="assistant", content=output)
 
             return AgentExecutionResult(
                 thread_id=thread_id,
@@ -326,6 +366,8 @@ class AgentService:
                     if isinstance(m, AIMessage) and m.content:
                         output = str(m.content)
                         break
+                if output:
+                    self.session_service.add_message(thread_id, role="assistant", content=output)
                 yield {
                     "event": "completed",
                     "data": {

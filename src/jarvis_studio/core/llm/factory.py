@@ -1,5 +1,7 @@
 """Unified Factory to instantiate LangChain ChatModels across swappable providers."""
 
+import os
+
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
@@ -93,10 +95,21 @@ class LLMFactory:
         temperature: float,
         streaming: bool,
     ) -> BaseChatModel:
-        # If API key is not set, ChatOpenAI will check OPENAI_API_KEY env var
+        # Normalize base_url if provided
+        if base_url:
+            clean_url = base_url.rstrip("/")
+            if clean_url and not clean_url.endswith("/v1"):
+                clean_url = f"{clean_url}/v1"
+            base_url = clean_url
+
+        effective_key = api_key or os.getenv("OPENAI_API_KEY")
+        # If custom base_url is specified (e.g. local proxy), provide placeholder key if none set
+        if not effective_key and base_url and ("localhost" in base_url or "127.0.0.1" in base_url):
+            effective_key = "local-proxy-key"
+
         return ChatOpenAI(
             model=model_name,
-            api_key=api_key,
+            api_key=effective_key,
             base_url=base_url,
             temperature=temperature,
             streaming=streaming,
@@ -114,10 +127,14 @@ class LLMFactory:
             raise ConfigurationError(
                 "base_url is required for OpenAI-compatible providers"
             )
+        clean_url = base_url.rstrip("/")
+        if clean_url and not clean_url.endswith("/v1"):
+            clean_url = f"{clean_url}/v1"
+
         return ChatOpenAI(
             model=model_name,
             api_key=api_key or "placeholder",
-            base_url=base_url,
+            base_url=clean_url,
             temperature=temperature,
             streaming=streaming,
         )

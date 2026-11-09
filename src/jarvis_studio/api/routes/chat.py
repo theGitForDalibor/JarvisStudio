@@ -43,20 +43,31 @@ async def chat_with_agent(request: ChatRequest) -> ChatResponse:
 @router.post("/stream")
 async def chat_stream_with_agent(request: ChatRequest):
     """Send an instruction and stream real-time Server-Sent Events (SSE) (tokens and steps)."""
-    session_service = get_session_service()
-    agent_service = get_agent_service()
-
-    session = session_service.get_or_create_session(request.session_id)
-    thread_id = session.session_id
+    try:
+        session_service = get_session_service()
+        agent_service = get_agent_service()
+        session = session_service.get_or_create_session(request.session_id)
+        thread_id = session.session_id
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to initialize agent execution: {str(e)}"
+        )
 
     async def event_generator():
-        async for event in agent_service.stream_agent(
-            thread_id=thread_id,
-            user_message=request.message,
-        ):
+        try:
+            async for event in agent_service.stream_agent(
+                thread_id=thread_id,
+                user_message=request.message,
+            ):
+                yield {
+                    "event": event.get("event", "message"),
+                    "data": json.dumps(event.get("data", {}), ensure_ascii=False),
+                }
+        except Exception as e:
             yield {
-                "event": event.get("event", "message"),
-                "data": json.dumps(event.get("data", {}), ensure_ascii=False),
+                "event": "error",
+                "data": json.dumps({"error": f"Streaming failure: {str(e)}"}, ensure_ascii=False),
             }
 
     return EventSourceResponse(event_generator())

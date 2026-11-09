@@ -27,22 +27,24 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <style>
     /* Custom Scrollbars */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: #0f172a; }
     ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #475569; }
-    .markdown-body pre { background-color: #0f172a !important; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin: 0.5rem 0; border: 1px solid #334155; }
-    .markdown-body code { font-family: monospace; }
+    .markdown-body pre { background-color: #0b0f19 !important; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin: 0.5rem 0; border: 1px solid #1e293b; }
+    .markdown-body code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
     .markdown-body p { margin-bottom: 0.5rem; line-height: 1.6; }
     .markdown-body ul, .markdown-body ol { margin-left: 1.5rem; margin-bottom: 0.5rem; }
     .markdown-body ul { list-style-type: disc; }
     .markdown-body ol { list-style-type: decimal; }
+    .session-item-actions { opacity: 0; transition: opacity 0.15s ease-in-out; }
+    .session-item:hover .session-item-actions { opacity: 1; }
   </style>
 </head>
-<body class="bg-slate-950 text-slate-100 flex flex-col h-screen overflow-hidden">
+<body class="bg-slate-950 text-slate-100 flex flex-col h-screen overflow-hidden font-sans">
 
   <!-- Top Navigation Header -->
-  <header class="h-14 border-b border-slate-800 bg-slate-900/80 backdrop-blur px-4 flex items-center justify-between shrink-0 z-20">
+  <header class="h-14 border-b border-slate-800 bg-slate-900/90 backdrop-blur px-4 flex items-center justify-between shrink-0 z-20">
     <div class="flex items-center gap-3">
       <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">
         J
@@ -50,7 +52,7 @@
       <div>
         <h1 class="font-bold text-sm tracking-wide flex items-center gap-2">
           Jarvis Studio
-          <span class="text-xs font-normal px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">v0.1.0</span>
+          <span class="text-[11px] font-normal px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">v0.1.0</span>
         </h1>
       </div>
     </div>
@@ -87,77 +89,138 @@
   <!-- Main View Container -->
   <main class="flex-1 relative overflow-hidden flex flex-col">
 
-    <!-- 1. CHAT TAB -->
-    <div id="view-chat" class="flex-1 flex flex-col h-full overflow-hidden">
-      <!-- Session Bar -->
-      <div class="h-10 px-4 bg-slate-900/50 border-b border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
-        <div class="flex items-center gap-2">
-          <span>当前会话:</span>
-          <span id="current-thread-id" class="font-mono text-blue-400 font-medium">default</span>
-          <button onclick="newSession()" class="text-xs text-slate-400 hover:text-white underline ml-2">+ 新建会话</button>
-        </div>
-        <div class="flex items-center gap-3">
-          <span id="streaming-indicator" class="hidden text-amber-400 flex items-center gap-1 font-mono">
-            <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span> 思考生成中...
-          </span>
-          <button onclick="clearChatUI()" class="hover:text-red-400 transition">清空屏幕</button>
-        </div>
-      </div>
+    <!-- 1. CHAT TAB (Split Layout: Sessions Sidebar + Chat Arena) -->
+    <div id="view-chat" class="flex-1 flex h-full overflow-hidden">
 
-      <!-- Messages Stream Window -->
-      <div id="messages-container" class="flex-1 overflow-y-auto p-4 space-y-4">
-        <!-- Welcome Message -->
-        <div class="flex items-start gap-3 max-w-4xl mx-auto">
-          <div class="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center font-bold text-xs shrink-0">
-            AI
+      <!-- Left: Session Sidebar -->
+      <aside id="session-sidebar" class="w-72 bg-slate-900/60 border-r border-slate-800/80 flex flex-col h-full shrink-0 transition-all duration-200 select-none">
+        <!-- Sidebar Header & New Session Button -->
+        <div class="p-3 border-b border-slate-800/80 space-y-2">
+          <div class="flex items-center justify-between text-xs text-slate-400">
+            <span class="font-semibold flex items-center gap-1.5 text-slate-300">
+              <svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg>
+              会话列表
+            </span>
+            <button onclick="toggleSidebar()" title="折叠侧边栏" class="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-slate-200 transition">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+            </button>
           </div>
-          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm leading-relaxed max-w-2xl shadow-sm">
-            <p class="font-medium text-slate-200 mb-1">你好！我是 Jarvis Studio 个人 AI 操作系统助理。</p>
-            <p class="text-slate-400 text-xs">我已接入 <strong>LangGraph</strong> 运行时、<strong>HITL 安全审批</strong>、<strong>长期记忆 (LTM)</strong> 与 <strong>本地轻量向量知识库 (sqlite-vec)</strong>。请随时向我发送任务！</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- HITL Interception Floating Banner -->
-      <div id="hitl-modal-card" class="hidden px-4 py-3 bg-red-950/80 border-t border-b border-red-500/30 backdrop-blur max-w-4xl mx-auto w-full my-2 rounded-xl shadow-lg shadow-red-950/50">
-        <div class="flex items-center justify-between mb-2">
-          <div class="flex items-center gap-2 text-red-400 font-semibold text-sm">
-            <span>⚠️ 敏感操作拦截 (Human-in-the-Loop)</span>
-            <span id="hitl-tool-tag" class="px-2 py-0.5 text-xs bg-red-900/60 rounded border border-red-500/40 text-red-200"></span>
-          </div>
-          <span class="text-xs text-red-300">需开发者人工审查授权</span>
-        </div>
-        <p id="hitl-desc" class="text-xs text-slate-300 mb-2"></p>
-        <div class="mb-3">
-          <div class="text-[11px] text-slate-400 mb-1">执行入参:</div>
-          <textarea id="hitl-args-editor" class="w-full bg-slate-950 text-xs font-mono p-2 rounded border border-slate-700 text-slate-200 h-20 outline-none focus:border-red-400 resize-none"></textarea>
-        </div>
-        <div class="flex items-center justify-end gap-2 text-xs">
-          <input type="text" id="hitl-reject-reason" placeholder="拒绝原因 (可选)" class="bg-slate-900 text-xs px-2.5 py-1.5 rounded border border-slate-700 text-slate-200 flex-1 outline-none">
-          <button onclick="resolveApproval('reject')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-medium transition">拒绝 (Reject)</button>
-          <button onclick="resolveApproval('modify')" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium transition">改参后恢复 (Modify)</button>
-          <button onclick="resolveApproval('approve')" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium shadow transition">批准执行 (Approve)</button>
-        </div>
-      </div>
-
-      <!-- Chat Input Area -->
-      <div class="p-4 bg-slate-900 border-t border-slate-800">
-        <form id="chat-form" onsubmit="handleSend(event)" class="max-w-4xl mx-auto flex items-end gap-2">
-          <textarea
-            id="chat-input"
-            rows="2"
-            placeholder="输入自然语言指令（例如：'请在 docs 知识库中检索关于 HITL 的设计' 或 '帮我保存偏好：使用 Python 3.12'）..."
-            class="flex-1 bg-slate-950 text-sm text-slate-100 rounded-xl p-3 border border-slate-800 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-none"
-            onkeydown="if(event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleSend(event); }"
-          ></textarea>
-          <button
-            type="submit"
-            id="send-btn"
-            class="h-11 px-5 bg-blue-600 hover:bg-blue-500 text-white font-medium text-sm rounded-xl transition flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/20 disabled:opacity-50"
-          >
-            发送 ↵
+          <button onclick="createNewSession()" class="w-full py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 shadow transition">
+            <span>+</span> 新建会话
           </button>
-        </form>
+          <!-- Search box -->
+          <div class="relative">
+            <input
+              type="text"
+              id="session-search-input"
+              placeholder="搜索会话..."
+              oninput="filterSessions(this.value)"
+              class="w-full bg-slate-950/80 text-xs text-slate-200 rounded-md px-2.5 py-1.5 border border-slate-800 focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <!-- Session List Scroll Area -->
+        <div id="session-list" class="flex-1 overflow-y-auto p-2 space-y-1">
+          <!-- Rendered by JS -->
+          <div class="text-xs text-slate-500 text-center py-6">正在加载会话...</div>
+        </div>
+
+        <!-- Sidebar Footer -->
+        <div class="p-2.5 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500">
+          <span id="session-count-label">0 个会话</span>
+          <button onclick="loadSessions()" class="hover:text-slate-300 transition" title="刷新会话">↻ 刷新</button>
+        </div>
+      </aside>
+
+      <!-- Right: Chat Arena -->
+      <div class="flex-1 flex flex-col h-full overflow-hidden bg-slate-950">
+
+        <!-- Chat Header Bar -->
+        <div class="h-11 px-4 bg-slate-900/40 border-b border-slate-800/80 flex items-center justify-between text-xs text-slate-400 shrink-0">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <!-- Expand Button if sidebar collapsed -->
+            <button id="sidebar-expand-btn" onclick="toggleSidebar()" class="hidden p-1.5 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition" title="展开侧边栏">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+            </button>
+            <span class="text-slate-500">会话:</span>
+            <!-- Editable Title -->
+            <span id="current-session-title" class="font-medium text-slate-200 truncate max-w-xs cursor-pointer hover:text-blue-400" title="点击重命名会话" onclick="promptRenameCurrentSession()">新会话</span>
+            <button onclick="promptRenameCurrentSession()" title="编辑会话标题" class="text-slate-500 hover:text-slate-300 transition">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+            </button>
+            <span id="current-thread-id" class="font-mono text-[11px] text-blue-400/80 bg-blue-950/40 px-2 py-0.5 rounded border border-blue-900/40 cursor-pointer" title="点击复制 Session ID" onclick="copySessionId()">sess_...</span>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <span id="streaming-indicator" class="hidden text-amber-400 flex items-center gap-1.5 font-mono text-xs">
+              <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span> 思考生成中...
+            </span>
+            <button onclick="clearCurrentSessionMessages()" class="text-slate-400 hover:text-red-400 transition text-xs" title="清空当前会话的消息记录">清空消息</button>
+            <button onclick="createNewSession()" class="text-xs text-blue-400 hover:text-blue-300 underline">+ 新会话</button>
+          </div>
+        </div>
+
+        <!-- Messages Stream Window -->
+        <div id="messages-container" class="flex-1 overflow-y-auto p-4 space-y-4">
+          <!-- Welcome Message Rendered by JS or default -->
+          <div class="flex items-start gap-3 max-w-4xl mx-auto">
+            <div class="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center font-bold text-xs shrink-0">
+              AI
+            </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm leading-relaxed max-w-2xl shadow-sm">
+              <p class="font-medium text-slate-200 mb-1">你好！我是 Jarvis Studio 个人 AI 操作系统助理。</p>
+              <p class="text-slate-400 text-xs">我已接入 <strong>LangGraph</strong> 运行时、<strong>HITL 安全审批</strong>、<strong>长期记忆 (LTM)</strong> 与 <strong>本地轻量向量知识库 (sqlite-vec)</strong>。请随时向我发送任务！</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- HITL Interception Floating Banner -->
+        <div id="hitl-modal-card" class="hidden px-4 py-3 bg-red-950/80 border-t border-b border-red-500/30 backdrop-blur max-w-4xl mx-auto w-full my-2 rounded-xl shadow-lg shadow-red-950/50">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2 text-red-400 font-semibold text-sm">
+              <span>⚠️ 敏感操作拦截 (Human-in-the-Loop)</span>
+              <span id="hitl-tool-tag" class="px-2 py-0.5 text-xs bg-red-900/60 rounded border border-red-500/40 text-red-200"></span>
+            </div>
+            <span class="text-xs text-red-300">需开发者人工审查授权</span>
+          </div>
+          <p id="hitl-desc" class="text-xs text-slate-300 mb-2"></p>
+          <div class="mb-3">
+            <div class="text-[11px] text-slate-400 mb-1">执行入参:</div>
+            <textarea id="hitl-args-editor" class="w-full bg-slate-950 text-xs font-mono p-2 rounded border border-slate-700 text-slate-200 h-20 outline-none focus:border-red-400 resize-none"></textarea>
+          </div>
+          <div class="flex items-center justify-end gap-2 text-xs">
+            <input type="text" id="hitl-reject-reason" placeholder="拒绝原因 (可选)" class="bg-slate-900 text-xs px-2.5 py-1.5 rounded border border-slate-700 text-slate-200 flex-1 outline-none">
+            <button onclick="resolveApproval('reject')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-medium transition">拒绝 (Reject)</button>
+            <button onclick="resolveApproval('modify')" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium transition">改参后恢复 (Modify)</button>
+            <button onclick="resolveApproval('approve')" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium shadow transition">批准执行 (Approve)</button>
+          </div>
+        </div>
+
+        <!-- Chat Input Area -->
+        <div class="p-3 bg-slate-900/90 border-t border-slate-800 shrink-0">
+          <form id="chat-form" onsubmit="handleSend(event)" class="max-w-4xl mx-auto flex items-end gap-2">
+            <textarea
+              id="chat-input"
+              rows="2"
+              placeholder="输入自然语言指令（例如：'请在 docs 知识库中检索关于 HITL 的设计' 或 '帮我写一个 Python 脚本'）..."
+              class="flex-1 bg-slate-950 text-sm text-slate-100 rounded-xl p-3 border border-slate-800 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-none leading-relaxed"
+              onkeydown="handleInputKeydown(event)"
+            ></textarea>
+            <button
+              type="submit"
+              id="send-btn"
+              class="h-11 px-5 bg-blue-600 hover:bg-blue-500 text-white font-medium text-sm rounded-xl transition flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/20 disabled:opacity-50"
+            >
+              发送 ↵
+            </button>
+          </form>
+          <div class="max-w-4xl mx-auto mt-1 flex justify-between items-center text-[10px] text-slate-500 px-1">
+            <span>支持 Markdown 解析 · 工具调用自动拦截</span>
+            <span>Enter 发送，Shift + Enter 换行</span>
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -218,39 +281,45 @@
       </div>
 
       <!-- Indexed Files List -->
-      <h3 class="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">已索引文件列表</h3>
-      <div id="rag-files-table" class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden text-xs">
-        <!-- Rendered by JS -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+        <div class="p-3 border-b border-slate-800 flex justify-between items-center">
+          <span class="text-xs font-bold text-slate-300">已索引文档列表</span>
+          <button onclick="loadRagDocs()" class="text-xs text-slate-400 hover:text-white transition">刷新</button>
+        </div>
+        <div id="rag-files-table" class="overflow-x-auto text-xs">
+          <!-- Rendered by JS -->
+        </div>
       </div>
     </div>
 
     <!-- 5. SYSTEM TAB -->
     <div id="view-system" class="hidden flex-1 p-6 overflow-y-auto max-w-5xl mx-auto w-full">
-      <div class="mb-6">
-        <h2 class="text-lg font-bold mb-1">系统环境与已注册工具安全矩阵</h2>
-        <p class="text-xs text-slate-400">监控当前活跃模型提供商、安全三级风险控制状态与 MCP 外部长连接服务。</p>
+      <div class="mb-4">
+        <h2 class="text-lg font-bold">系统工具与基础设施状态</h2>
+        <p class="text-xs text-slate-400">查看当前运行的 LLM 适配器、注册工具集与 MCP 服务器连接状态。</p>
       </div>
 
-      <!-- Cards Grid -->
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+      <!-- Stats Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <div class="text-xs text-slate-400 mb-1">LLM 引擎</div>
-          <div id="sys-model" class="text-sm font-bold text-blue-400">-</div>
+          <div class="text-slate-400 text-xs">模型与适配引擎</div>
+          <div id="sys-model" class="text-base font-bold text-slate-100 mt-1 font-mono">加载中...</div>
         </div>
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <div class="text-xs text-slate-400 mb-1">HITL 安全防护</div>
-          <div id="sys-hitl" class="text-sm font-bold text-emerald-400">-</div>
+          <div class="text-slate-400 text-xs">HITL 拦截状态</div>
+          <div id="sys-hitl" class="text-base font-bold text-emerald-400 mt-1">加载中...</div>
         </div>
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <div class="text-xs text-slate-400 mb-1">活跃 MCP 连接</div>
-          <div id="sys-mcp" class="text-sm font-bold text-amber-400">-</div>
+          <div class="text-slate-400 text-xs">MCP 扩展服务</div>
+          <div id="sys-mcp" class="text-base font-bold text-blue-400 mt-1">加载中...</div>
         </div>
       </div>
 
-      <!-- Tools Table -->
+      <!-- Tools List Table -->
       <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-        <div class="p-3 border-b border-slate-800 font-semibold text-xs text-slate-300">
-          已挂载工具 (Tool Registry)
+        <div class="p-3 border-b border-slate-800 flex justify-between items-center">
+          <span class="text-xs font-bold text-slate-300">已注册工具总览 (Registry)</span>
+          <button onclick="loadSystemInfo()" class="text-xs text-slate-400 hover:text-white transition">刷新</button>
         </div>
         <div id="sys-tools-list" class="divide-y divide-slate-800 text-xs">
           <!-- Rendered by JS -->
@@ -260,23 +329,22 @@
 
   </main>
 
-  <!-- Modal: Add Memory -->
-  <div id="add-memory-modal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-md w-full shadow-2xl">
-      <h3 class="text-sm font-bold mb-3">新增长期记忆 / 开发者画像</h3>
+  <!-- Add Memory Modal -->
+  <div id="add-memory-modal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 shadow-2xl">
+      <h3 class="font-bold text-sm mb-3">新增长期记忆</h3>
       <div class="space-y-3 text-xs">
         <div>
-          <label class="block text-slate-400 mb-1">记忆分类</label>
-          <select id="new-mem-cat" class="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-200 outline-none">
-            <option value="preference">偏好 (preference) - 编码风格、常用工具</option>
-            <option value="profile">画像 (profile) - 操作系统、技术栈</option>
-            <option value="project">项目 (project) - 架构规则、约定</option>
-            <option value="fact">事实 (fact) - 关键常数、部署地址</option>
+          <label class="block text-slate-400 mb-1">记忆类别</label>
+          <select id="new-mem-cat" class="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-slate-200 outline-none">
+            <option value="preference">偏好设定 (preference)</option>
+            <option value="profile">个人属性 (profile)</option>
+            <option value="guideline">项目约定 (guideline)</option>
           </select>
         </div>
         <div>
-          <label class="block text-slate-400 mb-1">内容描述</label>
-          <textarea id="new-mem-content" rows="3" placeholder="例如：在编写 Python 代码时，严格使用类型注解与 Ruff 格式化规范..." class="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-200 outline-none"></textarea>
+          <label class="block text-slate-400 mb-1">记忆内容</label>
+          <textarea id="new-mem-content" rows="3" placeholder="例如：'我偏好使用 TypeScript 和 Tailwind CSS 写前端'..." class="w-full bg-slate-950 border border-slate-800 rounded p-2.5 text-slate-200 outline-none resize-none"></textarea>
         </div>
       </div>
       <div class="flex justify-end gap-2 mt-4 text-xs">
@@ -289,11 +357,12 @@
   <!-- Inline Application Logic -->
   <script>
     let activeTab = 'chat';
-    let currentThreadId = 'session_' + Math.random().toString(36).substring(2, 9);
+    let currentThreadId = 'default';
+    let currentSessionTitle = '新会话';
+    let allSessions = [];
     let activePendingApproval = null;
     let isStreaming = false;
-
-    document.getElementById('current-thread-id').innerText = currentThreadId;
+    let sidebarCollapsed = false;
 
     // --- Tab Switching ---
     function switchTab(tab) {
@@ -316,16 +385,305 @@
       if (tab === 'system') loadSystemInfo();
     }
 
-    function newSession() {
-      currentThreadId = 'session_' + Math.random().toString(36).substring(2, 9);
-      document.getElementById('current-thread-id').innerText = currentThreadId;
-      clearChatUI();
+    // --- Sidebar Toggle ---
+    function toggleSidebar() {
+      const sidebar = document.getElementById('session-sidebar');
+      const expandBtn = document.getElementById('sidebar-expand-btn');
+      sidebarCollapsed = !sidebarCollapsed;
+      if (sidebarCollapsed) {
+        sidebar.classList.add('hidden');
+        expandBtn.classList.remove('hidden');
+      } else {
+        sidebar.classList.remove('hidden');
+        expandBtn.classList.add('hidden');
+      }
+    }
+
+    // --- Session Management ---
+    async function loadSessions(targetSelectId = null) {
+      try {
+        const res = await fetch('/api/v1/sessions');
+        if (!res.ok) throw new Error("无法获取会话列表");
+        allSessions = await res.json();
+
+        // If no sessions exist, auto-create one
+        if (allSessions.length === 0) {
+          const createRes = await fetch('/api/v1/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: '新会话' })
+          });
+          const created = await createRes.json();
+          allSessions = [created];
+        }
+
+        renderSessionList();
+
+        // Select targeted or current or first session
+        const nextId = targetSelectId || currentThreadId;
+        const exists = allSessions.find(s => s.session_id === nextId);
+        if (exists) {
+          selectSession(exists.session_id, false);
+        } else if (allSessions.length > 0) {
+          selectSession(allSessions[0].session_id, false);
+        }
+      } catch (err) {
+        console.error("加载会话列表出错:", err);
+      }
+    }
+
+    function renderSessionList(filterText = '') {
+      const listEl = document.getElementById('session-list');
+      const countEl = document.getElementById('session-count-label');
+      const query = (filterText || '').trim().toLowerCase();
+
+      const filtered = query
+        ? allSessions.filter(s => (s.title || '').toLowerCase().includes(query) || (s.last_message || '').toLowerCase().includes(query))
+        : allSessions;
+
+      countEl.innerText = `${allSessions.length} 个会话`;
+
+      if (filtered.length === 0) {
+        listEl.innerHTML = `<div class="text-xs text-slate-500 text-center py-6">${query ? '无匹配会话' : '暂无历史会话'}</div>`;
+        return;
+      }
+
+      listEl.innerHTML = filtered.map(sess => {
+        const isActive = sess.session_id === currentThreadId;
+        const timeStr = formatRelativeTime(sess.updated_at);
+        const escapedTitle = escapeHtml(sess.title || '新会话');
+        const snippet = escapeHtml(sess.last_message || '暂无消息');
+
+        return `
+          <div
+            onclick="selectSession('${sess.session_id}')"
+            class="session-item group relative px-2.5 py-2 rounded-lg cursor-pointer transition text-xs flex items-center justify-between border ${
+              isActive
+                ? 'bg-blue-950/60 border-blue-500/40 text-blue-100 shadow-sm'
+                : 'border-transparent text-slate-300 hover:bg-slate-800/60'
+            }"
+            title="${escapedTitle}"
+          >
+            <div class="flex-1 min-w-0 pr-2">
+              <div class="flex items-center gap-1.5 font-medium truncate">
+                <span class="text-[11px] ${isActive ? 'text-blue-400' : 'text-slate-500'}">💬</span>
+                <span class="truncate">${escapedTitle}</span>
+              </div>
+              <div class="flex items-center justify-between mt-1 text-[10px] text-slate-500">
+                <span class="truncate max-w-[130px]">${snippet}</span>
+                <span class="shrink-0 ml-1">${timeStr}</span>
+              </div>
+            </div>
+
+            <!-- Actions (Rename & Delete) -->
+            <div class="session-item-actions shrink-0 flex items-center gap-1" onclick="event.stopPropagation()">
+              <button
+                onclick="promptRenameSession('${sess.session_id}', '${escapedTitle}', event)"
+                title="重命名"
+                class="p-1 hover:text-blue-300 text-slate-400 transition"
+              >
+                ✏️
+              </button>
+              <button
+                onclick="deleteSession('${sess.session_id}', event)"
+                title="删除会话"
+                class="p-1 hover:text-red-400 text-slate-400 transition"
+              >
+                🗑️
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function filterSessions(val) {
+      renderSessionList(val);
+    }
+
+    async function selectSession(sessionId, loadHistory = true) {
+      currentThreadId = sessionId;
+      const sess = allSessions.find(s => s.session_id === sessionId);
+      currentSessionTitle = sess ? sess.title : '新会话';
+
+      document.getElementById('current-thread-id').innerText = sessionId;
+      document.getElementById('current-session-title').innerText = currentSessionTitle;
+
+      renderSessionList(document.getElementById('session-search-input')?.value || '');
+      hideHitlCard();
+
+      if (loadHistory) {
+        await loadSessionMessages(sessionId);
+      }
+    }
+
+    async function createNewSession() {
+      try {
+        const res = await fetch('/api/v1/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: '新会话' })
+        });
+        if (!res.ok) throw new Error("创建会话失败");
+        const newSess = await res.json();
+        allSessions.unshift(newSess);
+        selectSession(newSess.session_id, true);
+        const input = document.getElementById('chat-input');
+        if (input) input.focus();
+      } catch (e) {
+        alert("新建会话失败: " + e.message);
+      }
+    }
+
+    async function promptRenameCurrentSession() {
+      const newTitle = prompt("修改当前会话名称:", currentSessionTitle);
+      if (newTitle && newTitle.trim()) {
+        await executeRenameSession(currentThreadId, newTitle.trim());
+      }
+    }
+
+    async function promptRenameSession(sessionId, oldTitle, e) {
+      if (e) e.stopPropagation();
+      const newTitle = prompt("修改会话名称:", oldTitle);
+      if (newTitle && newTitle.trim()) {
+        await executeRenameSession(sessionId, newTitle.trim());
+      }
+    }
+
+    async function executeRenameSession(sessionId, title) {
+      try {
+        const res = await fetch(`/api/v1/sessions/${sessionId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: title })
+        });
+        if (!res.ok) throw new Error("重命名失败");
+        const updated = await res.json();
+
+        const item = allSessions.find(s => s.session_id === sessionId);
+        if (item) item.title = updated.title;
+
+        if (currentThreadId === sessionId) {
+          currentSessionTitle = updated.title;
+          document.getElementById('current-session-title').innerText = currentSessionTitle;
+        }
+        renderSessionList(document.getElementById('session-search-input')?.value || '');
+      } catch (err) {
+        alert("重命名失败: " + err.message);
+      }
+    }
+
+    async function deleteSession(sessionId, e) {
+      if (e) e.stopPropagation();
+      if (!confirm("确定删除该会话及其全部聊天记录吗？此操作无法撤销。")) return;
+
+      try {
+        const res = await fetch(`/api/v1/sessions/${sessionId}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error("删除失败");
+
+        allSessions = allSessions.filter(s => s.session_id !== sessionId);
+
+        if (currentThreadId === sessionId) {
+          if (allSessions.length > 0) {
+            selectSession(allSessions[0].session_id, true);
+          } else {
+            await createNewSession();
+          }
+        } else {
+          renderSessionList(document.getElementById('session-search-input')?.value || '');
+        }
+      } catch (err) {
+        alert("删除会话失败: " + err.message);
+      }
+    }
+
+    async function clearCurrentSessionMessages() {
+      if (!confirm("确定清空当前会话的消息记录吗？")) return;
+      try {
+        const res = await fetch(`/api/v1/sessions/${currentThreadId}/messages`, { method: 'DELETE' });
+        if (!res.ok) throw new Error("清空失败");
+
+        clearChatUI();
+        // Update local session message count
+        const current = allSessions.find(s => s.session_id === currentThreadId);
+        if (current) {
+          current.message_count = 0;
+          current.last_message = '';
+        }
+        renderSessionList(document.getElementById('session-search-input')?.value || '');
+      } catch (err) {
+        alert("清空失败: " + err.message);
+      }
+    }
+
+    async function loadSessionMessages(sessionId) {
+      const container = document.getElementById('messages-container');
+      container.innerHTML = `
+        <div class="flex items-center justify-center p-8 text-xs text-slate-500">
+          <span class="inline-block w-2 h-2 rounded-full bg-blue-500 animate-ping mr-2"></span> 加载会话消息中...
+        </div>
+      `;
+
+      try {
+        const res = await fetch(`/api/v1/sessions/${sessionId}`);
+        if (!res.ok) throw new Error("无法读取会话详情");
+        const data = await res.json();
+        container.innerHTML = '';
+
+        if (!data.messages || data.messages.length === 0) {
+          // Render welcome message
+          container.innerHTML = `
+            <div class="flex items-start gap-3 max-w-4xl mx-auto">
+              <div class="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center font-bold text-xs shrink-0">
+                AI
+              </div>
+              <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm leading-relaxed max-w-2xl shadow-sm">
+                <p class="font-medium text-slate-200 mb-1">你好！我是 Jarvis Studio 个人 AI 操作系统助理。</p>
+                <p class="text-slate-400 text-xs">当前为全新会话，请随时向我发送任务、查询代码或检索知识库！</p>
+              </div>
+            </div>
+          `;
+          return;
+        }
+
+        // Render each message
+        for (const msg of data.messages) {
+          appendMessage(msg.role, msg.content, msg.tool_calls);
+        }
+        container.scrollTop = container.scrollHeight;
+      } catch (e) {
+        container.innerHTML = `<div class="text-xs text-red-400 p-4">加载历史消息失败: ${e.message}</div>`;
+      }
     }
 
     function clearChatUI() {
       const container = document.getElementById('messages-container');
-      container.innerHTML = '';
+      container.innerHTML = `
+        <div class="flex items-start gap-3 max-w-4xl mx-auto">
+          <div class="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center font-bold text-xs shrink-0">
+            AI
+          </div>
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm leading-relaxed max-w-2xl shadow-sm">
+            <p class="font-medium text-slate-200 mb-1">消息已清空。</p>
+            <p class="text-slate-400 text-xs">你可以继续在此会话中发送新指令。</p>
+          </div>
+        </div>
+      `;
       hideHitlCard();
+    }
+
+    function copySessionId() {
+      navigator.clipboard.writeText(currentThreadId).then(() => {
+        alert("Session ID 已复制到剪贴板: " + currentThreadId);
+      });
+    }
+
+    // --- Input Key Handling ---
+    function handleInputKeydown(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSend(e);
+      }
     }
 
     // --- Chat & SSE Streaming ---
@@ -362,6 +720,25 @@
           })
         });
 
+        if (!response.ok) {
+          let errDetail = `服务端请求失败 (HTTP ${response.status})`;
+          try {
+            const errJson = await response.json();
+            errDetail = errJson.detail || JSON.stringify(errJson);
+          } catch (_) {
+            const text = await response.text();
+            if (text) errDetail = text;
+          }
+          contentEl.innerHTML = `
+            <div class="bg-red-950/60 border border-red-500/40 text-red-300 p-3 rounded-lg text-xs font-mono leading-relaxed">
+              <div class="font-bold mb-1">❌ 请求错误 (HTTP ${response.status})</div>
+              <div>${escapeHtml(errDetail)}</div>
+              <div class="text-slate-400 mt-2 text-[11px]">排查建议：请检查 .env 中的 LLM_BASE_URL、API 密钥与模型服务是否已启动。</div>
+            </div>
+          `;
+          return;
+        }
+
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -395,11 +772,16 @@
           }
         }
       } catch (err) {
-        contentEl.innerHTML += `<div class="text-red-400 font-mono text-xs mt-2">[网络/执行错误: ${err}]</div>`;
+        contentEl.innerHTML += `
+          <div class="bg-red-950/60 border border-red-500/40 text-red-300 p-3 rounded-lg text-xs font-mono mt-2">
+            <strong>❌ 网络/执行连接错误:</strong> ${escapeHtml(err.message || String(err))}
+          </div>
+        `;
       } finally {
         statusIndicator.classList.add('hidden');
         isStreaming = false;
-        // Refresh approvals in case one was queued
+        // Refresh session list to update title & stats
+        loadSessions(currentThreadId);
         checkPendingApprovals();
       }
     }
@@ -420,11 +802,15 @@
       } else if (event === 'approval_required') {
         showHitlCard(data);
       } else if (event === 'error') {
-        contentEl.innerHTML += `<div class="text-red-400 text-xs mt-1">❌ 错误: ${data.error}</div>`;
+        contentEl.innerHTML += `
+          <div class="bg-red-950/60 border border-red-500/40 text-red-300 p-2.5 rounded-lg text-xs font-mono mt-2">
+            ❌ <strong>执行异常:</strong> ${escapeHtml(data.error || '未知错误')}
+          </div>
+        `;
       }
     }
 
-    function appendMessage(role, text) {
+    function appendMessage(role, text, toolCalls = null) {
       const container = document.getElementById('messages-container');
       const wrapper = document.createElement('div');
       wrapper.className = "flex items-start gap-3 max-w-4xl mx-auto";
@@ -445,6 +831,19 @@
       content.innerHTML = text ? marked.parse(text) : '<span class="inline-block w-2 h-4 bg-blue-500 animate-pulse"></span>';
 
       bubble.appendChild(content);
+
+      if (toolCalls && toolCalls.length > 0) {
+        const tcContainer = document.createElement('div');
+        tcContainer.className = "mt-2 pt-2 border-t border-slate-800 flex flex-wrap gap-1.5";
+        for (const tc of toolCalls) {
+          const tBadge = document.createElement('span');
+          tBadge.className = "text-[10px] font-mono px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-400";
+          tBadge.innerText = `🔧 ${tc.name || 'tool'}`;
+          tcContainer.appendChild(tBadge);
+        }
+        bubble.appendChild(tcContainer);
+      }
+
       wrapper.appendChild(avatar);
       wrapper.appendChild(bubble);
       container.appendChild(wrapper);
@@ -540,6 +939,7 @@
         document.getElementById('streaming-indicator').classList.add('hidden');
         isStreaming = false;
         checkPendingApprovals();
+        loadSessions(currentThreadId);
       }
     }
 
@@ -699,7 +1099,7 @@
     }
 
     async function triggerIndexModal() {
-      const dir = prompt("请输入要扫描索引的目录路径 (留空默认使用 workspace):", "docs");
+      const dir = prompt("请输入要扫描索引的目录路径 (留空默认使用 docs):", "docs");
       if (dir === null) return;
       alert("正在后台执行增量扫描与向量嵌入，请稍候查看通知...");
       try {
@@ -785,7 +1185,30 @@
       } catch (e) {}
     }
 
+    // Helper functions
+    function formatRelativeTime(timestamp) {
+      if (!timestamp) return '';
+      const now = Date.now() / 1000;
+      const diff = now - timestamp;
+      if (diff < 60) return '刚刚';
+      if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+      if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+      const date = new Date(timestamp * 1000);
+      return `${date.getMonth() + 1}/${date.getDate()}`;
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
     // Initial on-load checks
+    loadSessions();
     fetch('/api/v1/system/status').then(r => r.json()).then(s => {
       document.getElementById('header-provider').innerText = `LLM: ${s.default_provider} (${s.default_model})`;
     }).catch(() => {});
