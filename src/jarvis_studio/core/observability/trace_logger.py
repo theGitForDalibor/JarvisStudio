@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from jarvis_studio.config.settings import get_settings
-from jarvis_studio.core.observability.logger import logger
 
 
 @dataclass

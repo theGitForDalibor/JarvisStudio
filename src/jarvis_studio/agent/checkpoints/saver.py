@@ -1,13 +1,8 @@
 """Checkpointer persistence factory for LangGraph state."""
 
-import sqlite3
-from pathlib import Path
-
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.sqlite import SqliteSaver
 
-from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
 
 _cached_checkpointer: BaseCheckpointSaver | None = None

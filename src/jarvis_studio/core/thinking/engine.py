@@ -10,9 +10,7 @@ Implements the pseudo-thinking-stream specification from the AI Engineering Skil
 import asyncio
 import time
 from enum import Enum
-from typing import Any, AsyncGenerator
-
-from jarvis_studio.core.observability.logger import logger
+from typing import Any
 
 
 class ThinkingPhase(str, Enum):

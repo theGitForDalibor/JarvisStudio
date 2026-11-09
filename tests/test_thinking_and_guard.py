@@ -5,11 +5,9 @@ import pytest
 from jarvis_studio.core.guard.route_guard import GuardAction, IntentRouteGuard
 from jarvis_studio.core.observability.trace_logger import (
     ConversationTrace,
-    ThinkingStep,
     TraceStore,
 )
 from jarvis_studio.core.thinking.engine import (
-    TOOL_LABEL_MAP,
     ThinkingEngine,
     ThinkingPhase,
 )

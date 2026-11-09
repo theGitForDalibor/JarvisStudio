@@ -13,8 +13,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from jarvis_studio.config.settings import get_settings
-
 
 class GuardAction(str, Enum):
     """Routing decisions made by the front-line guard."""
@@ -44,20 +42,24 @@ class GuardDecision(BaseModel):
 _GREETING_PATTERNS = [
     (
         re.compile(r"^(你好|您好|hi|hello|hey|哈喽|在吗|在不在|早|早上好|晚上好)[\s!！?？~～]*$", re.IGNORECASE),
-        "你好！我是 **Jarvis**，您的个人 AI 操作系统助理。\n\n"
-        "我已就绪并接入本地源码工程、长期记忆 (LTM)、向量知识库 (sqlite-vec) 与 HITL 安全审批机制。\n"
-        "请随时向我发送任务指令（例如：*检索代码库*、*编写新功能*、*执行系统命令* 或 *保存个人偏好*）。",
+        (
+            "你好！我是 **Jarvis**，您的个人 AI 操作系统助理。\n\n"
+            "我已就绪并接入本地源码工程、长期记忆 (LTM)、向量知识库 (sqlite-vec) 与 HITL 安全审批机制。\n"
+            "请随时向我发送任务指令（例如：*检索代码库*、*编写新功能*、*执行系统命令* 或 *保存个人偏好*）。"
+        ),
         "greeting_fast_reply",
     ),
     (
         re.compile(r"^(你是谁|介绍一下自己|你的功能|你叫什么|自我介绍)[\s!！?？~～]*$", re.IGNORECASE),
-        "我是 **Jarvis Studio** 个人生产级 AI 操作系统助理。\n\n"
-        "### 核心能力特性：\n"
-        "- 🛠️ **多源工具生态**：支持文件读写、目录扫描、终端命令执行与 MCP 跨进程集成\n"
-        "- 🛡️ **HITL 安全审批**：高危操作（写文件、执行 Shell）需经您人工授权确认\n"
-        "- 🧠 **长期记忆 (LTM)**：跨会话自动记住您的开发习惯与项目偏好\n"
-        "- 📚 **本地向量知识库**：通过 sqlite-vec 与 SHA-256 增量哈希提供毫秒级私有代码检索\n"
-        "- ⏱️ **白盒可观测性**：全生命周期链路追踪与性能度量",
+        (
+            "我是 **Jarvis Studio** 个人生产级 AI 操作系统助理。\n\n"
+            "### 核心能力特性：\n"
+            "- 🛠️ **多源工具生态**：支持文件读写、目录扫描、终端命令执行与 MCP 跨进程集成\n"
+            "- 🛡️ **HITL 安全审批**：高危操作（写文件、执行 Shell）需经您人工授权确认\n"
+            "- 🧠 **长期记忆 (LTM)**：跨会话自动记住您的开发习惯与项目偏好\n"
+            "- 📚 **本地向量知识库**：通过 sqlite-vec 与 SHA-256 增量哈希提供毫秒级私有代码检索\n"
+            "- ⏱️ **白盒可观测性**：全生命周期链路追踪与性能度量"
+        ),
         "identity_fast_reply",
     ),
     (
@@ -67,12 +69,14 @@ _GREETING_PATTERNS = [
     ),
     (
         re.compile(r"^(帮助|help|使用说明|指令清单)[\s!！?？~～]*$", re.IGNORECASE),
-        "### Jarvis Studio 常用指令与能力指引：\n\n"
-        "- 🔍 **知识库检索**：*“请在 docs 知识库中检索 HITL 的设计规范”*\n"
-        "- 📂 **代码与文件操作**：*“帮我查看 src/jarvis_studio/api/app.py 的路由注册”*\n"
-        "- ⚡ **系统与终端**：*“运行 pytest 跑一遍测试”*\n"
-        "- 🧠 **偏好沉淀**：*“保存偏好：以后前端组件统一使用 Tailwind CSS”*\n"
-        "- 🛡️ **人工审批**：高危工具自动挂起，在对话窗口或 HITL 审批中心点击批准/拒绝即可。",
+        (
+            "### Jarvis Studio 常用指令与能力指引：\n\n"
+            "- 🔍 **知识库检索**：*“请在 docs 知识库中检索 HITL 的设计规范”*\n"
+            "- 📂 **代码与文件操作**：*“帮我查看 src/jarvis_studio/api/app.py 的路由注册”*\n"
+            "- ⚡ **系统与终端**：*“运行 pytest 跑一遍测试”*\n"
+            "- 🧠 **偏好沉淀**：*“保存偏好：以后前端组件统一使用 Tailwind CSS”*\n"
+            "- 🛡️ **人工审批**：高危工具自动挂起，在对话窗口或 HITL 审批中心点击批准/拒绝即可。"
+        ),
         "help_fast_reply",
     ),
     (

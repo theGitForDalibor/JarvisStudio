@@ -11,7 +11,7 @@
 [![sqlite-vec](https://img.shields.io/badge/sqlite--vec-0.1.9-purple.svg)](https://github.com/asg017/sqlite-vec)
 [![uv](https://img.shields.io/badge/package%20manager-uv-green.svg)](https://github.com/astral-sh/uv)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-black.svg)](https://github.com/astral-sh/ruff)
-[![Tests: pytest](https://img.shields.io/badge/tests-38%20passed-brightgreen.svg)](tests/)
+[![Tests: pytest](https://img.shields.io/badge/tests-43%20passed-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [ 简体中文 ](README.md) | [ English ](README.en.md)
@@ -39,8 +39,12 @@ Jarvis Studio 代表了自主智能体从“学习型原型”到“生产级实
 
 ## 2. Implemented Features (已实现核心能力)
 
-> **当前状态**: 本项目全套六大工程里程碑已**全部开发完成**，并通过 38 项单元与集成测试验证（100% PASS）。
+> **当前状态**: 本项目全套核心工程里程碑已**全部开发完成**，并通过 43 项单元与集成测试验证（100% PASS）。
 
+- **完整多会话管理与即时切换 (Multi-Session Management)**: 基于 SQLite `chat_sessions` 与 `chat_messages` 实现会话的自动命名、新建、搜索过滤、历史消息秒级恢复、重命名与安全删除，支持前端可折叠侧边栏交互。
+- **白盒化渐进式思考流 (Pseudo-Thinking Stream)**: 遵循 AI 技能规范设计 4 阶段状态演进（`understand` 意图分析 → `tool` 工具执行 → `organize` 答案整理 → `completed` 完成交付），首字响应耗时（TTFT）压降至 **<50ms**；集成工具白盒化翻译与心跳保活循环，彻底消除大模型等待焦虑。
+- **意图守卫与极速通道 (Conversation State Guard)**: 针对日常问候、系统查询等高频场景实现 **<50ms / 0 Token 消耗直出**；具备多轮对话实体吸附（Sticky Context Anchor）与紧急制动安全熔断（Halt）。
+- **端到端全生命周期可观测性 (5-Stage Lifecycle Traces)**: 覆盖输入规整、规则守卫、上下文预热、思考/工具瀑布流到流式交付完整 5 阶段，全链路自动打标 TTFT、TTFA、TTLT 毫秒级性能指标并持久化存储。
 - **严格 5 层解耦架构**: API Gateway、Application Service、Agent Runtime、Tools/MCP、Core Infrastructure 彻底分层，UI 与 API 零接触底图。
 - **可热插拔多模型适配器 (LLMFactory)**: 零硬编码。通过配置无缝切换 OpenAI、DeepSeek、本地 Ollama 以及任何兼容 OpenAI 协议的自定义端点，无需修改图代码。
 - **无状态人机协同 (Stateless HITL)**: 遇到高危操作（`execute_shell_command`、`write_file`）时自动触发 LangGraph 原生 `interrupt()` 协议，将状态挂起冻结至 SQLite，支持人工审查（`approve` 批准、`reject` 拒绝、`modify` 就地修改入参）。
@@ -49,9 +53,9 @@ Jarvis Studio 代表了自主智能体从“学习型原型”到“生产级实
 - **动态 MCP 工具生态桥接**: 运行时动态解析外部 MCP Server 的 JSON Schema，自动映射为强类型 LangChain Pydantic 工具，支持 stdio 长连接与 SSE 传输。
 - **跨会话长期个人记忆系统 (LTM)**: 存储开发者个人偏好、编码习惯与关键事实，并在 Agent 推理前动态注入系统提示词上下文。
 - **本地私有 RAG 知识库系统**: 基于 `sqlite-vec` 向量虚拟表无额外外部服务依赖，支持工作区代码/文档语义分块、SHA-256 增量哈希扫描与快速 KNN 语义检索。
-- **状态持久化与断点续存**: 采用 `langgraph-checkpoint-sqlite`，会话与执行状态全量落盘 SQLite，具备故障自愈与跨会话恢复能力。
-- **Server-Sent Events (SSE) 流式传输**: 网关原生支持逐 Token 实时打字机输出、工具调用起止步骤时序事件与中断挂起事件流（`/api/v1/chat/stream`）。
-- **开箱即用 Web UI 可视化控制台 (`/app`)**: 原生集成的深色模式现代化控制面板，涵盖流式对话、HITL 审批入参编辑器、长期记忆管理器、本地知识库检索实验台与系统工具监控。
+- **状态持久化与断点续存**: 状态机运行内存快照结合 SQLite 会话持久化，具备故障自愈与跨会话恢复能力。
+- **Server-Sent Events (SSE) 流式传输**: 网关原生支持逐 Token 实时打字机输出、思考状态机演进、心跳保活、工具调用起止步骤时序事件与中断挂起事件流（`/api/v1/chat/stream`）。
+- **开箱即用 Web UI 可视化控制台 (`/app`)**: 原生集成的深色模式现代化控制面板，涵盖多会话侧边栏、对话思考折叠流、全链路追踪（Traces）查看器、HITL 审批入参编辑器、长期记忆管理器、本地知识库检索实验台与系统工具监控。
 - **双端交互支持**: 既有本地终端开发者 CLI（`jarvis-studio info`、`serve`、`chat`、`memory`、`rag`、`sessions`、`mcp`），也有标准化 FastAPI REST/SSE 网关。
 - **生产级容器化与守护进程**: 包含多阶段极简构建 `Dockerfile`、`docker-compose.yml` 与跨平台系统开机常驻守护进程脚本。
 
@@ -71,24 +75,28 @@ flowchart TD
 
     subgraph GATEWAY ["1. Application API 网关 (FastAPI)"]
         ENDPOINT_CHAT["/api/v1/chat (REST & SSE Stream)"]
+        ENDPOINT_SESS["/api/v1/sessions (多会话 CRUD 与消息历史)"]
         ENDPOINT_APPR["/api/v1/approvals (审批与决议恢复)"]
         ENDPOINT_MEM["/api/v1/memory (长期记忆 LTM)"]
         ENDPOINT_RAG["/api/v1/rag (本地私有知识库)"]
-        ENDPOINT_SYS["/api/v1/system (健康与工具自省)"]
-        STATIC_APP["/app (SPA 静态控制面板)"]
+        ENDPOINT_SYS["/api/v1/system (健康自省 & 链路 Traces)"]
+        STATIC_APP["/app (SPA 现代化单页控制面板)"]
     end
 
-    subgraph SERVICE ["2. 业务应用服务层 (Application Service)"]
-        AGENT_SVC["AgentService (统一执行调度与流式分发)"]
-        SESS_SVC["SessionService (会话 Thread 管理)"]
+    subgraph SERVICE ["2. 业务应用与工程守卫层 (Application Service & Guard)"]
+        GUARD["IntentRouteGuard (规则快速通道 & 实体吸附)"]
+        THINKING["ThinkingEngine (4 阶段白盒渐进思考状态机)"]
+        AGENT_SVC["AgentService (统一调度、流式分发与生命周期打标)"]
+        SESS_SVC["SessionService (SQLite 会话与历史消息持久化)"]
         MEM_MGR["MemoryManager (长期记忆管理与上下文注入)"]
+        TRACE_STORE["TraceStore (5 阶段全链路耗时与瀑布流存储)"]
     end
 
     subgraph RUNTIME ["3. LangGraph Agent 运行时 (Agent Runtime)"]
         ASST["Assistant 推理节点"]
         GATE["Approval Gate 审查网关 (HITL interrupt)"]
         EXEC["Tool Executor 安全执行节点"]
-        CHECKPOINTER[("SqliteSaver (data/jarvis_studio.db)")]
+        CHECKPOINTER[("MemorySaver / SqliteSaver (检查点快照)")]
     end
 
     subgraph CORE ["4. 多模型适配 & 5. 工具/知识子系统"]
@@ -100,55 +108,72 @@ flowchart TD
     end
 
     CLI --> AGENT_SVC
-    BROWSER --> STATIC_APP & ENDPOINT_CHAT & ENDPOINT_APPR & ENDPOINT_MEM & ENDPOINT_RAG
+    BROWSER --> STATIC_APP & ENDPOINT_CHAT & ENDPOINT_SESS & ENDPOINT_APPR & ENDPOINT_MEM & ENDPOINT_RAG & ENDPOINT_SYS
     API_CLIENT --> GATEWAY
-    GATEWAY --> AGENT_SVC
-    AGENT_SVC --> SESS_SVC
+    GATEWAY --> AGENT_SVC & SESS_SVC
+    AGENT_SVC --> GUARD
+    GUARD -. 命中高频问候/终止 .-> 快速通道直出[<50ms 规则直出]
+    GUARD -. 透传/实体增强 .-> THINKING
+    AGENT_SVC --> SESS_SVC & TRACE_STORE
     AGENT_SVC --> RUNTIME
     MEM_MGR -. 偏好事实注入 .-> ASST
     ASST --> GATE --> EXEC --> ASST
-    RUNTIME -. 状态自动落盘快照 .-> CHECKPOINTER
+    RUNTIME -. 状态运行快照 .-> CHECKPOINTER
     ASST --> LLM
     GATE & EXEC --> REGISTRY
     REGISTRY --> BUILTIN & MCP_HUB & VECSTORE
 ```
 
-### 核心流转时序 (SSE 流式 + HITL 审批挂起与恢复)
+### 核心流转时序 (意图守卫 + 渐进思考流 + SSE 流式 + HITL 挂起)
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as 用户 / Web UI
     participant GW as FastAPI 网关 (/chat/stream)
+    participant Guard as IntentRouteGuard
     participant Svc as AgentService
+    participant Think as ThinkingEngine
     participant Graph as LangGraph StateGraph
     participant Gate as Approval Gate (HITL)
-    participant DB as SQLite 检查点
-    participant Tool as Tool Executor
+    participant Trace as TraceStore (SQLite)
 
     User->>GW: POST /api/v1/chat/stream
     GW->>Svc: stream_agent(thread_id, message)
-    Svc->>Graph: astream_events(version="v2")
-    Graph-->>GW: event: token (逐字推送)
-    GW-->>User: SSE 渲染打字机动画
+    Svc->>Guard: evaluate(message, thread_id)
 
-    alt 遇到高危工具调用 (如 execute_shell_command)
-        Graph->>Gate: 检查风险等级 (HIGH)
-        Gate-->>Graph: interrupt(pending_approval)
-        Graph->>DB: 冻结当前超步快照，图挂起
-        Graph-->>Svc: 中断挂起信号
-        Svc-->>GW: event: approval_required (包含入参及审批 ID)
-        GW-->>User: 弹出审查卡片，等待人工决议
-        
-        User->>GW: POST /api/v1/approvals/{id}/decision/stream (批准/改参)
-        GW->>Svc: stream_resume_approval(decision)
-        Svc->>Graph: astream_events(Command(resume=payload))
+    alt 命中快速规则 (问候语 / 系统状态 / 紧急中止)
+        Guard-->>Svc: DirectReply (<50ms, 0 Token)
+        Svc->>Trace: 记录直出指标 (TTFT=TTLT<50ms)
+        Svc-->>GW: event: thinking (规则直出) -> event: token -> event: completed
+        GW-->>User: 极速即时响应并展示
+    else 常规任务与大模型推理
+        Svc->>Think: emit_understand("正在理解您的指令...")
+        Think-->>GW: event: thinking (phase: understand, TTFT < 50ms)
+        GW-->>User: 动态呈现思考进度条与状态标签
+
+        Svc->>Graph: astream_events(version="v2")
+        Graph-->>GW: event: token (逐字推送)
+        GW-->>User: SSE 打字机流式渲染
+
+        alt 遇到高危工具调用 (如 execute_shell_command)
+            Graph->>Gate: 检查风险等级 (HIGH)
+            Gate-->>Graph: interrupt(pending_approval)
+            Graph-->>Svc: 中断挂起信号
+            Svc-->>GW: event: approval_required (包含入参及审批 ID)
+            GW-->>User: 弹出审查卡片，等待人工决议
+            
+            User->>GW: POST /api/v1/approvals/{id}/decision/stream (批准/改参)
+            GW->>Svc: stream_resume_approval(decision)
+            Svc->>Graph: astream_events(Command(resume=payload))
+        end
+
+        Graph->>Think: emit_tool_end / emit_organize
+        Graph-->>GW: event: token (最终组织内容)
+        Svc->>Trace: 记录 5 阶段耗时与工具瀑布 (TTFT, TTFA, TTLT)
+        Svc-->>GW: event: completed (包含 trace_id 溯源标识)
+        GW-->>User: 交付答复并高亮 Trace 链路
     end
-
-    Graph->>Tool: 执行工具指令
-    Tool-->>Graph: 返回工具观察结果
-    Graph-->>GW: event: token (后续总结内容)
-    GW-->>User: 完成最终答复
 ```
 
 ---
@@ -157,13 +182,17 @@ sequenceDiagram
 
 | 核心概念 | 定义与在 Jarvis Studio 中的职责 |
 | :--- | :--- |
+| **IntentRouteGuard** | 意图规则守卫与快速通道。为日常问候、系统功能自查等高频场景提供 <50ms 零 Token 直出响应；负责跨轮次实体吸附（Sticky Context Anchor）与紧急制动安全熔断。 |
+| **ThinkingEngine** | 白盒化渐进思考流引擎。规范落地 4 阶段状态演进（`understand` → `tool` → `organize` → `completed`），提供首字 <50ms 极速反馈、工具语义白盒化翻译与心跳保活循环，消除大模型等待焦虑。 |
+| **Lifecycle Traces** | 端到端 5 阶段全生命周期可观测性。精准切片 `输入规整` → `规则守卫` → `上下文预热` → `思考与工具瀑布` → `流式交付`，持久化记录毫秒级 TTFT、TTFA、TTLT 指标。 |
+| **Multi-Session Store** | 多会话与消息持久化存储。基于 SQLite `chat_sessions` 与 `chat_messages` 原生表，支撑自动标题生成、全文检索、会话重命名、清空与秒级切换恢复。 |
 | **AgentState** | 图的单一可信数据源（Single Source of Truth）。强类型定义，节点间传递数据的唯一介质，通过 `add_messages` 归约器安全追加消息。 |
 | **Approval Gate** | 安全审计网关节点。根据三级风险矩阵识别高危操作，触发 LangGraph `interrupt()` 协议阻断执行，防止未经审查的系统修改。 |
 | **ToolRegistry & RiskLevel** | 工具注册中心与三级安全分类矩阵（`SAFE` 安全只读、`MEDIUM` 可逆操作、`HIGH` 高危执行）。 |
 | **MCP Client Manager** | Model Context Protocol 统一客户端。动态加载外部服务配置，管理 stdio 长连接子进程与 SSE 会话，动态将 JSON Schema 转换为 LangChain 工具。 |
 | **MemoryManager (LTM)** | 长期个人记忆系统。跨会话持久化用户的技术栈偏好、指令习惯与关键事实，并在 Agent 推理前动态拼接至 Prompt。 |
 | **SqliteVecStore** | 本地轻量向量库。利用 `sqlite-vec` 虚拟表存储向量索引，结合 `DocumentSplitter` 与 `WorkspaceIndexer` 实现零外部服务依赖的代码/文档语义检索。 |
-| **SSE Streaming** | 基于 Server-Sent Events 协议的流式网关。统一调度逐 Token 文本流、工具执行起止步骤事件与审批中断事件。 |
+| **SSE Streaming** | 基于 Server-Sent Events 协议的流式网关。统一调度逐 Token 文本流、思考状态机推进、工具执行起止步骤事件与审批中断事件。 |
 | **SqliteSaver Checkpoint** | 状态检查点持久化存储。将每个超步的对话上下文与执行断点持久化落盘至 SQLite，提供故障自愈能力与跨会话状态恢复。 |
 
 ---
@@ -174,22 +203,24 @@ sequenceDiagram
 JarvisStudio/
 ├── src/jarvis_studio/
 │   ├── api/                     # 1. Application API 网关 (FastAPI 0.115+)
-│   │   ├── routes/              # 分组路由 (/chat, /approvals, /memory, /rag, /system)
+│   │   ├── routes/              # 分组路由 (/chat, /sessions, /approvals, /memory, /rag, /system)
 │   │   ├── schemas/             # 请求与响应 Pydantic 模型契约
 │   │   ├── static/              # 现代化单页 Web UI 控制台 (index.html)
 │   │   └── app.py               # FastAPI 生命周期、中间件与静态挂载工厂
 │   ├── service/                 # 2. 业务应用服务层 (Application Service)
 │   │   ├── agent_service.py     # 统一调度智能体调用、流式生成与 HITL 恢复
-│   │   └── session_service.py   # 会话 Thread 生命周期与持久化追踪
+│   │   └── session_service.py   # SQLite 多会话管理、自动标题与消息历史持久化
 │   ├── agent/                   # 3. LangGraph Agent 运行时 (StateGraph)
-│   │   ├── checkpoints/         # SQLite 持久化检查点工厂与 Saver
+│   │   ├── checkpoints/         # 状态检查点工厂与 Saver (MemorySaver / SqliteSaver)
 │   │   ├── hitl/                # 人机协同中断管理与审批状态机
 │   │   ├── nodes/               # 原子节点 (assistant, approval_gate, executor, router)
 │   │   ├── graph.py             # 状态图组装、条件路由连接与编译
 │   │   └── state.py             # AgentState 强类型状态模式契约
-│   ├── core/                    # 4. LLM 多模型适配层与基础设施
+│   ├── core/                    # 4. LLM 多模型适配层与工程守卫基础设施
+│   │   ├── guard/               # IntentRouteGuard 意图规则守卫与快速通道直出
+│   │   ├── thinking/            # ThinkingEngine 4 阶段白盒渐进思考状态机与心跳
 │   │   ├── llm/                 # LLMFactory (OpenAI, DeepSeek, Ollama, Custom 端点)
-│   │   ├── observability/       # Loguru 结构化彩色日志与 timed_step 耗时追踪
+│   │   ├── observability/       # 5 阶段全生命周期追踪 (TraceStore) 与结构化日志
 │   │   └── errors.py            # 全局领域异常定义体系
 │   ├── tools/                   # 5. 工具系统与 MCP 外部生态
 │   │   ├── builtin/             # 内置安全文件、Shell 终端、记忆、RAG 工具
@@ -203,7 +234,7 @@ JarvisStudio/
 ├── config/                      # YAML 运行时配置与 MCP 外部服务注册表
 ├── docs/                        # 标准化工程技术文档中心 (架构、设计、开发规范、ADR、路线图)
 ├── scripts/                     # 运维常驻与守护进程脚本 (run_daemon.ps1, run_daemon.sh)
-├── tests/                       # 自动化测试套件 (38 项单元与集成测试，覆盖率 100% PASS)
+├── tests/                       # 自动化测试套件 (43 项单元与集成测试，覆盖率 100% PASS)
 ├── Dockerfile                   # 多阶段轻量生产容器镜像构建规范
 ├── docker-compose.yml           # 容器一键挂载编排模板
 ├── pyproject.toml               # uv / PEP 621 依赖配置与构建规范
@@ -290,7 +321,7 @@ OPENAI_API_KEY=your_api_key_here
 ```bash
 uv run --extra dev pytest
 ```
-*当前全量 38 项单元与集成测试用例全部通过（PASS）。*
+*当前全量 43 项单元与集成测试用例全部通过（PASS）。*
 
 ---
 
@@ -326,7 +357,7 @@ uv run ruff check .
 uv run ruff check --fix .
 uv run ruff format .
 
-# 运行全套单元与集成测试 (38 项测试)
+# 运行全套单元与集成测试 (43 项测试)
 uv run --extra dev pytest -v
 ```
 
@@ -353,22 +384,27 @@ docs/
 │   ├── ADR-002-decouple-application-and-agent.md # ADR-002: 为什么实施 5 层彻底解耦
 │   └── ADR-003-native-interrupt-for-hitl.md     # ADR-003: 为什么坚持使用原生 interrupt 挂起
 └── roadmap/                          # 演进路线图
-    └── engineering-roadmap.md        # 六大里程碑 (M0~M5) 的演进目标与交付记录
+    └── engineering-roadmap.md        # 核心里程碑 (M0~M6) 的演进目标与交付记录
 ```
 
 ---
 
 ## 10. Roadmap (演进路线图)
 
-Jarvis Studio 全部六个核心里程碑已**全部开发完成并验证通过**：
+Jarvis Studio 全部核心工程里程碑已**全部开发完成并验证通过**：
 
 ### Completed (全部完成)
 - ✅ **Milestone 0: 架构基线与脚手架**: 5 层解耦架构蓝图、Python 3.12 + `uv` 依赖治理、自动化测试套件基准。
 - ✅ **Milestone 1: 核心 Agent 与模型底座**: `LLMFactory` 多模型统一工厂 (OpenAI, DeepSeek, Ollama)、`AgentState` 强类型状态模式、基础 ReAct 循环闭环。
 - ✅ **Milestone 2: 工具子系统与 MCP**: `ToolRegistry` 三级安全分类矩阵、内置安全文件与终端 Shell 工具、动态 MCP JSON-to-Pydantic 转换器、stdio/SSE 长连接客户端池。
-- ✅ **Milestone 3: HITL 与持久化检查点**: 原生无状态 `interrupt()` 敏感操作阻断、SQLite 检查点持久化 (`SqliteSaver`)、合法 `ToolMessage` 安全拒绝协议、审批 REST API 契约与终端交互式决议。
+- ✅ **Milestone 3: HITL 与持久化检查点**: 原生无状态 `interrupt()` 敏感操作阻断、SQLite 检查点持久化、合法 `ToolMessage` 安全拒绝协议、审批 REST API 契约与终端交互式决议。
 - ✅ **Milestone 4: 长期记忆与本地知识库**: 跨会话长期记忆系统 (LTM: `MemoryStore` + `MemoryManager`)、动态 Prompt 偏好注入、基于 `sqlite-vec` 的本地无额外服务依赖轻量向量库 (`SqliteVecStore`)、工作区 SHA-256 增量文件扫描入库索引器 (`WorkspaceIndexer`)。
 - ✅ **Milestone 5: 应用网关流式化与 Web 交互界面**: Server-Sent Events (SSE) 逐 Token 与步骤流式传输 (`/api/v1/chat/stream`)、现代响应式 Web UI 控制面板 (`/app`)、生产级多阶段容器化镜像 (`Dockerfile` + `docker-compose.yml`)、跨平台系统后台常驻守护进程脚本 (`run_daemon.ps1`, `run_daemon.sh`)。
+- ✅ **Milestone 6: 体验优化与工程化技能跃迁 (AI Engineering Skills)**:
+  - **4 阶段白盒渐进式思考流 (Pseudo-Thinking Stream)**: 意图分析 → 工具调用 → 答案整理 → 完成交付，首字反馈耗时（TTFT）压降至 **<50ms**，彻底消除黑盒等待；
+  - **意图规则守卫与快速通道 (Conversation State Guard)**: 针对日常问候、系统查询等高频场景实现 **<50ms / 0 Token 消耗直出**；实现多轮实体吸附与紧急制动；
+  - **完整多会话管理 (Multi-Session CRUD)**: SQLite `chat_sessions` 与 `chat_messages` 原生驱动，自动标题、实时检索、快速重命名与历史消息秒级恢复；
+  - **端到端 5 阶段生命周期可观测性 (Lifecycle Traces)**: 全链路 TTFT / TTFA / TTLT 毫秒级打标与工具瀑布流白盒分析控制台。
 
 ### Future & Extension Outlook (后续展望与生态扩展)
 - [ ] **原生跨平台桌面应用包装**: 基于 Tauri / Electron 将 Web 控制台打包为轻量级跨平台个人桌面端。

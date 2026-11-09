@@ -11,7 +11,7 @@
 [![sqlite-vec](https://img.shields.io/badge/sqlite--vec-0.1.9-purple.svg)](https://github.com/asg017/sqlite-vec)
 [![uv](https://img.shields.io/badge/package%20manager-uv-green.svg)](https://github.com/astral-sh/uv)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-black.svg)](https://github.com/astral-sh/ruff)
-[![Tests: pytest](https://img.shields.io/badge/tests-38%20passed-brightgreen.svg)](tests/)
+[![Tests: pytest](https://img.shields.io/badge/tests-43%20passed-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [ 简体中文 ](README.md) | [ English ](README.en.md)
@@ -39,8 +39,12 @@ Jarvis Studio represents the engineering evolution from experimental agent proto
 
 ## 2. Implemented Features
 
-> **Current Status**: All six engineering milestones are **100% completed**, verified by 38 unit and integration tests (100% PASS).
+> **Current Status**: All core engineering milestones are **100% completed**, verified by 43 unit and integration tests (100% PASS).
 
+- **Full Multi-Session Management (Multi-Session CRUD)**: SQLite-backed (`chat_sessions` & `chat_messages`) automatic title generation, real-time search, instant history recovery, session renaming, and deletion with a collapsible sidebar UI.
+- **Progressive Pseudo-Thinking Stream**: Implements a 4-phase thinking state machine (`understand` → `tool` → `organize` → `completed`), reducing Time To First Token (TTFT) to **<50ms** with keepalive heartbeats and white-box tool translation to eliminate LLM waiting anxiety.
+- **Intent Route Guard & Fast-Path Reply**: Sub-50ms 0-Token direct replies for common greetings and system queries; provides sticky context anchors across turns and emergency safety halts.
+- **5-Stage Lifecycle Observability & Waterfall Traces**: Detailed telemetry across Input, Guard, Preload, Progressive Thinking & Tool Waterfall, and Output delivery, capturing millisecond-accurate TTFT, TTFA, and TTLT metrics.
 - **Strict 5-Tier Decoupled Architecture**: Thorough layer isolation across API Gateway, Application Service, Agent Runtime, Tools/MCP, and Core Infrastructure—zero direct coupling between UI/API and internal state graphs.
 - **Hot-Swappable LLM Adapters (LLMFactory)**: Zero hardcoding. Dynamically switch between OpenAI, DeepSeek, local offline Ollama, and custom OpenAI-compatible endpoints via configuration without altering graph logic.
 - **Stateless Human-in-the-Loop (HITL)**: High-risk actions (`execute_shell_command`, `write_file`) automatically trigger LangGraph native `interrupt()`, snapshotting and freezing state to SQLite for human review (`approve`, `reject`, `modify`).
@@ -49,9 +53,9 @@ Jarvis Studio represents the engineering evolution from experimental agent proto
 - **Dynamic MCP Tool Ecosystem Bridge**: Dynamically inspects and compiles external MCP Server JSON Schemas into strongly typed LangChain Pydantic tools at runtime, supporting stdio sub-processes and SSE transports.
 - **Cross-Session Long-Term Memory (LTM)**: Persistent storage for developer preferences, environment profiles, and critical facts, dynamically injected into the system prompt prior to agent reasoning.
 - **Local Private RAG Knowledge Base**: High-performance vector storage powered by `sqlite-vec` (zero external service dependencies), with semantic document splitting, SHA-256 incremental hash scanning, and KNN similarity search.
-- **Durable Checkpointing & Crash Resilience**: Powered by `langgraph-checkpoint-sqlite` for superstep state persistence, multi-session thread isolation, and seamless recovery across process restarts.
-- **Server-Sent Events (SSE) Streaming**: Gateway supports real-time token-by-token typewriter generation, tool execution lifecycle events (`tool_start` / `tool_end`), and interrupt suspension events (`/api/v1/chat/stream`).
-- **Ready-to-Use Web UI Console (`/app`)**: Built-in responsive dark-themed dashboard featuring streaming chat, interactive HITL approval argument editors, LTM memory manager, local RAG exploration workbench, and tool registry inspection.
+- **Durable Checkpointing & Crash Resilience**: Runtime in-memory execution snapshots combined with persistent SQLite conversation tables provide seamless recovery across restarts.
+- **Server-Sent Events (SSE) Streaming**: Gateway supports real-time token-by-token typewriter generation, progressive thinking state machine events, tool execution lifecycle events, and interrupt suspension events (`/api/v1/chat/stream`).
+- **Ready-to-Use Web UI Console (`/app`)**: Built-in responsive dark-themed dashboard featuring multi-session management, collapsible thinking process widgets, a dedicated **Traces Observability console**, interactive HITL approval editors, LTM manager, local RAG workbench, and tool registry inspection.
 - **Dual Interface Modes**: Full-featured developer CLI (`jarvis-studio info`, `serve`, `chat`, `memory`, `rag`, `sessions`, `mcp`) and standardized FastAPI REST/SSE endpoints.
 - **Production Containerization & Daemons**: Includes multi-stage cached `Dockerfile`, `docker-compose.yml`, and system background daemon scripts for Windows, Linux, and macOS.
 
@@ -71,24 +75,28 @@ flowchart TD
 
     subgraph GATEWAY ["1. Application API Gateway (FastAPI)"]
         ENDPOINT_CHAT["/api/v1/chat (REST & SSE Stream)"]
+        ENDPOINT_SESS["/api/v1/sessions (Multi-Session CRUD & History)"]
         ENDPOINT_APPR["/api/v1/approvals (Decisions & Resume)"]
         ENDPOINT_MEM["/api/v1/memory (Long-Term Memory)"]
         ENDPOINT_RAG["/api/v1/rag (Local Knowledge Base)"]
-        ENDPOINT_SYS["/api/v1/system (Health & Tools Inspection)"]
-        STATIC_APP["/app (SPA Dashboard)"]
+        ENDPOINT_SYS["/api/v1/system (Health & Lifecycle Traces)"]
+        STATIC_APP["/app (Modern SPA Dashboard)"]
     end
 
-    subgraph SERVICE ["2. Application Service Layer"]
-        AGENT_SVC["AgentService (Execution & Streaming Orchestrator)"]
-        SESS_SVC["SessionService (Thread Session Manager)"]
+    subgraph SERVICE ["2. Application Service & Engineering Guard Layer"]
+        GUARD["IntentRouteGuard (Fast-Path Rules & Sticky Anchors)"]
+        THINKING["ThinkingEngine (4-Phase Progressive State Machine)"]
+        AGENT_SVC["AgentService (Execution, Stream Dispatch & Trace Metrics)"]
+        SESS_SVC["SessionService (SQLite Session & Message Persistence)"]
         MEM_MGR["MemoryManager (LTM Retrieval & Prompt Injection)"]
+        TRACE_STORE["TraceStore (5-Stage Lifecycle Telemetry & Waterfall)"]
     end
 
     subgraph RUNTIME ["3. LangGraph Agent Runtime (StateGraph)"]
         ASST["Assistant Reasoning Node"]
         GATE["Approval Gate (HITL interrupt)"]
         EXEC["Tool Executor Node"]
-        CHECKPOINTER[("SqliteSaver (data/jarvis_studio.db)")]
+        CHECKPOINTER[("MemorySaver / SqliteSaver (Checkpoint Snapshots)")]
     end
 
     subgraph CORE ["4. Multi-Provider LLM & 5. Tools/RAG Ecosystem"]
@@ -100,55 +108,72 @@ flowchart TD
     end
 
     CLI --> AGENT_SVC
-    BROWSER --> STATIC_APP & ENDPOINT_CHAT & ENDPOINT_APPR & ENDPOINT_MEM & ENDPOINT_RAG
+    BROWSER --> STATIC_APP & ENDPOINT_CHAT & ENDPOINT_SESS & ENDPOINT_APPR & ENDPOINT_MEM & ENDPOINT_RAG & ENDPOINT_SYS
     API_CLIENT --> GATEWAY
-    GATEWAY --> AGENT_SVC
-    AGENT_SVC --> SESS_SVC
+    GATEWAY --> AGENT_SVC & SESS_SVC
+    AGENT_SVC --> GUARD
+    GUARD -. Greeting / Halt Match .-> FastDirectReply[<50ms Direct Reply]
+    GUARD -. Pass Through / Enriched .-> THINKING
+    AGENT_SVC --> SESS_SVC & TRACE_STORE
     AGENT_SVC --> RUNTIME
     MEM_MGR -. Injected Preferences .-> ASST
     ASST --> GATE --> EXEC --> ASST
-    RUNTIME -. Automatic Checkpoints .-> CHECKPOINTER
+    RUNTIME -. Runtime Snapshots .-> CHECKPOINTER
     ASST --> LLM
     GATE & EXEC --> REGISTRY
     REGISTRY --> BUILTIN & MCP_HUB & VECSTORE
 ```
 
-### Core Execution Flow (SSE Streaming + HITL Suspension & Resume)
+### Core Execution Flow (Intent Guard + Progressive Thinking + SSE Streaming + HITL Suspension)
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as User / Web UI
     participant GW as FastAPI Gateway (/chat/stream)
+    participant Guard as IntentRouteGuard
     participant Svc as AgentService
+    participant Think as ThinkingEngine
     participant Graph as LangGraph StateGraph
     participant Gate as Approval Gate (HITL)
-    participant DB as SQLite Checkpoints
-    participant Tool as Tool Executor
+    participant Trace as TraceStore (SQLite)
 
     User->>GW: POST /api/v1/chat/stream
     GW->>Svc: stream_agent(thread_id, message)
-    Svc->>Graph: astream_events(version="v2")
-    Graph-->>GW: event: token (Token-by-token)
-    GW-->>User: SSE Typewriter Rendering
+    Svc->>Guard: evaluate(message, thread_id)
 
-    alt Encounter Sensitive Action (e.g., execute_shell_command)
-        Graph->>Gate: Evaluate Risk (HIGH)
-        Gate-->>Graph: interrupt(pending_approval)
-        Graph->>DB: Persist superstep snapshot, graph suspended
-        Graph-->>Svc: Interrupt signal
-        Svc-->>GW: event: approval_required (Payload & Approval ID)
-        GW-->>User: Render interactive HITL card
-        
-        User->>GW: POST /api/v1/approvals/{id}/decision/stream (Approve/Modify)
-        GW->>Svc: stream_resume_approval(decision)
-        Svc->>Graph: astream_events(Command(resume=payload))
+    alt Match Fast Rule (Greeting / System Query / Emergency Halt)
+        Guard-->>Svc: DirectReply (<50ms, 0 Tokens)
+        Svc->>Trace: Record fast metrics (TTFT=TTLT<50ms)
+        Svc-->>GW: event: thinking (rule) -> event: token -> event: completed
+        GW-->>User: Instant response delivery (<50ms)
+    else Regular Agent & LLM Execution
+        Svc->>Think: emit_understand("Analyzing intent & context...")
+        Think-->>GW: event: thinking (phase: understand, TTFT < 50ms)
+        GW-->>User: Dynamic thinking bar & status chips
+
+        Svc->>Graph: astream_events(version="v2")
+        Graph-->>GW: event: token (Token-by-token)
+        GW-->>User: SSE Typewriter Rendering
+
+        alt Encounter Sensitive Action (e.g., execute_shell_command)
+            Graph->>Gate: Evaluate Risk (HIGH)
+            Gate-->>Graph: interrupt(pending_approval)
+            Graph-->>Svc: Interrupt signal
+            Svc-->>GW: event: approval_required (Payload & Approval ID)
+            GW-->>User: Render interactive HITL card
+            
+            User->>GW: POST /api/v1/approvals/{id}/decision/stream (Approve/Modify)
+            GW->>Svc: stream_resume_approval(decision)
+            Svc->>Graph: astream_events(Command(resume=payload))
+        end
+
+        Graph->>Think: emit_tool_end / emit_organize
+        Graph-->>GW: event: token (Final answer delivery)
+        Svc->>Trace: Persist 5-stage latency waterfall (TTFT, TTFA, TTLT)
+        Svc-->>GW: event: completed (trace_id attribution)
+        GW-->>User: Response complete with highlighted Trace link
     end
-
-    Graph->>Tool: Execute Authorized Tool Action
-    Tool-->>Graph: Return Tool Observation
-    Graph-->>GW: event: token (Final response chunks)
-    GW-->>User: Response Complete
 ```
 
 ---
@@ -157,13 +182,17 @@ sequenceDiagram
 
 | Core Concept | Definition & Responsibility in Jarvis Studio |
 | :--- | :--- |
+| **IntentRouteGuard** | Front-line intent router and fast-path rule guard. Delivers sub-50ms 0-Token direct replies for common greetings/status queries; manages multi-turn sticky entity context anchors and emergency halt triggers. |
+| **ThinkingEngine** | Progressive pseudo-thinking engine. Enforces a 4-phase state machine (`understand` → `tool` → `organize` → `completed`), providing sub-50ms first-response feedback, white-box tool translation, and keepalive heartbeats. |
+| **Lifecycle Traces** | End-to-end 5-stage lifecycle observability. Accurately segments execution into `Input`, `Guard`, `Preload`, `Thinking & Tools Waterfall`, and `Output Delivery`, tracking millisecond-accurate TTFT, TTFA, and TTLT. |
+| **Multi-Session Store** | Full-featured conversational session storage. Powered by SQLite tables `chat_sessions` and `chat_messages` for automated title generation, real-time search, renaming, clearing, and instant restoration. |
 | **AgentState** | Single Source of Truth for the graph. A strongly typed state schema accumulating messages atomically using the `add_messages` reducer. |
 | **Approval Gate** | Security audit node inspecting tool invocations against the safety matrix; triggers LangGraph `interrupt()` to prevent unauthorized execution. |
 | **ToolRegistry & RiskLevel** | Central tool catalog managing metadata and 3-level safety classifications (`SAFE`, `MEDIUM`, `HIGH`). |
 | **MCP Client Manager** | Model Context Protocol coordinator managing stdio child processes and SSE sessions, dynamically mapping JSON Schemas to LangChain tools. |
 | **MemoryManager (LTM)** | Cross-session long-term memory system storing user preferences, coding habits, and key facts, injecting them into the prompt before reasoning. |
 | **SqliteVecStore** | Lightweight vector store powered by `sqlite-vec` virtual tables, paired with `DocumentSplitter` and `WorkspaceIndexer` for zero-dependency semantic code/doc search. |
-| **SSE Streaming** | Gateway streaming protocol unifying token generation, tool lifecycle steps, and interrupt suspension events over standard HTTP event streams. |
+| **SSE Streaming** | Gateway streaming protocol unifying token generation, thinking state machine events, tool lifecycle steps, and interrupt suspension events over standard HTTP event streams. |
 | **SqliteSaver Checkpoint** | Spatiotemporal state persistence saving conversational context and step snapshots to SQLite, enabling fault tolerance and session resumption. |
 
 ---
@@ -174,22 +203,24 @@ sequenceDiagram
 JarvisStudio/
 ├── src/jarvis_studio/
 │   ├── api/                     # 1. Application API Gateway (FastAPI 0.115+)
-│   │   ├── routes/              # Modular routers (/chat, /approvals, /memory, /rag, /system)
+│   │   ├── routes/              # Modular routers (/chat, /sessions, /approvals, /memory, /rag, /system)
 │   │   ├── schemas/             # Pydantic request and response contract models
 │   │   ├── static/              # Modern responsive SPA dashboard (index.html)
 │   │   └── app.py               # FastAPI lifecycle, CORS middleware, and static mount factory
 │   ├── service/                 # 2. Application Service Layer
 │   │   ├── agent_service.py     # Execution coordination, SSE streaming, and HITL resumption
-│   │   └── session_service.py   # Thread session lifecycle tracking
+│   │   └── session_service.py   # SQLite multi-session CRUD, auto-titling, and message persistence
 │   ├── agent/                   # 3. LangGraph Agent Runtime (StateGraph)
-│   │   ├── checkpoints/         # SQLite checkpoint factory and persistent savers
+│   │   ├── checkpoints/         # State checkpointer factory and savers (MemorySaver / SqliteSaver)
 │   │   ├── hitl/                # HITL interrupt manager and approval state machine
 │   │   ├── nodes/               # Pure atomic nodes (assistant, approval_gate, executor, router)
 │   │   ├── graph.py             # StateGraph assembly, conditional edge routing, and compilation
 │   │   └── state.py             # Strongly typed AgentState schema contract
-│   ├── core/                    # 4. Multi-Provider LLM & Core Infrastructure
+│   ├── core/                    # 4. Multi-Provider LLM & Engineering Guard Infrastructure
+│   │   ├── guard/               # IntentRouteGuard fast-path routing, sticky entities, and halts
+│   │   ├── thinking/            # ThinkingEngine 4-phase progressive state machine & heartbeats
 │   │   ├── llm/                 # LLMFactory (OpenAI, DeepSeek, Ollama, custom endpoints)
-│   │   ├── observability/       # Loguru colored logging and timed_step latency profiling
+│   │   ├── observability/       # 5-stage lifecycle telemetry (TraceStore) and structured logging
 │   │   └── errors.py            # Unified domain exception definitions
 │   ├── tools/                   # 5. Tool Subsystem & MCP Ecosystem
 │   │   ├── builtin/             # Built-in filesystem, shell, memory, and RAG tools
@@ -203,7 +234,7 @@ JarvisStudio/
 ├── config/                      # YAML runtime config & MCP server registry
 ├── docs/                        # Complete technical documentation hub (architecture, design, ADRs)
 ├── scripts/                     # Service management daemon scripts (run_daemon.ps1, run_daemon.sh)
-├── tests/                       # Automated test suite (38 unit and integration tests, 100% PASS)
+├── tests/                       # Automated test suite (43 unit and integration tests, 100% PASS)
 ├── Dockerfile                   # Multi-stage production container build specification
 ├── docker-compose.yml           # Single-command container deployment template
 ├── pyproject.toml               # uv / PEP 621 dependency specifications and packaging config
@@ -290,7 +321,7 @@ OPENAI_API_KEY=your_api_key_here
 ```bash
 uv run --extra dev pytest
 ```
-*All 38 unit and integration tests should pass within 12 seconds.*
+*All 43 unit and integration tests should pass within 12 seconds.*
 
 ---
 
@@ -326,7 +357,7 @@ uv run ruff check .
 uv run ruff check --fix .
 uv run ruff format .
 
-# Run the complete test suite (38 tests)
+# Run the complete test suite (43 tests)
 uv run --extra dev pytest -v
 ```
 
@@ -353,22 +384,27 @@ docs/
 │   ├── ADR-002-decouple-application-and-agent.md # ADR-002: Why 5-tier strict decoupling
 │   └── ADR-003-native-interrupt-for-hitl.md     # ADR-003: Why native interrupt for HITL
 └── roadmap/                          # Roadmap
-    └── engineering-roadmap.md        # Milestone schedule and delivery records (M0 ~ M5)
+    └── engineering-roadmap.md        # Core milestone schedule and delivery records (M0 ~ M6)
 ```
 
 ---
 
 ## 10. Roadmap
 
-All six core milestones of Jarvis Studio are **fully implemented and verified**:
+All core milestones of Jarvis Studio are **fully implemented and verified**:
 
 ### Completed
 - ✅ **Milestone 0: Architecture Baseline & Scaffolding**: 5-tier architecture blueprint, Python 3.12 + `uv` dependencies, automated Pytest foundation.
 - ✅ **Milestone 1: Core Agent Runtime & Multi-Provider Engine**: Unified `LLMFactory` (OpenAI, DeepSeek, Ollama), `AgentState` schema, basic ReAct reasoning loop.
 - ✅ **Milestone 2: Tool Subsystem & MCP Client Integration**: `ToolRegistry` 3-level safety matrix, built-in filesystem and shell tools, dynamic MCP JSON-to-Pydantic bridge, stdio/SSE client pool.
-- ✅ **Milestone 3: Human-in-the-Loop & Execution Checkpoints**: Native stateless `interrupt()` sensitive action interception, SQLite checkpointing (`SqliteSaver`), protocol-compliant `ToolMessage` rejection handling, REST API contracts, and terminal resolution prompts.
+- ✅ **Milestone 3: Human-in-the-Loop & Execution Checkpoints**: Native stateless `interrupt()` sensitive action interception, SQLite checkpointing, protocol-compliant `ToolMessage` rejection handling, REST API contracts, and terminal resolution prompts.
 - ✅ **Milestone 4: Personal Memory & Local Knowledge Base**: Cross-session Long-Term Memory (LTM: `MemoryStore` + `MemoryManager`), dynamic prompt preference injection, zero-dependency `sqlite-vec` local vector store (`SqliteVecStore`), workspace SHA-256 incremental file indexer (`WorkspaceIndexer`).
 - ✅ **Milestone 5: Application Gateway, Streaming & User Interface**: Server-Sent Events (SSE) token and step streaming (`/api/v1/chat/stream`), modern responsive Web UI console (`/app`), production multi-stage `Dockerfile`, `docker-compose.yml`, and cross-platform background daemon scripts (`run_daemon.ps1`, `run_daemon.sh`).
+- ✅ **Milestone 6: Experience Optimization & AI Engineering Skills Upgrade**:
+  - **Progressive Pseudo-Thinking Stream**: 4-phase state machine (`understand` → `tool` → `organize` → `completed`), reducing TTFT to **<50ms** with keepalive heartbeats and white-box tool translation.
+  - **Intent Route Guard & Fast-Path Reply**: Sub-50ms 0-Token direct replies for common greetings/status queries, multi-turn sticky entity context tracking, and emergency halts.
+  - **Multi-Session CRUD & History**: SQLite tables `chat_sessions` and `chat_messages` driving automated titling, real-time filtering, renaming, and sub-second history restoration.
+  - **5-Stage Lifecycle Observability (Traces)**: End-to-end millisecond TTFT / TTFA / TTLT metrics profiling and visual waterfall execution inspector.
 
 ### Future & Extension Outlook
 - [ ] **Cross-Platform Native Desktop Packaging**: Package the Web console into a lightweight native desktop app using Tauri or Electron.
