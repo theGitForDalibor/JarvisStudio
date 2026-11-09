@@ -71,6 +71,9 @@
       <button onclick="switchTab('rag')" id="tab-btn-rag" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
         📚 本地知识库 (RAG)
       </button>
+      <button onclick="switchTab('traces')" id="tab-btn-traces" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        ⚡ 链路追踪 (Traces)
+      </button>
       <button onclick="switchTab('system')" id="tab-btn-system" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
         ⚙️ 系统工具
       </button>
@@ -327,6 +330,77 @@
       </div>
     </div>
 
+    <!-- 6. TRACES TAB (Lifecycle Observability & Waterfall) -->
+    <div id="view-traces" class="hidden flex-1 p-6 overflow-y-auto max-w-6xl mx-auto w-full">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <div class="flex items-center gap-2">
+            <h2 class="text-lg font-bold">端到端链路追踪 (Lifecycle Traces)</h2>
+            <span class="px-2 py-0.5 text-[10px] rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">白盒可观测</span>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5">记录会话完整 5 阶段生命周期：输入规整 → 规则守卫 → 上下文预热 → 渐进思考与工具编排 → 流式输出，提供全链路 TTFT / TTFA / TTLT 延迟指标。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <label class="text-xs text-slate-400 flex items-center gap-1.5 cursor-pointer select-none bg-slate-900 border border-slate-800 px-2.5 py-1.5 rounded-lg hover:border-slate-700">
+            <input type="checkbox" id="traces-filter-session" onchange="loadTraces()" class="rounded bg-slate-950 border-slate-700 text-blue-600 focus:ring-0">
+            <span>仅看当前会话</span>
+          </label>
+          <button onclick="loadTraces()" class="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-700 rounded transition flex items-center gap-1">
+            <span>↻</span> 刷新链路
+          </button>
+        </div>
+      </div>
+
+      <!-- Traces Metric Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mb-5">
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
+          <div class="text-slate-400 text-xs">平均首字延迟 (Avg TTFT)</div>
+          <div id="stat-ttft" class="text-base font-bold text-blue-400 mt-1 font-mono">-- ms</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">目标: &lt;100ms 规则直出 / 渐进反馈</div>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
+          <div class="text-slate-400 text-xs">平均首次生成 (Avg TTFA)</div>
+          <div id="stat-ttfa" class="text-base font-bold text-amber-400 mt-1 font-mono">-- ms</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">大模型首个有效答案 Token 耗时</div>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
+          <div class="text-slate-400 text-xs">平均总执行时长 (Avg TTLT)</div>
+          <div id="stat-ttlt" class="text-base font-bold text-emerald-400 mt-1 font-mono">-- ms</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">端到端完整请求处理闭环时长</div>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
+          <div class="text-slate-400 text-xs">规则快速通道命中率</div>
+          <div id="stat-fast-path" class="text-base font-bold text-purple-400 mt-1 font-mono">--%</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">0 Token 消耗直出的快速回复比例</div>
+        </div>
+      </div>
+
+      <!-- Traces Split Table & Inspector -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        <!-- Trace List (5 cols) -->
+        <div class="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col h-[520px]">
+          <div class="p-3 border-b border-slate-800 flex justify-between items-center bg-slate-900/80">
+            <span class="text-xs font-bold text-slate-300">最近请求执行链路 (Traces)</span>
+            <span id="traces-count" class="text-[11px] text-slate-500">0 条记录</span>
+          </div>
+          <div id="traces-list-container" class="flex-1 overflow-y-auto divide-y divide-slate-800/80 p-1 space-y-1">
+            <div class="text-xs text-slate-500 text-center py-10">正在加载链路追踪数据...</div>
+          </div>
+        </div>
+
+        <!-- Trace Detail Inspector (7 cols) -->
+        <div id="trace-inspector" class="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col h-[520px]">
+          <div class="p-3 border-b border-slate-800 flex justify-between items-center bg-slate-900/80">
+            <span class="text-xs font-bold text-slate-300">链路详情查看器</span>
+            <span id="inspector-trace-id" class="text-[11px] font-mono text-slate-500">未选择 Trace</span>
+          </div>
+          <div id="trace-detail-content" class="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+            <div class="text-xs text-slate-500 text-center py-20">点击左侧任意 Trace 记录查看 5 阶段执行细节与工具瀑布流</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </main>
 
   <!-- Add Memory Modal -->
@@ -366,7 +440,7 @@
 
     // --- Tab Switching ---
     function switchTab(tab) {
-      ['chat', 'approvals', 'memory', 'rag', 'system'].forEach(t => {
+      ['chat', 'approvals', 'memory', 'rag', 'traces', 'system'].forEach(t => {
         document.getElementById(`view-${t}`).classList.add('hidden');
         const btn = document.getElementById(`tab-btn-${t}`);
         btn.classList.remove('bg-blue-600', 'text-white', 'shadow');
@@ -382,6 +456,7 @@
       if (tab === 'approvals') loadApprovals();
       if (tab === 'memory') loadMemories();
       if (tab === 'rag') loadRagDocs();
+      if (tab === 'traces') loadTraces();
       if (tab === 'system') loadSystemInfo();
     }
 
@@ -760,7 +835,7 @@
               if (!rawData) continue;
               try {
                 const parsed = JSON.parse(rawData);
-                handleStreamEvent(currentEvent, parsed, contentEl, () => {
+                handleStreamEvent(currentEvent, parsed, aiMsgEl, () => {
                   fullResponseText += (parsed.token || '');
                   contentEl.innerHTML = marked.parse(fullResponseText);
                   hljs.highlightAll();
@@ -786,19 +861,104 @@
       }
     }
 
-    function handleStreamEvent(event, data, contentEl, onToken) {
-      if (event === 'token') {
+    function handleStreamEvent(event, data, aiMsgEl, onToken) {
+      const contentEl = aiMsgEl.querySelector('.msg-content');
+      const thinkingBox = aiMsgEl.querySelector('.thinking-box');
+      const thinkingSummary = aiMsgEl.querySelector('.thinking-summary');
+      const thinkingTimer = aiMsgEl.querySelector('.thinking-timer');
+      const thinkingBody = aiMsgEl.querySelector('.thinking-body');
+      const thinkingDot = aiMsgEl.querySelector('.thinking-status-dot');
+      const msgFooter = aiMsgEl.querySelector('.msg-footer');
+
+      if (event === 'thinking') {
+        if (thinkingBox) {
+          thinkingBox.classList.remove('hidden');
+          if (data.elapsed_ms !== undefined && thinkingTimer) {
+            thinkingTimer.innerText = (data.elapsed_ms / 1000).toFixed(1) + 's';
+          }
+          if (data.text && thinkingSummary) {
+            thinkingSummary.innerText = data.text;
+          }
+          if (data.phase === 'completed') {
+            if (thinkingDot) {
+              thinkingDot.classList.remove('bg-amber-400', 'animate-pulse');
+              thinkingDot.classList.add('bg-emerald-400');
+            }
+            if (thinkingSummary) {
+              thinkingSummary.innerText = `思考完成 (${((data.elapsed_ms || 0) / 1000).toFixed(1)}s)`;
+            }
+          }
+
+          if (!data.is_heartbeat && thinkingBody) {
+            let badgeColor = 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+            let badgeText = '理解';
+            if (data.phase === 'tool') {
+              badgeColor = 'bg-amber-500/10 text-amber-400 border-amber-500/20';
+              badgeText = '工具';
+            } else if (data.phase === 'organize') {
+              badgeColor = 'bg-purple-500/10 text-purple-400 border-purple-500/20';
+              badgeText = '整理';
+            } else if (data.phase === 'completed') {
+              badgeColor = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
+              badgeText = '完成';
+            }
+
+            const stepDiv = document.createElement('div');
+            stepDiv.className = 'flex items-start gap-1.5 text-[11px]';
+            stepDiv.innerHTML = `
+              <span class="px-1.5 py-0.2 rounded border text-[10px] ${badgeColor} shrink-0 mt-0.5">${badgeText}</span>
+              <span class="flex-1 text-slate-300 font-sans">${escapeHtml(data.text || '')}</span>
+              <span class="text-[10px] text-slate-500 shrink-0 font-mono">${data.elapsed_ms !== undefined ? (data.elapsed_ms / 1000).toFixed(2) + 's' : ''}</span>
+            `;
+            thinkingBody.appendChild(stepDiv);
+            thinkingBody.scrollTop = thinkingBody.scrollHeight;
+          }
+        }
+      } else if (event === 'token') {
         onToken();
       } else if (event === 'tool_start') {
-        const toolBubble = document.createElement('div');
-        toolBubble.className = "text-[11px] font-mono text-amber-400 bg-slate-950/60 border border-amber-500/30 px-2 py-1 rounded inline-block my-1";
-        toolBubble.innerText = `⚙️ [调用工具] ${data.tool}`;
-        contentEl.appendChild(toolBubble);
+        if (thinkingBox && thinkingBody) {
+          thinkingBox.classList.remove('hidden');
+          const stepDiv = document.createElement('div');
+          stepDiv.className = 'flex items-start gap-1.5 text-[11px]';
+          stepDiv.innerHTML = `
+            <span class="px-1.5 py-0.2 rounded border text-[10px] bg-amber-500/10 text-amber-400 border-amber-500/20 shrink-0 mt-0.5">调用</span>
+            <span class="flex-1 text-amber-300 font-mono">⚙️ ${escapeHtml(data.tool)}</span>
+          `;
+          thinkingBody.appendChild(stepDiv);
+          thinkingBody.scrollTop = thinkingBody.scrollHeight;
+        }
       } else if (event === 'tool_end') {
-        const finishBubble = document.createElement('div');
-        finishBubble.className = "text-[11px] font-mono text-emerald-400 bg-slate-950/60 border border-emerald-500/30 px-2 py-1 rounded inline-block my-1 ml-2";
-        finishBubble.innerText = `✓ [完成] ${data.tool}`;
-        contentEl.appendChild(finishBubble);
+        if (thinkingBox && thinkingBody) {
+          const stepDiv = document.createElement('div');
+          stepDiv.className = 'flex items-start gap-1.5 text-[11px]';
+          stepDiv.innerHTML = `
+            <span class="px-1.5 py-0.2 rounded border text-[10px] bg-emerald-500/10 text-emerald-400 border-emerald-500/20 shrink-0 mt-0.5">成功</span>
+            <span class="flex-1 text-emerald-300 font-mono">✓ ${escapeHtml(data.tool)} (${data.duration_ms || 0}ms)</span>
+          `;
+          thinkingBody.appendChild(stepDiv);
+          thinkingBody.scrollTop = thinkingBody.scrollHeight;
+        }
+      } else if (event === 'completed') {
+        if (data.trace_id && msgFooter) {
+          msgFooter.classList.remove('hidden');
+          const idLabel = msgFooter.querySelector('.trace-id-label');
+          const traceTag = msgFooter.querySelector('.trace-tag');
+          const traceBtn = msgFooter.querySelector('.trace-btn');
+          if (idLabel) idLabel.innerText = data.trace_id.slice(0, 12);
+          if (traceTag) {
+            if (data.fast_path) {
+              traceTag.className = "trace-tag px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+              traceTag.innerText = "⚡ 规则守卫直出 (<50ms)";
+            } else {
+              traceTag.className = "trace-tag px-1.5 py-0.2 rounded text-[10px] bg-blue-500/20 text-blue-300 border border-blue-500/30";
+              traceTag.innerText = "智能编排流";
+            }
+          }
+          if (traceBtn) {
+            traceBtn.setAttribute('data-trace-id', data.trace_id);
+          }
+        }
       } else if (event === 'approval_required') {
         showHitlCard(data);
       } else if (event === 'error') {
@@ -808,6 +968,26 @@
           </div>
         `;
       }
+    }
+
+    function toggleThinkingBox(headerEl) {
+      const box = headerEl.closest('.thinking-box');
+      const body = box.querySelector('.thinking-body');
+      const arrow = box.querySelector('.thinking-toggle-arrow');
+      if (body.classList.contains('hidden')) {
+        body.classList.remove('hidden');
+        if (arrow) arrow.style.transform = 'rotate(0deg)';
+      } else {
+        body.classList.add('hidden');
+        if (arrow) arrow.style.transform = 'rotate(-90deg)';
+      }
+    }
+
+    function openTraceFromMsg(btnEl) {
+      const traceId = btnEl.getAttribute('data-trace-id');
+      if (!traceId) return;
+      switchTab('traces');
+      viewTraceDetail(traceId);
     }
 
     function appendMessage(role, text, toolCalls = null) {
@@ -826,11 +1006,41 @@
         role === 'user' ? 'bg-indigo-950/70 border border-indigo-800 text-indigo-100' : 'bg-slate-900 border border-slate-800 text-slate-200'
       }`;
 
-      const content = document.createElement('div');
-      content.className = "msg-content markdown-body";
-      content.innerHTML = text ? marked.parse(text) : '<span class="inline-block w-2 h-4 bg-blue-500 animate-pulse"></span>';
+      if (role === 'assistant') {
+        bubble.innerHTML = `
+          <!-- Thinking Process Box -->
+          <div class="thinking-box hidden mb-3 bg-slate-950/80 border border-slate-800/90 rounded-lg overflow-hidden text-xs">
+            <div class="thinking-header flex items-center justify-between px-3 py-2 bg-slate-900/50 cursor-pointer select-none hover:bg-slate-800/60 transition" onclick="toggleThinkingBox(this)">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="thinking-status-dot w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0"></span>
+                <span class="font-medium text-slate-300 shrink-0">思考过程</span>
+                <span class="thinking-summary text-slate-400 text-[11px] truncate">正在理解指令...</span>
+              </div>
+              <div class="flex items-center gap-2 text-[11px] text-slate-400 shrink-0 ml-2">
+                <span class="thinking-timer font-mono text-[10px]">0.0s</span>
+                <span class="thinking-toggle-arrow text-[10px] transform transition-transform">▼</span>
+              </div>
+            </div>
+            <div class="thinking-body px-3 py-2 space-y-1.5 border-t border-slate-800/70 font-mono text-[11px] leading-relaxed text-slate-400 bg-slate-950/50 max-h-48 overflow-y-auto">
+            </div>
+          </div>
 
-      bubble.appendChild(content);
+          <div class="msg-content markdown-body">${text ? marked.parse(text) : '<span class="inline-block w-2 h-4 bg-blue-500 animate-pulse"></span>'}</div>
+
+          <div class="msg-footer hidden mt-2.5 pt-2 border-t border-slate-800/70 flex items-center justify-between text-[11px] text-slate-500">
+            <button class="trace-btn hover:text-blue-400 flex items-center gap-1.5 transition text-[11px]" onclick="openTraceFromMsg(this)">
+              <span>⚡ 链路:</span>
+              <span class="trace-id-label font-mono text-slate-400"></span>
+              <span class="trace-tag px-1.5 py-0.2 rounded text-[10px]"></span>
+            </button>
+          </div>
+        `;
+      } else {
+        const content = document.createElement('div');
+        content.className = "msg-content markdown-body";
+        content.innerHTML = text ? marked.parse(text) : '';
+        bubble.appendChild(content);
+      }
 
       if (toolCalls && toolCalls.length > 0) {
         const tcContainer = document.createElement('div');
@@ -1144,6 +1354,333 @@
       } catch (e) {
         resContainer.innerHTML = `<div class="text-xs text-red-400">搜索失败: ${e}</div>`;
       }
+    }
+
+    // --- Lifecycle Observability & Traces ---
+    let currentSelectedTraceId = null;
+    let cachedTraces = [];
+
+    async function loadTraces(selectTraceId = null) {
+      const container = document.getElementById('traces-list-container');
+      const filterSession = document.getElementById('traces-filter-session')?.checked;
+      let url = '/api/v1/system/traces?limit=50';
+      if (filterSession && currentThreadId) {
+        url += `&session_id=${encodeURIComponent(currentThreadId)}`;
+      }
+
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("获取链路追踪失败");
+        const traces = await res.json();
+        cachedTraces = traces;
+
+        // Update statistics cards
+        updateTracesStats(traces);
+
+        document.getElementById('traces-count').innerText = `${traces.length} 条记录`;
+
+        if (!traces || traces.length === 0) {
+          container.innerHTML = `
+            <div class="text-xs text-slate-500 text-center py-16">
+              暂无 Trace 链路记录。<br>
+              <span class="text-[11px] text-slate-600 mt-1 inline-block">请在“对话终端”发送消息，系统将自动记录全生命周期执行链路。</span>
+            </div>
+          `;
+          document.getElementById('trace-detail-content').innerHTML = `
+            <div class="text-xs text-slate-500 text-center py-20">暂无选中的 Trace 详情</div>
+          `;
+          document.getElementById('inspector-trace-id').innerText = '未选择 Trace';
+          return;
+        }
+
+        renderTracesList(traces);
+
+        // Auto select trace
+        const targetId = selectTraceId || currentSelectedTraceId || traces[0].trace_id;
+        viewTraceDetail(targetId);
+      } catch (err) {
+        container.innerHTML = `<div class="p-3 text-xs text-red-400">加载链路列表失败: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function updateTracesStats(traces) {
+      if (!traces || traces.length === 0) {
+        document.getElementById('stat-ttft').innerText = '-- ms';
+        document.getElementById('stat-ttfa').innerText = '-- ms';
+        document.getElementById('stat-ttlt').innerText = '-- ms';
+        document.getElementById('stat-fast-path').innerText = '--%';
+        return;
+      }
+
+      let ttftSum = 0, ttftCount = 0;
+      let ttfaSum = 0, ttfaCount = 0;
+      let ttltSum = 0, ttltCount = 0;
+      let fastPathHits = 0;
+
+      for (const t of traces) {
+        if (t.ttft_ms !== null && t.ttft_ms !== undefined) {
+          ttftSum += t.ttft_ms;
+          ttftCount++;
+        }
+        if (t.ttfa_ms !== null && t.ttfa_ms !== undefined) {
+          ttfaSum += t.ttfa_ms;
+          ttfaCount++;
+        }
+        const total = t.total_duration_ms || t.ttlt_ms;
+        if (total !== null && total !== undefined) {
+          ttltSum += total;
+          ttltCount++;
+        }
+        if (t.status === 'rule_direct') {
+          fastPathHits++;
+        }
+      }
+
+      document.getElementById('stat-ttft').innerText = ttftCount > 0 ? `${Math.round(ttftSum / ttftCount)} ms` : '-- ms';
+      document.getElementById('stat-ttfa').innerText = ttfaCount > 0 ? `${Math.round(ttfaSum / ttfaCount)} ms` : '-- ms';
+      document.getElementById('stat-ttlt').innerText = ttltCount > 0 ? `${Math.round(ttltSum / ttltCount)} ms` : '-- ms';
+      document.getElementById('stat-fast-path').innerText = `${Math.round((fastPathHits / traces.length) * 100)}%`;
+    }
+
+    function renderTracesList(traces) {
+      const container = document.getElementById('traces-list-container');
+      container.innerHTML = traces.map(t => {
+        const isSelected = t.trace_id === currentSelectedTraceId;
+        const timeStr = t.start_time ? new Date(t.start_time * 1000).toLocaleTimeString() : '';
+        const isFastPath = t.status === 'rule_direct';
+        const isError = t.status === 'error';
+        const isInterrupted = t.status === 'interrupted';
+
+        let badge = '<span class="px-1.5 py-0.2 rounded text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20">智能编排</span>';
+        if (isFastPath) {
+          badge = '<span class="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">⚡ 守卫直出</span>';
+        } else if (isInterrupted) {
+          badge = '<span class="px-1.5 py-0.2 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20">🛡️ HITL</span>';
+        } else if (isError) {
+          badge = '<span class="px-1.5 py-0.2 rounded text-[10px] bg-red-500/10 text-red-400 border border-red-500/20">异常</span>';
+        }
+
+        return `
+          <div
+            id="trace-item-${t.trace_id}"
+            onclick="viewTraceDetail('${t.trace_id}')"
+            class="p-2.5 rounded-lg cursor-pointer transition select-none ${
+              isSelected ? 'bg-slate-800 border border-blue-500/60' : 'hover:bg-slate-800/60 border border-transparent'
+            }"
+          >
+            <div class="flex items-center justify-between gap-1 mb-1">
+              <div class="flex items-center gap-1.5 min-w-0">
+                ${badge}
+                <span class="font-mono text-[10px] text-slate-400 truncate">${t.trace_id.slice(0, 8)}...</span>
+              </div>
+              <span class="text-[10px] text-slate-500 shrink-0 font-mono">${timeStr}</span>
+            </div>
+            <div class="text-xs text-slate-200 font-medium truncate mb-1.5" title="${escapeHtml(t.query)}">
+              ${escapeHtml(t.query || '空指令')}
+            </div>
+            <div class="flex items-center gap-2 text-[10px] text-slate-400 font-mono">
+              <span>TTFT: <span class="text-blue-400">${t.ttft_ms !== null ? t.ttft_ms + 'ms' : '-'}</span></span>
+              <span>TTLT: <span class="text-emerald-400">${t.total_duration_ms || t.ttlt_ms || 0}ms</span></span>
+              <span>步骤: <span class="text-purple-400">${t.steps_count || 0}</span></span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function viewTraceDetail(traceId) {
+      currentSelectedTraceId = traceId;
+      document.getElementById('inspector-trace-id').innerText = traceId;
+
+      // Update highlight in list
+      document.querySelectorAll('#traces-list-container > div').forEach(el => {
+        el.classList.remove('bg-slate-800', 'border-blue-500/60');
+        el.classList.add('border-transparent');
+      });
+      const activeEl = document.getElementById(`trace-item-${traceId}`);
+      if (activeEl) {
+        activeEl.classList.add('bg-slate-800', 'border-blue-500/60');
+        activeEl.classList.remove('border-transparent');
+      }
+
+      const detailContainer = document.getElementById('trace-detail-content');
+      detailContainer.innerHTML = `
+        <div class="text-xs text-slate-500 text-center py-16">
+          <span class="inline-block w-2 h-2 rounded-full bg-blue-500 animate-ping mr-2"></span>
+          正在读取 Trace ${traceId.slice(0, 8)}... 详细指标
+        </div>
+      `;
+
+      try {
+        const res = await fetch(`/api/v1/system/traces/${traceId}`);
+        if (!res.ok) throw new Error("无法读取该 Trace 详情");
+        const trace = await res.json();
+        renderTraceDetail(trace);
+      } catch (err) {
+        detailContainer.innerHTML = `<div class="p-4 text-xs text-red-400">读取 Trace 详情失败: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function renderTraceDetail(trace) {
+      const container = document.getElementById('trace-detail-content');
+      const isFastPath = trace.status === 'rule_direct';
+
+      // Stage 1: Input Stage
+      const inputStage = trace.input_stage || {};
+
+      // Stage 2: Guard Stage
+      const guardStage = trace.guard_stage || {};
+
+      // Stage 3: Preload Stage
+      const preloadStage = trace.preload_stage || {};
+
+      // Stage 4: Thinking & Tools Waterfall
+      const steps = trace.thinking_steps || [];
+
+      // Stage 5: Output
+      const outputText = trace.output_text || '';
+
+      container.innerHTML = `
+        <!-- Metrics Bar -->
+        <div class="grid grid-cols-4 gap-2 bg-slate-950/70 p-3 rounded-lg border border-slate-800 text-center font-mono">
+          <div>
+            <div class="text-[10px] text-slate-500">首字延迟 TTFT</div>
+            <div class="text-xs font-bold text-blue-400 mt-0.5">${trace.ttft_ms !== null ? trace.ttft_ms + ' ms' : '-'}</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-500">首 Token TTFA</div>
+            <div class="text-xs font-bold text-amber-400 mt-0.5">${trace.ttfa_ms !== null ? trace.ttfa_ms + ' ms' : '-'}</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-500">总时长 TTLT</div>
+            <div class="text-xs font-bold text-emerald-400 mt-0.5">${trace.total_duration_ms || trace.ttlt_ms || 0} ms</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-500">执行状态</div>
+            <div class="text-xs font-bold ${isFastPath ? 'text-purple-400' : 'text-slate-200'} mt-0.5">${trace.status}</div>
+          </div>
+        </div>
+
+        <!-- 5-Stage Lifecycle Timeline -->
+        <div class="space-y-3">
+
+          <!-- Stage 1: Input -->
+          <div class="bg-slate-950/60 border border-slate-800/80 rounded-lg p-3">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="font-bold text-slate-200 flex items-center gap-1.5">
+                <span class="w-4 h-4 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-[10px]">1</span>
+                输入规整与上下文检查 (Input Stage)
+              </span>
+              <span class="text-[10px] font-mono text-slate-500">thread: ${escapeHtml(trace.session_id)}</span>
+            </div>
+            <div class="bg-slate-900/80 p-2 rounded text-slate-300 font-mono text-[11px] whitespace-pre-wrap">${escapeHtml(trace.query)}</div>
+          </div>
+
+          <!-- Stage 2: Intent Guard -->
+          <div class="bg-slate-950/60 border border-slate-800/80 rounded-lg p-3">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="font-bold text-slate-200 flex items-center gap-1.5">
+                <span class="w-4 h-4 rounded-full bg-purple-500/20 text-purple-400 flex items-center justify-center text-[10px]">2</span>
+                意图规则守卫与快速通道 (Route Guard)
+              </span>
+              <span class="text-[10px] font-mono text-purple-400">${guardStage.duration_ms ? guardStage.duration_ms + ' ms' : '<50ms'}</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-[11px] font-mono bg-slate-900/60 p-2 rounded">
+              <div>动作动作: <span class="text-blue-400">${guardStage.action || (isFastPath ? 'direct_reply' : 'execute_graph')}</span></div>
+              <div>命中规则: <span class="text-amber-400">${guardStage.rule_name || 'default_llm_flow'}</span></div>
+              <div>实体吸附: <span class="text-slate-400">${guardStage.has_sticky_entity ? '是 (附着前序上下文)' : '无'}</span></div>
+              <div>通道类型: <span class="${isFastPath ? 'text-emerald-400 font-bold' : 'text-slate-400'}">${isFastPath ? '⚡ 规则直出 (0 Token)' : 'LangGraph 大模型编排'}</span></div>
+            </div>
+          </div>
+
+          <!-- Stage 3: Preload Stage -->
+          <div class="bg-slate-950/60 border border-slate-800/80 rounded-lg p-3">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="font-bold text-slate-200 flex items-center gap-1.5">
+                <span class="w-4 h-4 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center text-[10px]">3</span>
+                上下文预热与长期记忆 (Context Preload)
+              </span>
+              <span class="text-[10px] font-mono text-slate-400">历史载入: ${preloadStage.history_loaded_count || 0} 条</span>
+            </div>
+            <div class="text-[11px] text-slate-400">
+              ${preloadStage.sticky_context && Object.keys(preloadStage.sticky_context).length > 0
+                ? `<div class="bg-slate-900/60 p-2 rounded font-mono text-blue-300">吸附上下文: ${escapeHtml(JSON.stringify(preloadStage.sticky_context))}</div>`
+                : '<div class="text-slate-500">无额外吸附实体，使用标准对话上下文注入。</div>'
+              }
+            </div>
+          </div>
+
+          <!-- Stage 4: Progressive Thinking & Tools Waterfall -->
+          <div class="bg-slate-950/60 border border-slate-800/80 rounded-lg p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-bold text-slate-200 flex items-center gap-1.5">
+                <span class="w-4 h-4 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-[10px]">4</span>
+                渐进思考状态机与工具编排瀑布流 (Waterfall)
+              </span>
+              <span class="text-[10px] font-mono text-slate-400">${steps.length} 步骤</span>
+            </div>
+
+            ${steps.length === 0 ? `
+              <div class="text-[11px] text-slate-500 p-2 bg-slate-900/60 rounded">
+                ${isFastPath ? '⚡ 规则守卫直出，无需调用工具与大模型编排。' : '本轮对话无独立工具调用。'}
+              </div>
+            ` : `
+              <div class="space-y-2">
+                ${steps.map(s => {
+                  let badge = 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+                  if (s.step_type === 'tool') badge = 'bg-amber-500/10 text-amber-400 border-amber-500/20';
+                  if (s.step_type === 'organize') badge = 'bg-purple-500/10 text-purple-400 border-purple-500/20';
+
+                  return `
+                    <div class="bg-slate-900/80 border border-slate-800 rounded p-2.5 space-y-1.5">
+                      <div class="flex items-center justify-between text-[11px]">
+                        <div class="flex items-center gap-1.5">
+                          <span class="px-1.5 py-0.2 rounded border text-[10px] ${badge}">#${s.seq} ${s.step_type}</span>
+                          <span class="font-mono font-medium text-slate-200">${escapeHtml(s.name)}</span>
+                        </div>
+                        <span class="font-mono text-slate-400 text-[10px]">${s.duration_ms || 0} ms</span>
+                      </div>
+                      ${s.arguments ? `
+                        <div class="text-[10.5px] font-mono bg-slate-950/80 p-1.5 rounded text-slate-400 overflow-x-auto max-h-24">
+                          <span class="text-slate-500 block">入参 (Arguments):</span>
+                          ${escapeHtml(typeof s.arguments === 'object' ? JSON.stringify(s.arguments, null, 2) : String(s.arguments))}
+                        </div>
+                      ` : ''}
+                      ${s.result ? `
+                        <div class="text-[10.5px] font-mono bg-slate-950/80 p-1.5 rounded text-emerald-300 overflow-x-auto max-h-24">
+                          <span class="text-slate-500 block">返回结果 (Result Preview):</span>
+                          ${escapeHtml(typeof s.result === 'object' ? JSON.stringify(s.result, null, 2) : String(s.result))}
+                        </div>
+                      ` : ''}
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            `}
+          </div>
+
+          <!-- Stage 5: Output Delivery -->
+          <div class="bg-slate-950/60 border border-slate-800/80 rounded-lg p-3">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="font-bold text-slate-200 flex items-center gap-1.5">
+                <span class="w-4 h-4 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px]">5</span>
+                答案生成与流式交付 (Output Delivery)
+              </span>
+              <span class="text-[10px] font-mono text-slate-500">${outputText.length} 字符</span>
+            </div>
+            <div class="bg-slate-900/80 p-2.5 rounded text-slate-300 text-[11px] leading-relaxed max-h-48 overflow-y-auto whitespace-pre-wrap">
+              ${escapeHtml(outputText || '(无输出)')}
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Raw JSON Payload Toggle -->
+        <details class="bg-slate-950/60 border border-slate-800/80 rounded-lg p-3 text-[11px]">
+          <summary class="cursor-pointer text-slate-400 hover:text-slate-200 select-none font-medium">查看完整 Raw JSON Payload</summary>
+          <pre class="mt-2 p-2 bg-slate-900 rounded text-slate-300 font-mono text-[10px] overflow-x-auto max-h-60 leading-normal">${escapeHtml(JSON.stringify(trace, null, 2))}</pre>
+        </details>
+      `;
     }
 
     // --- System & Tools ---
