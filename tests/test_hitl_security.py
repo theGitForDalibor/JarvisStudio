@@ -500,6 +500,7 @@ def test_09_tool_call_id_mismatch_rejected(secured_registry):
     """Test 9: Approval decision with mismatched tool_call_id fails authorization."""
     state = {
         "messages": [],
+        "run_context": {"session_id": "thread_09"},
         "approval_decision": {
             "tool_call_id": "call_authorized_AAA",
             "decision": "approve",
@@ -526,6 +527,7 @@ def test_10_tampered_arguments_hash_mismatch_rejected(secured_registry):
 
     state = {
         "messages": [],
+        "run_context": {"session_id": "thread_10"},
         "approval_decision": {
             "tool_call_id": "call_tamper_10",
             "decision": "approve",

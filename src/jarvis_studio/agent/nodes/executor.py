@@ -5,6 +5,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 
 from jarvis_studio.agent.hitl.authorization import verify_tool_execution_authorization
+from jarvis_studio.agent.hitl.manager import get_hitl_manager
 from jarvis_studio.agent.state import AgentState
 from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.core.observability.tracer import timed_step
@@ -26,19 +27,21 @@ def create_tool_executor_node(registry: ToolRegistry = None):
             return {}
 
         tool_messages: list[ToolMessage] = []
+        hitl_mgr = get_hitl_manager()
 
         for call in last_message.tool_calls:
             tool_name = call.get("name", "")
             tool_args = call.get("args", {})
             call_id = call.get("id", "")
 
-            # Mandatory Authorization Check before any execution
+            # Mandatory Authorization & Lease Acquisition Check before execution
             auth = verify_tool_execution_authorization(
                 tool_name=tool_name,
                 tool_call_id=call_id,
                 raw_args=tool_args,
                 state=state,
                 registry=tool_registry,
+                acquire_lease=True,
             )
 
             if not auth.is_authorized:
@@ -58,6 +61,12 @@ def create_tool_executor_node(registry: ToolRegistry = None):
             # Lookup tool
             tool = tool_registry.get(tool_name)
             if not tool:
+                if auth.approval_id:
+                    hitl_mgr.finalize_execution(
+                        auth.approval_id,
+                        success=False,
+                        error=f"Tool '{tool_name}' is not recognized.",
+                    )
                 tool_messages.append(
                     ToolMessage(
                         content=f"Error: Tool '{tool_name}' is not recognized.",
@@ -75,7 +84,13 @@ def create_tool_executor_node(registry: ToolRegistry = None):
                     else:
                         result = tool.invoke(effective_args)
                     result_str = str(result)
+                    if auth.approval_id:
+                        hitl_mgr.finalize_execution(auth.approval_id, success=True)
                 except Exception as exc:  # noqa: BLE001
+                    if auth.approval_id:
+                        hitl_mgr.finalize_execution(
+                            auth.approval_id, success=False, error=str(exc)
+                        )
                     logger.error(f"Error executing tool '{tool_name}': {exc}")
                     result_str = f"Error executing '{tool_name}': {exc}"
 

@@ -21,7 +21,7 @@ class AuthorizationResult(BaseModel):
     is_authorized: bool
     effective_args: dict[str, Any]
     rejection_reason: str | None = None
-    status: str  # authorized_safe, authorized_approved, authorized_modified, unauthorized_unapproved, unauthorized_rejected, unauthorized_mismatch, unauthorized_invalid_args
+    status: str  # authorized_safe, authorized_approved, authorized_executing, authorized_modified, unauthorized_missing_thread, unauthorized_unapproved, unauthorized_rejected, unauthorized_mismatch, unauthorized_invalid_args, unauthorized_already_consumed, unauthorized_lease_failed
     approval_id: str | None = None
 
 
@@ -32,19 +32,21 @@ def verify_tool_execution_authorization(
     state: AgentState | dict[str, Any],
     registry: ToolRegistry | None = None,
     hitl_mgr: HITLManager | None = None,
+    acquire_lease: bool = True,
 ) -> AuthorizationResult:
     """Rigorous gatekeeper validating that a tool call is authorized to execute.
 
     Checks:
     1. If the tool is SAFE / does not require approval -> authorized.
     2. If the tool is HIGH RISK / requires approval:
-       - Must have an explicit approval decision bound to this `tool_call_id`.
-       - Cannot use decisions targeted at other tool calls.
+       - Must have valid `thread_id` in `state["run_context"]["session_id"]` (Fail-Closed).
+       - Must have an explicit approval decision bound to `thread_id` and `tool_call_id`.
+       - Cannot use decisions targeted at other threads or other tool calls.
        - Original arguments must match arguments recorded during approval (tamper check).
        - If rejected -> unauthorized with rejection reason.
        - If modified -> arguments validated against tool schema; unauthorized if schema invalid.
-       - If approved -> authorized with original arguments.
-       - If unapproved or missing -> strictly blocked from execution.
+       - If approved -> atomically acquire execution lease (status -> EXECUTING).
+       - If already consumed, failed, unapproved, or missing -> strictly blocked from execution.
     """
     tool_registry = registry or get_default_registry()
 
@@ -56,7 +58,21 @@ def verify_tool_execution_authorization(
             status="authorized_safe",
         )
 
-    # 2. Tool requires approval - lookup decision
+    # 2. Extract and validate thread_id (Strict Thread Isolation)
+    run_context = state.get("run_context", {})
+    thread_id = run_context.get("session_id")
+    if not thread_id:
+        logger.warning(
+            f"Execution blocked: Missing thread_id in context for dangerous tool '{tool_name}' (call_id: {tool_call_id})"
+        )
+        return AuthorizationResult(
+            is_authorized=False,
+            effective_args=raw_args,
+            status="unauthorized_missing_thread",
+            rejection_reason="Execution blocked: Missing required thread_id in execution context.",
+        )
+
+    # 3. Tool requires approval - lookup decision
     hitl = hitl_mgr or get_hitl_manager()
     approval_decision = state.get("approval_decision") or {}
 
@@ -88,35 +104,40 @@ def verify_tool_execution_authorization(
 
     # Check if a single generic decision was provided (legacy compatibility)
     if not decision_data and approval_decision.get("decision"):
-        # If there's an explicit tool_call_id in approval_decision that differed, we already caught it above.
-        # If tool_call_id was omitted in approval_decision, check if it's the only call or matched in hitl_mgr
         target_appr_id = approval_decision.get("approval_id")
         if target_appr_id:
-            req = hitl.get_request(target_appr_id)
-            if req and req.tool_call_id and req.tool_call_id != tool_call_id:
+            req = hitl.get_request(target_appr_id, thread_id=thread_id)
+            if not req or (req.tool_call_id and req.tool_call_id != tool_call_id):
                 return AuthorizationResult(
                     is_authorized=False,
                     effective_args=raw_args,
                     status="unauthorized_mismatch",
-                    rejection_reason="Authorization mismatch: Approval request belongs to another tool call.",
+                    rejection_reason="Authorization mismatch: Approval request belongs to another thread or tool call.",
                     approval_id=target_appr_id,
                 )
         decision_data = approval_decision
 
     # Check hitl_mgr as fallback if decision was stored in manager
     if not decision_data:
-        run_context = state.get("run_context", {})
-        thread_id = run_context.get("session_id")
-        req = hitl.get_by_tool_call_id(tool_call_id, thread_id)
-        if req and req.status != ApprovalStatus.PENDING:
-            decision_data = {
-                "decision": req.decision or req.status.value.lower(),
-                "reason": req.resolution_reason,
-                "modified_arguments": req.modified_arguments,
-                "arguments_hash": req.arguments_hash,
-                "approval_id": req.id,
-                "tool_call_id": req.tool_call_id,
-            }
+        req = hitl.get_by_tool_call_id(tool_call_id, thread_id=thread_id)
+        if req:
+            if req.status in (ApprovalStatus.CONSUMED, ApprovalStatus.FAILED):
+                return AuthorizationResult(
+                    is_authorized=False,
+                    effective_args=raw_args,
+                    status="unauthorized_already_consumed",
+                    rejection_reason=f"Execution blocked: Approval request '{req.id}' is already {req.status.value}.",
+                    approval_id=req.id,
+                )
+            if req.status != ApprovalStatus.PENDING:
+                decision_data = {
+                    "decision": req.decision or req.status.value.lower(),
+                    "reason": req.resolution_reason,
+                    "modified_arguments": req.modified_arguments,
+                    "arguments_hash": req.arguments_hash,
+                    "approval_id": req.id,
+                    "tool_call_id": req.tool_call_id,
+                }
 
     if not decision_data or not decision_data.get("decision"):
         logger.warning(
@@ -129,21 +150,29 @@ def verify_tool_execution_authorization(
             rejection_reason=f"Execution blocked: High-risk tool '{tool_name}' (call_id: {tool_call_id}) has not received valid approval.",
         )
 
-    # 3. Verify arguments hash (Tamper Detection)
+    # 4. Verify arguments hash (Tamper Detection)
     expected_hash = decision_data.get("arguments_hash")
+    appr_id = decision_data.get("approval_id")
+    if not expected_hash and appr_id:
+        req = hitl.get_request(appr_id, thread_id=thread_id)
+        if req:
+            expected_hash = req.arguments_hash
     if not expected_hash:
-        appr_id = decision_data.get("approval_id")
-        if appr_id:
-            req = hitl.get_request(appr_id)
-            if req:
-                expected_hash = req.arguments_hash
-        if not expected_hash:
-            req = hitl.get_by_tool_call_id(tool_call_id)
-            if req:
-                expected_hash = req.arguments_hash
+        req = hitl.get_by_tool_call_id(tool_call_id, thread_id=thread_id)
+        if req:
+            expected_hash = req.arguments_hash
+
+    if not expected_hash:
+        return AuthorizationResult(
+            is_authorized=False,
+            effective_args=raw_args,
+            status="unauthorized_unapproved",
+            rejection_reason=f"Execution blocked: No valid arguments hash found for tool '{tool_name}' (call_id: {tool_call_id}).",
+            approval_id=appr_id,
+        )
 
     actual_hash = compute_arguments_hash(raw_args)
-    if expected_hash and actual_hash != expected_hash:
+    if actual_hash != expected_hash:
         logger.warning(
             f"Authorization mismatch for tool '{tool_name}': actual hash '{actual_hash}' != expected '{expected_hash}'"
         )
@@ -155,13 +184,13 @@ def verify_tool_execution_authorization(
                 f"Authorization mismatch: Original tool arguments do not match approved request. "
                 f"(expected: {expected_hash}, current: {actual_hash})"
             ),
-            approval_id=decision_data.get("approval_id"),
+            approval_id=appr_id,
         )
 
     decision_type = str(decision_data.get("decision", "")).lower()
     decision_reason = decision_data.get("reason", "No reason provided")
 
-    # 4. Handle rejection
+    # 5. Handle rejection
     if decision_type == "reject":
         logger.info(
             f"Tool '{tool_name}' (call_id: {tool_call_id}) rejected: {decision_reason}"
@@ -171,10 +200,11 @@ def verify_tool_execution_authorization(
             effective_args=raw_args,
             status="unauthorized_rejected",
             rejection_reason=f"User rejected execution of '{tool_name}'. Reason: {decision_reason}",
-            approval_id=decision_data.get("approval_id"),
+            approval_id=appr_id,
         )
 
-    # 5. Handle argument modification
+    # 6. Handle argument modification
+    effective_args = raw_args
     if decision_type == "modify":
         modified_args = decision_data.get("modified_arguments")
         if not isinstance(modified_args, dict):
@@ -183,7 +213,7 @@ def verify_tool_execution_authorization(
                 effective_args=raw_args,
                 status="unauthorized_invalid_args",
                 rejection_reason="Modified arguments must be provided as a dictionary.",
-                approval_id=decision_data.get("approval_id"),
+                approval_id=appr_id,
             )
 
         # Validate modified arguments against tool schema
@@ -200,35 +230,51 @@ def verify_tool_execution_authorization(
                     effective_args=raw_args,
                     status="unauthorized_invalid_args",
                     rejection_reason=f"Modified arguments failed schema validation: {val_err}",
-                    approval_id=decision_data.get("approval_id"),
+                    approval_id=appr_id,
                 )
 
-        logger.info(
-            f"Tool '{tool_name}' (call_id: {tool_call_id}) authorized with modified arguments."
-        )
-        return AuthorizationResult(
-            is_authorized=True,
-            effective_args=modified_args,
-            status="authorized_modified",
-            approval_id=decision_data.get("approval_id"),
-        )
+        effective_args = modified_args
 
-    # 6. Handle approval
-    if decision_type == "approve":
-        logger.info(
-            f"Tool '{tool_name}' (call_id: {tool_call_id}) authorized by user approval."
-        )
+    if decision_type not in ("approve", "modify"):
         return AuthorizationResult(
-            is_authorized=True,
+            is_authorized=False,
             effective_args=raw_args,
-            status="authorized_approved",
-            approval_id=decision_data.get("approval_id"),
+            status="unauthorized_unapproved",
+            rejection_reason=f"Invalid or unrecognized approval decision '{decision_type}'.",
+            approval_id=appr_id,
         )
 
+    # 7. Atomic Execution Lease Acquisition (One-Time Execution Protection)
+    if not appr_id:
+        req = hitl.get_by_tool_call_id(tool_call_id, thread_id=thread_id)
+        if req:
+            appr_id = req.id
+
+    if acquire_lease and appr_id:
+        success, _leased_req, err = hitl.acquire_execution_lease(
+            approval_id=appr_id,
+            thread_id=thread_id,
+            tool_call_id=tool_call_id,
+            arguments_hash=expected_hash,
+        )
+        if not success:
+            logger.warning(
+                f"Execution lease acquisition failed for tool '{tool_name}' (ID: {appr_id}): {err}"
+            )
+            return AuthorizationResult(
+                is_authorized=False,
+                effective_args=effective_args,
+                status="unauthorized_lease_failed",
+                rejection_reason=f"Execution lease acquisition failed: {err}",
+                approval_id=appr_id,
+            )
+
+    logger.info(
+        f"Tool '{tool_name}' (call_id: {tool_call_id}, approval_id: {appr_id}) authorized for execution."
+    )
     return AuthorizationResult(
-        is_authorized=False,
-        effective_args=raw_args,
-        status="unauthorized_unapproved",
-        rejection_reason=f"Invalid or unrecognized approval decision '{decision_type}'.",
-        approval_id=decision_data.get("approval_id"),
+        is_authorized=True,
+        effective_args=effective_args,
+        status="authorized_executing" if acquire_lease else "authorized_approved",
+        approval_id=appr_id,
     )

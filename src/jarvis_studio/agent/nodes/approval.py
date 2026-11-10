@@ -20,6 +20,7 @@ def _resolve_single_item(
     item: dict[str, Any],
     all_requests: list[ApprovalRequest],
     hitl_mgr: Any,
+    thread_id: str,
 ) -> None:
     """Resolve a single approval request from decision data."""
     appr_id = item.get("approval_id")
@@ -27,10 +28,10 @@ def _resolve_single_item(
 
     target_req: ApprovalRequest | None = None
     if appr_id:
-        target_req = hitl_mgr.get_request(appr_id)
+        target_req = hitl_mgr.get_request(appr_id, thread_id=thread_id)
     elif tool_call_id:
         for r in all_requests:
-            if r.tool_call_id == tool_call_id:
+            if r.tool_call_id == tool_call_id and r.thread_id == thread_id:
                 target_req = r
                 break
 
@@ -48,8 +49,8 @@ def _resolve_single_item(
         modified_arguments=item.get("modified_arguments"),
     )
     try:
-        hitl_mgr.resolve_request(target_req.id, dec_obj)
-    except ValueError as exc:
+        hitl_mgr.resolve_request(target_req.id, dec_obj, thread_id=thread_id)
+    except (ValueError, PermissionError) as exc:
         logger.warning(f"Error resolving request {target_req.id}: {exc}")
 
 
@@ -58,6 +59,7 @@ def _apply_user_response(
     pending: list[ApprovalRequest],
     all_requests: list[ApprovalRequest],
     hitl_mgr: Any,
+    thread_id: str,
 ) -> None:
     """Apply the response from interrupt to pending approval requests."""
     if not isinstance(user_response, dict):
@@ -68,7 +70,7 @@ def _apply_user_response(
     if isinstance(batch, list):
         for item in batch:
             if isinstance(item, dict):
-                _resolve_single_item(item, all_requests, hitl_mgr)
+                _resolve_single_item(item, all_requests, hitl_mgr, thread_id)
         return
 
     # 2. Batch decisions: dict format {call_id: decision}
@@ -81,12 +83,12 @@ def _apply_user_response(
                         item["approval_id"] = key
                     else:
                         item["tool_call_id"] = key
-                _resolve_single_item(item, all_requests, hitl_mgr)
+                _resolve_single_item(item, all_requests, hitl_mgr, thread_id)
         return
 
     # 3. Targeted single decision
     if user_response.get("tool_call_id") or user_response.get("approval_id"):
-        _resolve_single_item(user_response, all_requests, hitl_mgr)
+        _resolve_single_item(user_response, all_requests, hitl_mgr, thread_id)
         return
 
     # 4. Generic single decision: resolve the current primary pending request
@@ -100,8 +102,8 @@ def _apply_user_response(
             modified_arguments=user_response.get("modified_arguments"),
         )
         try:
-            hitl_mgr.resolve_request(primary.id, dec_obj)
-        except ValueError as exc:
+            hitl_mgr.resolve_request(primary.id, dec_obj, thread_id=thread_id)
+        except (ValueError, PermissionError) as exc:
             logger.warning(f"Error resolving approval request {primary.id}: {exc}")
 
 
@@ -198,7 +200,9 @@ def create_approval_node(registry: ToolRegistry = None):
             user_response = interrupt(approval_payload)
 
             # Parse and apply user response
-            _apply_user_response(user_response, pending, all_requests, hitl_mgr)
+            _apply_user_response(
+                user_response, pending, all_requests, hitl_mgr, thread_id
+            )
 
         # Construct decision mapping for executor
         decisions_by_call_id: dict[str, dict[str, Any]] = {}
