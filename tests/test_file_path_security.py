@@ -1,6 +1,7 @@
 """Comprehensive security tests for workspace filesystem path resolution and isolation."""
 
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,18 +73,41 @@ def test_02_relative_path_traversal_escape(test_workspace):
 
 
 def test_03_root_and_system_directory_escape(test_workspace):
-    """Test 3: Absolute paths pointing to system roots (/etc or C:\\Windows) are blocked."""
-    # Windows system path
-    with pytest.raises(PermissionError, match="escapes workspace root"):
-        resolve_safe_path(
-            r"C:\Windows\System32\cmd.exe", workspace_root=test_workspace
-        )
+    """Test 3: Absolute paths pointing to OS system roots are blocked."""
+    if sys.platform == "win32":
+        # Windows system path
+        with pytest.raises(PermissionError, match="escapes workspace root"):
+            resolve_safe_path(
+                r"C:\Windows\System32\cmd.exe", workspace_root=test_workspace
+            )
+    else:
+        # POSIX native system root paths
+        for posix_system_path in (
+            "/",
+            "/etc/shadow",
+            "/usr/bin/env",
+            "/var/log/syslog",
+        ):
+            with pytest.raises(PermissionError, match="escapes workspace root"):
+                resolve_safe_path(posix_system_path, workspace_root=test_workspace)
 
-    # Unix root path
+    # Unix root path (also resolves outside workspace drive root on Windows)
     with pytest.raises(PermissionError, match="escapes workspace root"):
         resolve_safe_path("/etc/passwd", workspace_root=test_workspace)
 
+    with patch(
+        "jarvis_studio.tools.builtin.file_tools.get_settings"
+    ) as mock_settings:
+        mock_settings.return_value.storage.workspace_root = str(test_workspace)
+        res = read_file.invoke({"file_path": "/etc/passwd"})
+        assert "Error reading file" in res
+        assert "escapes workspace root" in res
 
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows drive-letter semantics (C:, D:, E:) apply only on win32",
+)
 def test_04_windows_drive_jumping_escape():
     """Test 4: Windows drive jumping (e.g. workspace on D:, path on C:) is blocked."""
     mock_d_workspace = Path(r"D:\myProject\JarvisStudio\workspace")
@@ -99,6 +123,37 @@ def test_04_windows_drive_jumping_escape():
         resolve_safe_path(
             r"E:\Confidential\file.txt", workspace_root=mock_d_workspace
         )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX cross-directory and root-tree escape semantics apply only on non-Windows",
+)
+def test_04b_posix_cross_directory_and_root_escape(test_workspace, tmp_path):
+    """Test 4b (POSIX): Absolute paths outside workspace or in sibling trees are blocked."""
+    sibling_workspace = tmp_path / "other_workspace"
+    sibling_workspace.mkdir(parents=True, exist_ok=True)
+    sibling_target = sibling_workspace / "secret.txt"
+
+    for outside_path in (
+        str(sibling_target),
+        str(tmp_path),
+        "/tmp/jarvis_outside_probe.txt",
+        "/root/.ssh/id_rsa",
+    ):
+        with pytest.raises(PermissionError, match="escapes workspace root"):
+            resolve_safe_path(outside_path, workspace_root=test_workspace)
+
+    with patch(
+        "jarvis_studio.tools.builtin.file_tools.get_settings"
+    ) as mock_settings:
+        mock_settings.return_value.storage.workspace_root = str(test_workspace)
+        res = write_file.invoke(
+            {"file_path": str(sibling_target), "content": "escaped"}
+        )
+        assert "Error writing file" in res
+        assert "escapes workspace root" in res
+        assert not sibling_target.exists()
 
 
 def test_05_unc_path_escape(test_workspace):
