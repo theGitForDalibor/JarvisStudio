@@ -6,6 +6,8 @@ import asyncio
 import ctypes
 import gc
 import itertools
+import os
+import signal
 import sys
 import time
 import warnings
@@ -372,28 +374,43 @@ async def test_runner_survives_repeated_task_cancel_during_cleanup(
     assert not _is_win_pid_alive(child_pid)
 
 
-async def test_runner_handles_delayed_eof_from_grandchild_inheriting_pipe() -> None:
+async def test_runner_handles_delayed_eof_from_grandchild_inheriting_pipe(
+    tmp_path: Path,
+) -> None:
     """Process exit must complete within drain_grace even if descendant holds stdout pipe open."""
     # Part 1: Real OS process exits immediately after spawning a sleeping child inheriting stdout.
+    gc_pid_file = tmp_path / "delayed_eof_gc.pid"
     child_code = (
         "import subprocess, sys\n"
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(15)'], close_fds=False)\n"
+        "from pathlib import Path\n"
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(15)'], close_fds=False)\n"
+        f"Path({str(gc_pid_file)!r}).write_text(str(gc.pid), encoding='utf-8')\n"
         "sys.stdout.write('parent-finished\\n'); sys.stdout.flush()\n"
     )
     start = time.monotonic()
-    res = await run_process(
-        ProcessExecutionSpec(
-            argv=[sys.executable, "-c", child_code],
-            timeout_seconds=10.0,
-            drain_grace_seconds=0.25,
+    try:
+        res = await run_process(
+            ProcessExecutionSpec(
+                argv=[sys.executable, "-c", child_code],
+                timeout_seconds=10.0,
+                drain_grace_seconds=0.25,
+            )
         )
-    )
-    elapsed = time.monotonic() - start
-    assert res.status == ProcessStatus.SUCCESS
-    assert res.exit_code == 0
-    assert "parent-finished" in res.stdout
-    assert elapsed < 3.0
-    assert _runner_task_names() == []
+        elapsed = time.monotonic() - start
+        assert res.status == ProcessStatus.SUCCESS
+        assert res.exit_code == 0
+        assert "parent-finished" in res.stdout
+        assert elapsed < 3.0
+        assert _runner_task_names() == []
+    finally:
+        # Clean up any leftover test child on POSIX (Windows closes Job on proc.close()).
+        if sys.platform != "win32" and gc_pid_file.exists():
+            txt = gc_pid_file.read_text(encoding="utf-8").strip()
+            if txt.isdigit():
+                try:
+                    os.kill(int(txt), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     # Part 2: Simulated permanently open pipe even after terminate_tree (POSIX setsid grandchild case).
     stdout_reader = asyncio.StreamReader()
@@ -756,3 +773,317 @@ async def test_runner_cleanup_runs_on_unexpected_error_and_tight_cancel_timeout(
     proc_err.terminate_tree.assert_awaited_once()
     proc_err.close.assert_awaited_once()
     assert _runner_task_names() == []
+
+
+def _is_posix_pid_live_or_zombie(pid: int) -> tuple[bool, bool]:
+    """Return (exists_in_os, is_zombie) for a POSIX PID."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return (False, False)
+    except PermissionError:
+        return (True, False)
+
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.exists():
+        try:
+            text = stat_path.read_text(encoding="utf-8", errors="ignore")
+            rparen = text.rfind(")")
+            if rparen != -1:
+                return (True, text[rparen + 2 : rparen + 3] == "Z")
+        except OSError:
+            pass
+    return (True, False)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX real process-tree timeout test"
+)
+async def test_posix_runner_timeout_kills_process_tree(tmp_path: Path) -> None:
+    """Runner timeout kills real POSIX parent + grandchild process group without zombies."""
+    pid_file = tmp_path / "posix_timeout_pids.txt"
+    child_code = (
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "sys.stdout.write('before-posix-timeout\\n'); sys.stdout.flush()\n"
+        f"Path({str(pid_file)!r}).write_text(f'{{os.getpid()}}\\n{{gc.pid}}\\n', encoding='utf-8')\n"
+        "time.sleep(60)\n"
+    )
+    result = await run_process(
+        ProcessExecutionSpec(
+            argv=[sys.executable, "-c", child_code],
+            timeout_seconds=0.8,
+            graceful_termination_timeout=0.3,
+        )
+    )
+    assert result.status == ProcessStatus.TIMEOUT
+    assert result.timed_out is True
+    assert "before-posix-timeout" in result.stdout
+    assert _runner_task_names() == []
+
+    pids = [
+        int(x.strip())
+        for x in pid_file.read_text(encoding="utf-8").splitlines()
+        if x.strip()
+    ]
+    assert len(pids) == 2
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if all(not _is_posix_pid_live_or_zombie(pid)[0] for pid in pids):
+            break
+        await asyncio.sleep(0.05)
+    for pid in pids:
+        assert _is_posix_pid_live_or_zombie(pid) == (False, False)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX real external cancellation test"
+)
+async def test_posix_runner_external_cancellation_kills_tree_and_reraises(
+    tmp_path: Path,
+) -> None:
+    """External Task.cancel() kills POSIX parent + grandchild process group and re-raises."""
+    ready_file = tmp_path / "posix_cancel_pids.txt"
+    child_code = (
+        "import os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"Path({str(ready_file)!r}).write_text(f'{{os.getpid()}}\\n{{gc.pid}}\\n', encoding='utf-8')\n"
+        "time.sleep(60)\n"
+    )
+    task = asyncio.create_task(
+        run_process(
+            ProcessExecutionSpec(
+                argv=[sys.executable, "-c", child_code],
+                timeout_seconds=30.0,
+            )
+        )
+    )
+    pids: list[int] = []
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if ready_file.exists():
+            lines = [
+                x.strip()
+                for x in ready_file.read_text(encoding="utf-8").splitlines()
+                if x.strip()
+            ]
+            if len(lines) == 2:
+                pids = [int(lines[0]), int(lines[1])]
+                break
+        await asyncio.sleep(0.05)
+
+    assert len(pids) == 2
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _runner_task_names() == []
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if all(not _is_posix_pid_live_or_zombie(pid)[0] for pid in pids):
+            break
+        await asyncio.sleep(0.05)
+    for pid in pids:
+        assert _is_posix_pid_live_or_zombie(pid) == (False, False)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX repeated Task.cancel() resilience test"
+)
+async def test_posix_runner_survives_repeated_task_cancel_during_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated Task.cancel() on POSIX completes process-group kill without leaking tasks."""
+    ready_file = tmp_path / "posix_multi_cancel.txt"
+    child_code = (
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        f"Path({str(ready_file)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "time.sleep(60)\n"
+    )
+    orig_term = process_platform.PosixSpawnedProcess.terminate_tree
+    cleanup_completed = False
+
+    async def slow_terminate_tree(
+        self: process_platform.PosixSpawnedProcess,
+        graceful_timeout: float = 2.0,
+    ) -> None:
+        nonlocal cleanup_completed
+        await asyncio.sleep(0.15)
+        await orig_term(self, graceful_timeout=graceful_timeout)
+        cleanup_completed = True
+
+    monkeypatch.setattr(
+        process_platform.PosixSpawnedProcess, "terminate_tree", slow_terminate_tree
+    )
+
+    task = asyncio.create_task(
+        run_process(
+            ProcessExecutionSpec(
+                argv=[sys.executable, "-c", child_code],
+                timeout_seconds=30.0,
+                cleanup_max_seconds=5.0,
+            )
+        )
+    )
+    child_pid: int | None = None
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if ready_file.exists():
+            txt = ready_file.read_text(encoding="utf-8").strip()
+            if txt.isdigit():
+                child_pid = int(txt)
+                break
+        await asyncio.sleep(0.05)
+    assert child_pid is not None
+
+    task.cancel()
+    await asyncio.sleep(0.02)
+    task.cancel()
+    await asyncio.sleep(0.02)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cleanup_completed is True
+    assert _runner_task_names() == []
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and _is_posix_pid_live_or_zombie(child_pid)[0]:
+        await asyncio.sleep(0.05)
+    assert _is_posix_pid_live_or_zombie(child_pid) == (False, False)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX detached setsid pipe EOF & FD test"
+)
+async def test_posix_runner_detached_setsid_grandchild_delayed_eof_and_fd_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Detached setsid() grandchild holding stdout/stderr open does not hang runner or leak FDs."""
+    detached_pid_file = tmp_path / "detached_gc.pid"
+    before_fds = (
+        len(os.listdir("/proc/self/fd")) if Path("/proc/self/fd").exists() else None
+    )
+    child_code = (
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "gc = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+        "    start_new_session=True,\n"
+        "    close_fds=False,\n"
+        ")\n"
+        f"Path({str(detached_pid_file)!r}).write_text(str(gc.pid), encoding='utf-8')\n"
+        "sys.stdout.write('detached-out\\n'); sys.stdout.flush()\n"
+        "sys.stderr.write('detached-err\\n'); sys.stderr.flush()\n"
+    )
+    detached_pid: int | None = None
+    start = time.monotonic()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            res = await run_process(
+                ProcessExecutionSpec(
+                    argv=[sys.executable, "-c", child_code],
+                    timeout_seconds=10.0,
+                    drain_grace_seconds=0.2,
+                )
+            )
+            elapsed = time.monotonic() - start
+            await asyncio.sleep(0.05)
+            gc.collect()
+            await asyncio.sleep(0)
+            gc.collect()
+
+        assert res.status == ProcessStatus.SUCCESS
+        assert "detached-out" in res.stdout
+        assert "detached-err" in res.stderr
+        assert elapsed < 2.0
+        assert _runner_task_names() == []
+        rws = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        assert rws == [], [str(w.message) for w in rws]
+        if before_fds is not None:
+            assert len(os.listdir("/proc/self/fd")) <= before_fds
+    finally:
+        if detached_pid_file.exists():
+            txt = detached_pid_file.read_text(encoding="utf-8").strip()
+            if txt.isdigit():
+                detached_pid = int(txt)
+                try:
+                    os.kill(detached_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX concurrent mixed-outcome resource test"
+)
+async def test_posix_runner_concurrent_mixed_outcomes_no_fd_or_zombie_leaks(
+    tmp_path: Path,
+) -> None:
+    """Concurrent mixed SUCCESS/FAILED/TIMEOUT/OVERFLOW/CANCEL leaves 0 leaked FDs/tasks/zombies."""
+    before_fds = (
+        len(os.listdir("/proc/self/fd")) if Path("/proc/self/fd").exists() else None
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+
+        cancel_task = asyncio.create_task(
+            run_process(
+                ProcessExecutionSpec(
+                    argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+                    timeout_seconds=10.0,
+                )
+            )
+        )
+        await asyncio.sleep(0.1)
+        cancel_task.cancel()
+
+        results = await asyncio.gather(
+            run_process(
+                ProcessExecutionSpec(argv=[sys.executable, "-c", "print('ok')"])
+            ),
+            run_process(
+                ProcessExecutionSpec(
+                    argv=[sys.executable, "-c", "import sys; sys.exit(3)"]
+                )
+            ),
+            run_process(
+                ProcessExecutionSpec(
+                    argv=[sys.executable, "-c", "import time; time.sleep(10)"],
+                    timeout_seconds=0.4,
+                )
+            ),
+            run_process(
+                ProcessExecutionSpec(
+                    argv=[
+                        sys.executable,
+                        "-c",
+                        "import sys; sys.stdout.write('Z' * 2000)",
+                    ],
+                    max_output_bytes=50,
+                )
+            ),
+            cancel_task,
+            return_exceptions=True,
+        )
+
+        await asyncio.sleep(0.05)
+        gc.collect()
+        await asyncio.sleep(0)
+        gc.collect()
+
+    assert results[0].status == ProcessStatus.SUCCESS
+    assert results[1].status == ProcessStatus.FAILED and results[1].exit_code == 3
+    assert results[2].status == ProcessStatus.TIMEOUT
+    assert results[3].status == ProcessStatus.OUTPUT_LIMIT_EXCEEDED
+    assert isinstance(results[4], asyncio.CancelledError)
+    assert _runner_task_names() == []
+    rws = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert rws == [], [str(w.message) for w in rws]
+    if before_fds is not None:
+        assert len(os.listdir("/proc/self/fd")) <= before_fds

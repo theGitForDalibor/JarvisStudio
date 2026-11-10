@@ -99,6 +99,29 @@ class PosixSpawnedProcess(SpawnedProcess):
         self._proc = proc
         self._pgid = proc.pid
         self._closed = False
+        self._exited_event = asyncio.Event()
+        self._has_exit_hook = False
+
+        # CPython BaseSubprocessTransport.wait() does not resolve until all pipe FDs hit EOF.
+        # Hooking protocol.process_exited lets wait_exit() resolve as soon as the root PID exits
+        # even if a detached descendant still holds stdout/stderr open.
+        transport = getattr(proc, "_transport", None)
+        protocol = getattr(transport, "_protocol", None)
+        orig_exited = getattr(protocol, "process_exited", None)
+        if callable(orig_exited):
+            self._has_exit_hook = True
+            exited_event = self._exited_event
+
+            def _on_process_exited() -> None:
+                try:
+                    orig_exited()
+                finally:
+                    exited_event.set()
+
+            protocol.process_exited = _on_process_exited
+
+        if proc.returncode is not None or getattr(protocol, "_process_exited", False):
+            self._exited_event.set()
 
     @property
     def pid(self) -> int:
@@ -123,6 +146,12 @@ class PosixSpawnedProcess(SpawnedProcess):
         return self._proc.returncode
 
     async def wait_exit(self) -> int:
+        if self._proc.returncode is not None:
+            return self._proc.returncode
+        if self._has_exit_hook:
+            await self._exited_event.wait()
+            if self._proc.returncode is not None:
+                return self._proc.returncode
         return await self._proc.wait()
 
     async def terminate_tree(self, graceful_timeout: float = 2.0) -> None:
@@ -593,32 +622,49 @@ if sys.platform == "win32":
                 return
             self._closed = True
 
-            # Cancel/settle proactor wait_for_handle BEFORE closing hProcess
-            if self._wait_fut is not None and not self._wait_fut.done():
-                self._wait_fut.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await self._wait_fut
-            self._wait_fut = None
+            try:
+                # Cancel/settle proactor wait_for_handle BEFORE closing hProcess
+                wait_fut = self._wait_fut
+                self._wait_fut = None
+                if wait_fut is not None and not wait_fut.done():
+                    wait_fut.cancel()
+                    try:
+                        await wait_fut
+                    except asyncio.CancelledError:
+                        current = asyncio.current_task()
+                        if current is not None and current.cancelling() > 0:
+                            raise
+                    except Exception as exc:  # noqa: BLE001 — close must proceed past already-settled wait failures
+                        logger.debug(
+                            f"Ignoring settled wait error during close for pid={self._pid}: {exc}"
+                        )
 
-            for attr in ("_stdout_transport", "_stderr_transport"):
-                tr = getattr(self, attr)
-                if tr is not None:
-                    with suppress(OSError):
-                        tr.close()
-                    setattr(self, attr, None)
+                for attr in ("_stdout_transport", "_stderr_transport"):
+                    tr = getattr(self, attr)
+                    if tr is not None:
+                        with suppress(OSError):
+                            tr.close()
+                        setattr(self, attr, None)
 
-            # Yield once so ProactorBasePipeTransport._call_connection_lost closes PipeHandle cleanly
-            await asyncio.sleep(0)
+                # Yield once so ProactorBasePipeTransport._call_connection_lost closes PipeHandle cleanly
+                await asyncio.sleep(0)
+            finally:
+                for attr in ("_stdout_transport", "_stderr_transport"):
+                    tr = getattr(self, attr)
+                    if tr is not None:
+                        with suppress(OSError):
+                            tr.close()
+                        setattr(self, attr, None)
 
-            if self._job_handle:
-                _safe_close_handle(self._job_handle)
-                self._job_handle = None
+                if self._job_handle:
+                    _safe_close_handle(self._job_handle)
+                    self._job_handle = None
 
-            if self._h_process:
-                if self._returncode is None:
-                    self._returncode = _query_process_exit_code(self._h_process)
-                _safe_close_handle(self._h_process)
-                self._h_process = None
+                if self._h_process:
+                    if self._returncode is None:
+                        self._returncode = _query_process_exit_code(self._h_process)
+                    _safe_close_handle(self._h_process)
+                    self._h_process = None
 
     async def _spawn_windows_process(
         spec: ProcessExecutionSpec,

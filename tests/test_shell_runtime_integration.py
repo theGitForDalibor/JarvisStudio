@@ -418,3 +418,182 @@ async def test_shell_executor_hitl_double_cancel_process_tree_and_temp_cleanup(
     assert _runner_task_names() == []
     rws = [w for w in caught if issubclass(w.category, ResourceWarning)]
     assert rws == [], [str(w.message) for w in rws]
+
+
+def _is_posix_pid_live_or_zombie(pid: int) -> tuple[bool, bool]:
+    """Return (exists_in_os, is_zombie) for a POSIX PID."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return (False, False)
+    except PermissionError:
+        return (True, False)
+
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.exists():
+        try:
+            text = stat_path.read_text(encoding="utf-8", errors="ignore")
+            rparen = text.rfind(")")
+            if rparen != -1:
+                return (True, text[rparen + 2 : rparen + 3] == "Z")
+        except OSError:
+            pass
+    return (True, False)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX /bin/bash -c Shell Tool integration test"
+)
+async def test_shell_posix_bash_quoting_multiline_utf8_pipes_and_exit_code(
+    tmp_path: Path,
+) -> None:
+    """Verify POSIX /bin/bash -c handles quotes, pipes, multiline UTF-8, and exit codes."""
+    ws = tmp_path / "ws_posix_bash"
+    temp_root = Path(tempfile.gettempdir())
+    before_cmds = set(temp_root.glob("jarvis_cmd_*.cmd"))
+
+    complex_cmd = (
+        "printf '%s\\n' \"你好世界\"\n"
+        f'"{sys.executable}" -c "print(\'quote-ok\')" | cat\n'
+        f'echo "pipe-ok" && "{sys.executable}" -c "import sys; sys.exit(5)"'
+    )
+    with _patch_workspace(ws):
+        out_async = await execute_shell_command.ainvoke({"command": complex_cmd})
+        out_sync = execute_shell_command.invoke({"command": complex_cmd})
+
+    for out in (out_async, out_sync):
+        assert "Exit Code: 5" in out
+        assert "你好世界" in out
+        assert "quote-ok" in out
+        assert "pipe-ok" in out
+
+    assert list(ws.glob("*.cmd")) == []
+    assert set(temp_root.glob("jarvis_cmd_*.cmd")) == before_cmds
+    assert _runner_task_names() == []
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX HITL + Executor E2E process-group cancel test",
+)
+async def test_shell_posix_executor_hitl_double_cancel_kills_pgid_and_marks_failed(
+    tmp_path: Path,
+) -> None:
+    """End-to-end on Linux: HITL EXECUTING -> double cancel kills bash pgid, frees FDs, marks FAILED."""
+    ws = tmp_path / "ws_posix_e2e"
+    ws.mkdir(parents=True, exist_ok=True)
+    ready_file = ws / "posix_e2e_pids.txt"
+    before_fds = (
+        len(os.listdir("/proc/self/fd")) if Path("/proc/self/fd").exists() else None
+    )
+
+    child_script = (
+        "import os, subprocess, sys, time; "
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        f"open({str(ready_file)!r}, 'w').write(f'{{os.getpid()}}\\n{{gc.pid}}\\n'); "
+        "time.sleep(60)"
+    )
+    args = {"command": f'"{sys.executable}" -c "{child_script}"'}
+
+    reg = ToolRegistry()
+    reg.register(execute_shell_command)
+
+    hitl = get_hitl_manager()
+    suffix = uuid.uuid4().hex[:8]
+    thread_id = f"thread_posix_e2e_{suffix}"
+    call_id = f"call_posix_e2e_{suffix}"
+    req = hitl.create_request(
+        thread_id=thread_id,
+        run_id=f"run_{suffix}",
+        tool_name="execute_shell_command",
+        arguments=args,
+        tool_call_id=call_id,
+    )
+    hitl.resolve_request(
+        req.id,
+        ApprovalDecision(decision="approve"),
+        thread_id=thread_id,
+    )
+
+    executor = create_tool_executor_node(reg)
+    state = {
+        "messages": [
+            AIMessage(
+                content="run posix shell",
+                tool_calls=[
+                    {"id": call_id, "name": "execute_shell_command", "args": args}
+                ],
+            )
+        ],
+        "run_context": {"session_id": thread_id},
+        "approval_decision": {
+            "decisions_by_call_id": {
+                call_id: {
+                    "approval_id": req.id,
+                    "tool_call_id": call_id,
+                    "decision": "approve",
+                    "arguments_hash": req.arguments_hash,
+                }
+            }
+        },
+    }
+
+    with (
+        warnings.catch_warnings(record=True) as caught,
+        _patch_workspace(ws),
+    ):
+        warnings.simplefilter("always", ResourceWarning)
+        exec_task = asyncio.create_task(executor(state))
+
+        pids: list[int] = []
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if ready_file.exists():
+                lines = [
+                    x.strip()
+                    for x in ready_file.read_text(encoding="utf-8").splitlines()
+                    if x.strip()
+                ]
+                if len(lines) == 2:
+                    pids = [int(lines[0]), int(lines[1])]
+                    break
+            await asyncio.sleep(0.05)
+
+        assert len(pids) == 2
+        assert hitl.get_request(req.id).status == ApprovalStatus.EXECUTING
+        for pid in pids:
+            assert _is_posix_pid_live_or_zombie(pid) == (True, False)
+
+        # Consecutive double cancellation against real executor + POSIX process group
+        exec_task.cancel()
+        await asyncio.sleep(0.02)
+        exec_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await exec_task
+
+        await asyncio.sleep(0.05)
+        gc.collect()
+        await asyncio.sleep(0)
+        gc.collect()
+
+    # 1. HITL lease atomically transitioned to FAILED (no replay possible)
+    updated_req = hitl.get_request(req.id)
+    assert updated_req.status == ApprovalStatus.FAILED
+    assert "CancelledError" in (updated_req.execution_error or "")
+
+    # 2. All process group PIDs dead and non-zombie in OS
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if all(not _is_posix_pid_live_or_zombie(pid)[0] for pid in pids):
+            break
+        await asyncio.sleep(0.05)
+    for pid in pids:
+        assert _is_posix_pid_live_or_zombie(pid) == (False, False)
+
+    # 3. Zero task, FD, or ResourceWarning leaks
+    assert _runner_task_names() == []
+    rws = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert rws == [], [str(w.message) for w in rws]
+    if before_fds is not None:
+        assert len(os.listdir("/proc/self/fd")) <= before_fds

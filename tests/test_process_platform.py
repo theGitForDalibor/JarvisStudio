@@ -448,6 +448,63 @@ async def test_close_idempotent_without_resource_warning() -> None:
     assert resource_warnings == [], [str(w.message) for w in resource_warnings]
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows close cancellation handle safety test"
+)
+async def test_windows_close_cancelled_at_sleep_still_closes_kernel_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CancelledError raised inside close()'s asyncio.sleep(0) still closes kernel handles and propagates."""
+    k32 = process_platform._K32
+    orig_close = k32.CloseHandle
+    closed_handles: list[int] = []
+
+    def spy_close(handle):
+        if handle:
+            closed_handles.append(int(handle))
+        return orig_close(handle)
+
+    monkeypatch.setattr(k32, "CloseHandle", spy_close)
+
+    proc = await spawn_isolated_process(
+        ProcessExecutionSpec(argv=[sys.executable, "-c", "import time; time.sleep(10)"])
+    )
+    job_h = proc._job_handle
+    proc_h = proc._h_process
+    assert job_h is not None
+    assert proc_h is not None
+
+    await proc.terminate_tree(graceful_timeout=0.5)
+
+    orig_sleep = asyncio.sleep
+    sleep_entered = False
+
+    async def cancel_on_yield(delay: float) -> None:
+        nonlocal sleep_entered
+        if delay == 0 and not sleep_entered:
+            sleep_entered = True
+            raise asyncio.CancelledError("injected cancellation at yield")
+        await orig_sleep(delay)
+
+    monkeypatch.setattr(process_platform.asyncio, "sleep", cancel_on_yield)
+
+    with pytest.raises(asyncio.CancelledError, match="injected cancellation at yield"):
+        await proc.close()
+
+    assert sleep_entered is True
+    assert proc._job_handle is None
+    assert proc._h_process is None
+    assert proc._stdout_transport is None
+    assert proc._stderr_transport is None
+    assert proc_h in closed_handles
+    # job_h may have been closed earlier by terminate_tree() OR in close() finally:
+    assert job_h in closed_handles
+
+    # Idempotent re-close must succeed cleanly even after earlier cancellation
+    monkeypatch.setattr(process_platform.asyncio, "sleep", orig_sleep)
+    await proc.close()
+
+
 async def test_posix_terminate_tree_sigterm_then_sigkill_unit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -499,3 +556,237 @@ async def test_posix_terminate_tree_sigterm_then_sigkill_unit(
     await posix_fast.terminate_tree(graceful_timeout=0.1)
 
     assert sent_signals == [(43211, signal.SIGTERM)]
+
+
+def _is_posix_pid_live_or_zombie(pid: int) -> tuple[bool, bool]:
+    """Return (exists_in_os, is_zombie) for a POSIX PID."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return (False, False)
+    except PermissionError:
+        return (True, False)
+
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.exists():
+        try:
+            text = stat_path.read_text(encoding="utf-8", errors="ignore")
+            rparen = text.rfind(")")
+            if rparen != -1:
+                state = text[rparen + 2 : rparen + 3]
+                return (True, state == "Z")
+        except OSError:
+            pass
+    return (True, False)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX real OS session & FD test")
+async def test_posix_spawn_session_fd_isolation_and_close_idempotency(
+    tmp_path: Path,
+) -> None:
+    """POSIX launch uses new session/pgid, blocks non-inheritable FDs, and avoids FD leaks."""
+    secret_file = tmp_path / "parent_secret.txt"
+    secret_file.write_text("do-not-inherit-posix", encoding="utf-8")
+    r_fd, w_fd = os.pipe()
+    os.set_inheritable(r_fd, False)
+    os.set_inheritable(w_fd, False)
+    before_fds = (
+        len(os.listdir("/proc/self/fd")) if Path("/proc/self/fd").exists() else None
+    )
+
+    script = (
+        "import json, os, sys; "
+        f"open_fds = sorted(int(x) for x in os.listdir('/proc/self/fd')) if os.path.exists('/proc/self/fd') else []; "
+        f"print(json.dumps({{'pid': os.getpid(), 'pgid': os.getpgid(0), 'sid': os.getsid(0), "
+        f"'has_r': ({r_fd} in open_fds), 'has_w': ({w_fd} in open_fds)}})); "
+        "sys.exit(0)"
+    )
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            proc = await spawn_isolated_process(
+                ProcessExecutionSpec(argv=[sys.executable, "-c", script], cwd=tmp_path)
+            )
+            try:
+                assert isinstance(proc, process_platform.PosixSpawnedProcess)
+                assert proc.pgid == proc.pid
+                out, rc = await asyncio.gather(proc.stdout.read(), proc.wait_exit())
+                assert rc == 0
+            finally:
+                await proc.close()
+                await proc.close()
+            del proc
+            await asyncio.sleep(0.02)
+            gc.collect()
+    finally:
+        os.close(r_fd)
+        os.close(w_fd)
+
+    import json
+
+    payload = json.loads(out.decode("utf-8"))
+    assert payload["pgid"] == payload["pid"]
+    assert payload["sid"] == payload["pid"]
+    assert payload["has_r"] is False
+    assert payload["has_w"] is False
+
+    rws = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert rws == [], [str(w.message) for w in rws]
+    if before_fds is not None:
+        assert len(os.listdir("/proc/self/fd")) <= before_fds
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX real process-group grandchild kill test"
+)
+async def test_posix_process_group_kills_parent_and_reparented_grandchild(
+    tmp_path: Path,
+) -> None:
+    """Terminating PosixSpawnedProcess kills root and reparented grandchildren sharing pgid."""
+    ready_file = tmp_path / "pg_pids.txt"
+    gc_code = "import time; time.sleep(60)"
+    mid_code = (
+        "import subprocess, sys\n"
+        f"from pathlib import Path\n"
+        f"gc = subprocess.Popen([sys.executable, '-c', {gc_code!r}])\n"
+        f"Path({str(ready_file)!r}).write_text(str(gc.pid), encoding='utf-8')\n"
+    )
+    root_code = (
+        "import os, subprocess, sys, time\n"
+        f"from pathlib import Path\n"
+        f"mid = subprocess.Popen([sys.executable, '-c', {mid_code!r}])\n"
+        "mid.wait()\n"
+        f"p = Path({str(ready_file)!r})\n"
+        "gc_pid = p.read_text(encoding='utf-8').strip()\n"
+        "p.write_text(f'{os.getpid()}\\n{gc_pid}\\n', encoding='utf-8')\n"
+        "time.sleep(60)\n"
+    )
+    proc = await spawn_isolated_process(
+        ProcessExecutionSpec(argv=[sys.executable, "-c", root_code])
+    )
+    pids: list[int] = []
+    try:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if ready_file.exists():
+                lines = [
+                    x.strip()
+                    for x in ready_file.read_text(encoding="utf-8").splitlines()
+                    if x.strip()
+                ]
+                if len(lines) == 2:
+                    pids = [int(lines[0]), int(lines[1])]
+                    break
+            await asyncio.sleep(0.05)
+
+        assert len(pids) == 2, "Failed reading root and grandchild PIDs"
+        root_pid, gc_pid = pids
+        assert root_pid == proc.pid
+        assert os.getpgid(gc_pid) == proc.pgid
+        assert _is_posix_pid_live_or_zombie(root_pid) == (True, False)
+        assert _is_posix_pid_live_or_zombie(gc_pid) == (True, False)
+
+        await proc.terminate_tree(graceful_timeout=0.5)
+        await proc.wait_exit()
+    finally:
+        await proc.close()
+
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if all(not _is_posix_pid_live_or_zombie(pid)[0] for pid in pids):
+            break
+        await asyncio.sleep(0.05)
+
+    for pid in pids:
+        exists, zombie = _is_posix_pid_live_or_zombie(pid)
+        assert exists is False and zombie is False
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX SIGTERM graceful termination test"
+)
+async def test_posix_terminate_tree_sigterm_graceful_real(tmp_path: Path) -> None:
+    """SIGTERM traps execute cleanly and return promptly without waiting for SIGKILL."""
+    marker = tmp_path / "sigterm_ok.txt"
+    ready = tmp_path / "sigterm_ready.txt"
+    script = (
+        "import signal, sys, time\n"
+        "from pathlib import Path\n"
+        f"marker = Path({str(marker)!r})\n"
+        "def on_term(_sig, _frame):\n"
+        "    marker.write_text('caught-sigterm', encoding='utf-8')\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, on_term)\n"
+        f"Path({str(ready)!r}).write_text('ready', encoding='utf-8')\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n"
+    )
+    proc = await spawn_isolated_process(
+        ProcessExecutionSpec(argv=[sys.executable, "-c", script])
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not ready.exists():
+            await asyncio.sleep(0.02)
+        assert ready.exists()
+
+        t0 = time.monotonic()
+        await proc.terminate_tree(graceful_timeout=2.0)
+        rc = await asyncio.wait_for(proc.wait_exit(), timeout=2.0)
+        elapsed = time.monotonic() - t0
+    finally:
+        await proc.close()
+
+    assert marker.read_text(encoding="utf-8") == "caught-sigterm"
+    assert rc == 0
+    assert elapsed < 1.2
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX SIGKILL escalation real OS test"
+)
+async def test_posix_terminate_tree_sigkill_escalation_real(tmp_path: Path) -> None:
+    """Process group ignoring SIGTERM is forcibly killed by SIGKILL escalation."""
+    ready = tmp_path / "sigignore_pids.txt"
+    script = (
+        "import os, signal, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+        f"Path({str(ready)!r}).write_text(f'{{os.getpid()}}\\n{{child.pid}}\\n', encoding='utf-8')\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n"
+    )
+    proc = await spawn_isolated_process(
+        ProcessExecutionSpec(argv=[sys.executable, "-c", script])
+    )
+    pids: list[int] = []
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if ready.exists():
+                lines = [
+                    x.strip()
+                    for x in ready.read_text(encoding="utf-8").splitlines()
+                    if x.strip()
+                ]
+                if len(lines) == 2:
+                    pids = [int(lines[0]), int(lines[1])]
+                    break
+            await asyncio.sleep(0.02)
+        assert len(pids) == 2
+
+        await proc.terminate_tree(graceful_timeout=0.15)
+        rc = await asyncio.wait_for(proc.wait_exit(), timeout=2.0)
+    finally:
+        await proc.close()
+
+    assert rc == -int(getattr(signal, "SIGKILL", 9))
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if all(not _is_posix_pid_live_or_zombie(pid)[0] for pid in pids):
+            break
+        await asyncio.sleep(0.05)
+    for pid in pids:
+        assert _is_posix_pid_live_or_zombie(pid) == (False, False)
