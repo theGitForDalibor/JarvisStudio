@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from jarvis_studio.agent.hitl.authorization import verify_tool_execution_authorization
 from jarvis_studio.agent.state import AgentState
 from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.core.observability.tracer import timed_step
@@ -15,7 +16,7 @@ def create_tool_executor_node(registry: ToolRegistry = None):
     tool_registry = registry or get_default_registry()
 
     async def tool_executor_node(state: AgentState) -> dict[str, Any]:
-        """Execute pending tool calls in the latest AIMessage."""
+        """Execute pending tool calls in the latest AIMessage with strict authorization checks."""
         messages = state.get("messages", [])
         if not messages:
             return {}
@@ -24,11 +25,6 @@ def create_tool_executor_node(registry: ToolRegistry = None):
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return {}
 
-        approval_decision = state.get("approval_decision") or {}
-        decision_type = approval_decision.get("decision", "").lower()
-        decision_reason = approval_decision.get("reason", "No reason provided")
-        modified_args = approval_decision.get("modified_arguments")
-
         tool_messages: list[ToolMessage] = []
 
         for call in last_message.tool_calls:
@@ -36,29 +32,28 @@ def create_tool_executor_node(registry: ToolRegistry = None):
             tool_args = call.get("args", {})
             call_id = call.get("id", "")
 
-            # Check if this specific tool was rejected
-            if tool_registry.requires_approval(tool_name) and decision_type == "reject":
-                logger.info(f"Skipping tool '{tool_name}' due to user rejection.")
+            # Mandatory Authorization Check before any execution
+            auth = verify_tool_execution_authorization(
+                tool_name=tool_name,
+                tool_call_id=call_id,
+                raw_args=tool_args,
+                state=state,
+                registry=tool_registry,
+            )
+
+            if not auth.is_authorized:
+                logger.warning(
+                    f"Tool execution blocked: '{tool_name}' (call_id: {call_id}). "
+                    f"Reason: {auth.rejection_reason}"
+                )
                 tool_messages.append(
                     ToolMessage(
-                        content=f"Operation cancelled: User rejected execution of '{tool_name}'. Reason: {decision_reason}",
+                        content=f"Operation cancelled: {auth.rejection_reason}",
                         tool_call_id=call_id,
                         name=tool_name,
                     )
                 )
                 continue
-
-            # Check if arguments were modified
-            effective_args = tool_args
-            if (
-                tool_registry.requires_approval(tool_name)
-                and decision_type == "modify"
-                and modified_args
-            ):
-                logger.info(
-                    f"Applying modified arguments for tool '{tool_name}': {modified_args}"
-                )
-                effective_args = modified_args
 
             # Lookup tool
             tool = tool_registry.get(tool_name)
@@ -72,6 +67,7 @@ def create_tool_executor_node(registry: ToolRegistry = None):
                 )
                 continue
 
+            effective_args = auth.effective_args
             with timed_step(f"tool_exec_{tool_name}", tool_name=tool_name):
                 try:
                     if hasattr(tool, "ainvoke"):
@@ -79,7 +75,7 @@ def create_tool_executor_node(registry: ToolRegistry = None):
                     else:
                         result = tool.invoke(effective_args)
                     result_str = str(result)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.error(f"Error executing tool '{tool_name}': {exc}")
                     result_str = f"Error executing '{tool_name}': {exc}"
 
