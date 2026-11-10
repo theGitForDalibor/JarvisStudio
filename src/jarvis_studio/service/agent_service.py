@@ -8,7 +8,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 from jarvis_studio.agent.graph import build_agent_graph
-from jarvis_studio.agent.hitl.manager import ApprovalDecision, get_hitl_manager
+from jarvis_studio.agent.hitl.manager import (
+    ApprovalDecision,
+    ApprovalStatus,
+    get_hitl_manager,
+)
 from jarvis_studio.core.guard.route_guard import GuardAction, get_route_guard
 from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.core.observability.trace_logger import ConversationTrace, get_trace_store
@@ -424,6 +428,66 @@ class AgentService:
             trace_store.save_trace(trace)
             yield {"event": "error", "data": {"error": str(e), "trace_id": trace.trace_id}}
 
+    async def verify_approval_context(self, thread_id: str, approval_id: str) -> bool:
+        """Verify server-side binding between thread_id, approval_id, and active interrupt."""
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id.strip()
+            or thread_id.strip().lower() == "default"
+        ):
+            return False
+
+        clean_tid = thread_id.strip()
+        if self.session_service.get_session(clean_tid) is None:
+            return False
+
+        if (
+            not isinstance(approval_id, str)
+            or not approval_id.strip()
+        ):
+            return False
+
+        clean_appr_id = approval_id.strip()
+        req = self.hitl_manager.get_request(clean_appr_id, thread_id=clean_tid)
+        if not req or req.status != ApprovalStatus.PENDING:
+            return False
+
+        try:
+            state_snapshot = await self.graph.aget_state(
+                {"configurable": {"thread_id": clean_tid}}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"Checkpoint lookup failed during approval verification for '{clean_tid}': {exc}"
+            )
+            return False
+
+        if not state_snapshot or not state_snapshot.next:
+            return False
+
+        run_ctx = (state_snapshot.values or {}).get("run_context") or {}
+        if not isinstance(run_ctx, dict) or run_ctx.get("session_id") != clean_tid:
+            return False
+
+        for task in state_snapshot.tasks or ():
+            for intr in getattr(task, "interrupts", ()) or ():
+                val = getattr(intr, "value", None)
+                if not isinstance(val, dict):
+                    continue
+                if val.get("thread_id") != clean_tid:
+                    continue
+                if val.get("approval_id") == clean_appr_id:
+                    return True
+                for sub in val.get("requests") or []:
+                    if (
+                        isinstance(sub, dict)
+                        and sub.get("approval_id") == clean_appr_id
+                        and sub.get("thread_id") == clean_tid
+                    ):
+                        return True
+
+        return False
+
     async def resume_approval(
         self,
         thread_id: str,
@@ -431,6 +495,17 @@ class AgentService:
         decision: ApprovalDecision,
     ) -> AgentExecutionResult:
         """Resume an interrupted agent run by submitting an approval decision."""
+        if not await self.verify_approval_context(thread_id, approval_id):
+            logger.warning(
+                f"Blocked resume_approval due to invalid thread/approval binding: thread='{thread_id}', approval='{approval_id}'"
+            )
+            return AgentExecutionResult(
+                thread_id=thread_id,
+                run_id="",
+                status="error",
+                error="Approval request not found",
+            )
+
         effective_run_id = set_trace_context(thread_id)
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -440,6 +515,7 @@ class AgentService:
 
         try:
             resume_payload = {
+                "approval_id": approval_id,
                 "decision": decision.decision,
                 "reason": decision.reason,
                 "modified_arguments": decision.modified_arguments,
@@ -496,9 +572,17 @@ class AgentService:
         decision: ApprovalDecision,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Resume an interrupted agent run with real-time SSE event streaming."""
+        if not await self.verify_approval_context(thread_id, approval_id):
+            logger.warning(
+                f"Blocked stream_resume_approval due to invalid thread/approval binding: thread='{thread_id}', approval='{approval_id}'"
+            )
+            yield {"event": "error", "data": {"error": "Approval request not found"}}
+            return
+
         effective_run_id = set_trace_context(thread_id)
         config = {"configurable": {"thread_id": thread_id}}
         resume_payload = {
+            "approval_id": approval_id,
             "decision": decision.decision,
             "reason": decision.reason,
             "modified_arguments": decision.modified_arguments,

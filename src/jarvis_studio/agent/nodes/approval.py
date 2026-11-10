@@ -5,6 +5,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
+from jarvis_studio.agent.hitl.authorization import extract_valid_thread_id
 from jarvis_studio.agent.hitl.manager import (
     ApprovalDecision,
     ApprovalRequest,
@@ -122,10 +123,6 @@ def create_approval_node(registry: ToolRegistry = None):
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return {}
 
-        run_context = state.get("run_context", {})
-        thread_id = run_context.get("session_id", "default")
-        run_id = run_context.get("run_id", "run_unknown")
-
         # Find dangerous tool calls requiring confirmation
         dangerous_calls = [
             call
@@ -135,6 +132,24 @@ def create_approval_node(registry: ToolRegistry = None):
 
         if not dangerous_calls:
             return {}
+
+        # Strict Fail-Closed thread identity validation aligned with authorization.py
+        thread_id = extract_valid_thread_id(state)
+        if not thread_id:
+            logger.warning(
+                "HITL approval blocked (Fail-Closed): Missing or invalid thread_id ('default'/empty) in run_context."
+            )
+            return {
+                "pending_approval": None,
+                "approval_decision": None,
+            }
+
+        run_context = state.get("run_context") or {}
+        run_id = (
+            run_context.get("run_id", "run_unknown")
+            if isinstance(run_context, dict)
+            else "run_unknown"
+        )
 
         # Record approval requests for all dangerous calls
         all_requests: list[ApprovalRequest] = []

@@ -114,7 +114,7 @@ class HITLManager:
         """Look up an approval request by its ID, optionally enforcing thread boundary."""
         with self._lock:
             req = self._requests.get(approval_id)
-            if req and thread_id and req.thread_id != thread_id:
+            if req and thread_id is not None and req.thread_id != thread_id:
                 return None
             return req
 
@@ -162,7 +162,7 @@ class HITLManager:
             if not req:
                 return None
 
-            if thread_id and req.thread_id != thread_id:
+            if thread_id is not None and req.thread_id != thread_id:
                 raise PermissionError(
                     f"Thread mismatch: Approval request '{approval_id}' belongs to thread '{req.thread_id}', not '{thread_id}'"
                 )
@@ -296,6 +296,9 @@ class HITLManager:
         with self._lock:
             req = self._requests.get(approval_id)
             if not req:
+                logger.warning(
+                    f"HITL Execution finalize skipped: approval [{approval_id}] not found"
+                )
                 return None
 
             if req.status == ApprovalStatus.EXECUTING:
@@ -307,6 +310,10 @@ class HITLManager:
                 req.completed_at = time.time()
                 logger.info(
                     f"HITL Execution finalized for [{approval_id}]: status={req.status.value}"
+                )
+            else:
+                logger.warning(
+                    f"HITL Execution finalize ignored for [{approval_id}]: expected EXECUTING, got {req.status.value}"
                 )
             return req
 

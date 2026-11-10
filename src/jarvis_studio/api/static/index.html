@@ -1106,7 +1106,10 @@
       try {
         const response = await fetch(`/api/v1/approvals/${approvalId}/decision/stream`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Thread-ID': currentThreadId || ''
+          },
           body: JSON.stringify({
             thread_id: currentThreadId,
             decision: decision,
@@ -1154,8 +1157,12 @@
     }
 
     async function checkPendingApprovals() {
+      if (!currentThreadId) return;
       try {
-        const res = await fetch('/api/v1/approvals');
+        const res = await fetch(`/api/v1/approvals?thread_id=${encodeURIComponent(currentThreadId)}`, {
+          headers: { 'X-Thread-ID': currentThreadId }
+        });
+        if (!res.ok) return;
         const list = await res.json();
         const badge = document.getElementById('pending-badge');
         if (list.length > 0) {
@@ -1169,11 +1176,17 @@
 
     async function loadApprovals() {
       const listEl = document.getElementById('approvals-list');
+      if (!currentThreadId) {
+        listEl.innerHTML = '<div class="text-xs text-slate-500 bg-slate-900 border border-slate-800 p-8 rounded-xl text-center">请先选择或创建会话后再查看待审批请求。</div>';
+        return;
+      }
       listEl.innerHTML = '<div class="text-xs text-slate-500">加载中...</div>';
       try {
-        const res = await fetch('/api/v1/approvals');
+        const res = await fetch(`/api/v1/approvals?thread_id=${encodeURIComponent(currentThreadId)}`, {
+          headers: { 'X-Thread-ID': currentThreadId }
+        });
         const list = await res.json();
-        if (list.length === 0) {
+        if (!res.ok || !Array.isArray(list) || list.length === 0) {
           listEl.innerHTML = '<div class="text-xs text-slate-500 bg-slate-900 border border-slate-800 p-8 rounded-xl text-center">当前暂无待审批请求。所有工具执行均处于放行或静息状态。</div>';
           return;
         }
@@ -1181,7 +1194,7 @@
           <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-2">
             <div class="flex items-center justify-between">
               <span class="font-bold text-sm text-red-400">${item.tool_name}</span>
-              <span class="px-2 py-0.5 rounded text-[10px] bg-red-950 text-red-300 border border-red-800">ID: ${item.approval_id}</span>
+              <span class="px-2 py-0.5 rounded text-[10px] bg-red-950 text-red-300 border border-red-800">ID: ${item.id}</span>
             </div>
             <p class="text-xs text-slate-300">${item.description}</p>
             <pre class="bg-slate-950 p-2 text-xs font-mono rounded text-slate-300 overflow-x-auto">${JSON.stringify(item.arguments, null, 2)}</pre>

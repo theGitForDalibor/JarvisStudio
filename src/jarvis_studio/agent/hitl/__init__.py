@@ -2,6 +2,7 @@
 
 from jarvis_studio.agent.hitl.authorization import (
     AuthorizationResult,
+    extract_valid_thread_id,
     verify_tool_execution_authorization,
 )
 from jarvis_studio.agent.hitl.manager import (
@@ -20,6 +21,7 @@ __all__ = [
     "AuthorizationResult",
     "HITLManager",
     "compute_arguments_hash",
+    "extract_valid_thread_id",
     "get_hitl_manager",
     "verify_tool_execution_authorization",
 ]
