@@ -1,4 +1,4 @@
-"""Process Execution Runtime core models and platform isolation primitives."""
+"""Process Execution Runtime core models, platform isolation primitives, and async runner."""
 
 from jarvis_studio.core.process.models import (
     ProcessError,
@@ -9,8 +9,10 @@ from jarvis_studio.core.process.models import (
     ProcessStatus,
 )
 from jarvis_studio.core.process.platform import SpawnedProcess, spawn_isolated_process
+from jarvis_studio.core.process.runner import AsyncProcessRunner, run_process
 
 __all__ = [
+    "AsyncProcessRunner",
     "ProcessError",
     "ProcessExecutionSpec",
     "ProcessIsolationError",
@@ -18,5 +20,6 @@ __all__ = [
     "ProcessResult",
     "ProcessStatus",
     "SpawnedProcess",
+    "run_process",
     "spawn_isolated_process",
 ]

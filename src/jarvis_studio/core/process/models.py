@@ -72,4 +72,6 @@ class ProcessResult(BaseModel):
     output_truncated: bool = False
     stdout_bytes_total: int = 0
     stderr_bytes_total: int = 0
+    stdout_bytes_retained: int = 0
+    stderr_bytes_retained: int = 0
     error_message: str | None = None

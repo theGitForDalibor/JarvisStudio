@@ -1,11 +1,11 @@
 # Jarvis Studio — Sprint 1B: Process Execution Runtime 架构勘察与设计方案
 
-> **版本**：v1.1 (Design Review Revised)  
+> **版本**：v1.2 (Phase 1 & Phase 2 Implemented)  
 > **角色**：Principal Python Runtime Engineer  
-> **性质**：Sprint 1B 实施前架构勘察与详细设计规范（严格只改设计文档，未改动任何业务代码、测试与配置）  
+> **性质**：Sprint 1B 架构设计规范与分阶段实施状态追踪（当前处于 `feature/v2-sprint-1b-execution-runtime`，尚未进入 Phase 3 `shell_tools.py` 集成）  
 > **基准分支**：`main`（Commit `393612f`，已合入 Sprint 1A / 1A.1 / 1A.2 安全基线）  
-> **运行平台实测**：`win32` / Python 3.12.14 (AMD64) / `WindowsProactorEventLoopPolicy`  
-> **基线测试验证**：`92 passed in 15.36s`（100% PASS，无跳过）  
+> **运行平台实测**：`win32` / Python 3.12.14 (AMD64) / `WindowsProactorEventLoopPolicy`（Linux 实机测试尚未执行）  
+> **基线测试验证**：`92 passed in 15.36s`（Phase 1 + Phase 2 完成后将同步记录最新实测结果）  
 > **日期**：2026-11-10  
 
 ---
@@ -202,6 +202,8 @@ class ProcessResult(BaseModel):
     output_truncated: bool = False
     stdout_bytes_total: int = 0
     stderr_bytes_total: int = 0
+    stdout_bytes_retained: int = 0
+    stderr_bytes_retained: int = 0
     error_message: str | None = None
 ```
 
@@ -236,13 +238,12 @@ class ProcessResult(BaseModel):
    - 利用 `loop.connect_read_pipe(..., PipeHandle(stdout_rh))` 与 `PipeHandle(stderr_rh)` 取得标准 `asyncio.StreamReader`；
    - 通过 `loop._proactor.wait_for_handle(int(hProcess))` 异步等待进程退出并通过 `GetExitCodeProcess` 读取退出码。对上层 `runner.py` 暴露与 POSIX `asyncio.subprocess.Process` 统一的操作封装，从而同时满足 Windows **零竞态进程树纳管** 与 POSIX **`asyncio.create_subprocess_exec(start_new_session=True)`**。
 
-#### 6.1.3 Job Object 失败降级策略与 `taskkill /T /F` 保证边界
-- **初始化/分配失败处理**：若处于禁止嵌套 Job 的早期受限宿主环境（`AssignProcessToJobObject` 失败如 `ERROR_ACCESS_DENIED`）：
-  1. 立即关闭失效的 `job_handle`，标记 `degraded_tree_control = True` 并记录包含 `WinError` 的 `WARNING` 日志；
-  2. 仍执行 `ResumeThread(hThread)` 放行执行（避免误杀死未运行任务），确保可清理性降级路径激活。
-- **`taskkill /T /F` 降级兜底及真实保证范围**：
-  - 当 `degraded_tree_control == True` 需终止进程时，启动限时异步命令 `taskkill.exe /PID <root_pid> /T /F`，随后兜底 `TerminateProcess(hProcess, 1)`。
-  - **局限性声明**：`taskkill /T` 依赖瞬间系统进程快照的父子 PID 链遍历（非原子操作），**若中间父进程已提前退出（父链断裂）或强杀途中子节点瞬间创建新孙进程，`taskkill /T` 无法覆盖**；因此仅作为降级兜底，主防线必须为上述 `CREATE_SUSPENDED + Job Object`。
+#### 6.1.3 Job Object 失败 Fail-Closed 策略与 `taskkill /T /F` 禁用说明
+- **Fail-Closed 实施修订（Phase 1 授权最终准则）**：为消除无 Job Object 约束下的进程树逃逸风险，实现阶段采用严格 **Fail-Closed** 策略（不再静默降级至非原子 `taskkill /T /F`）：
+  1. 若 `CreateJobObjectW` / `QueryInformationJobObject` / `SetInformationJobObject` 失败：拒绝调用 `CreateProcessW`，直接释放已分配句柄并抛出 `ProcessIsolationError`；
+  2. 若 `CreateProcessW(CREATE_SUSPENDED)` 后 `AssignProcessToJobObject` 失败：立即 `TerminateProcess` 杀死仍处于挂起态（0 条指令运行）的子进程、关闭所有句柄并抛出 `ProcessIsolationError`；
+  3. 若 `ResumeThread` 失败：立即 `TerminateJobObject` + `TerminateProcess`、释放句柄并抛出 `ProcessLaunchError`。
+- **关于 `taskkill /T /F` 局限性说明（不作为静默降级通道）**：`taskkill /T` 依赖瞬间进程快照的父子 PID 链遍历（非原子操作），若中间父进程已提前退出（父链断裂）或强杀途中子节点瞬间创建新孙进程，`taskkill /T` 无法覆盖，因此 Sprint 1B 不保留无 Job 纳管的 `taskkill` 降级执行路径。
 
 #### 6.1.4 进程树回收能力真实边界声明
 - **可保证回收的进程**：根 Shell 进程及其直接、间接派生的全部常规子进程与孙进程树（即便中间父进程先行退出，Windows Job 成员标签和 POSIX `pgid` 仍向下保留覆盖）。
@@ -396,15 +397,16 @@ async def _run_cancel_resilient_cleanup(
 
 ## 八、 最终模块修改清单
 
-### 本次 Sprint 1B 预计改动文件列表
-| 操作 | 文件路径 | 说明 |
-| :---: | :--- | :--- |
-| **新增** | `src/jarvis_studio/core/process/__init__.py` | 导出运行时公开模型与执行函数 |
-| **新增** | `src/jarvis_studio/core/process/models.py` | `ProcessStatus`、`ProcessExecutionSpec`、`ProcessResult` 及优先级规则 |
-| **新增** | `src/jarvis_studio/core/process/platform.py` | Win32 `ctypes CreateProcessW(CREATE_SUSPENDED)` + Job Object + 重叠管道接入 + `taskkill` 降级；POSIX `setsid/killpg` |
-| **新增** | `src/jarvis_studio/core/process/runner.py` | `run_process`（并发 `OutputBudget` 限流、UTF-8 边界解码、超时与抗重复取消清理协议） |
-| **修改** | `src/jarvis_studio/tools/builtin/shell_tools.py` | 接入 `core/process`（含独占无 BOM `.cmd`、复用 `resolve_safe_path` 限 `cwd`、统一双通道且零 `subprocess.run`） |
-| **新增** | `tests/test_process_runtime.py` | 全维度真实进程测试套件 |
+### 本次 Sprint 1B 改动文件清单与当前状态
+| 阶段 | 状态 | 文件路径 | 说明 |
+| :---: | :---: | :--- | :--- |
+| **Phase 1** | 已完成并获批 | `src/jarvis_studio/core/process/__init__.py` | 导出运行时公开模型、平台原语与执行引擎 |
+| **Phase 1/2** | 已完成并实测 | `src/jarvis_studio/core/process/models.py` | `ProcessStatus`、`ProcessExecutionSpec`、`ProcessResult`（含 `stdout_bytes_retained`/`stderr_bytes_retained`）与错误类型 |
+| **Phase 1** | 已完成并获批 | `src/jarvis_studio/core/process/platform.py` | Win32 `ctypes CreateProcessW(CREATE_SUSPENDED)` + Job Object (Fail-Closed) + Proactor 重叠管道；POSIX `setsid/killpg` |
+| **Phase 1** | 已完成并实测 | `tests/test_process_platform.py` | Phase 1 真实 Win32 进程与 Fail-Closed 测试 + POSIX mock 单测（10 项 PASS） |
+| **Phase 2** | 已完成待评审 | `src/jarvis_studio/core/process/runner.py` | `AsyncProcessRunner` / `run_process`（共享字节预算、有限块读取、UTF-8 安全截断、超时清理、抗重复取消清理、EOF 延迟收口） |
+| **Phase 2** | 已完成待评审 | `tests/test_process_runner.py` | Phase 2 真实 OS 进程并发/超时/取消/截断/EOF延迟/心跳测试（PASS） |
+| **Phase 3** | 待授权实施 | `src/jarvis_studio/tools/builtin/shell_tools.py` | 接入 `core/process`（尚未修改） |
 
 ### 显式严禁修改范围
 - `src/jarvis_studio/agent/hitl/*`、`src/jarvis_studio/agent/nodes/*`（Sprint 1A 基线保持冻结）
@@ -417,32 +419,28 @@ async def _run_cancel_resilient_cleanup(
 
 Sprint 1B 实施完成合入前，必须通过以下全部真实子进程自动化验收（禁止使用空 Shell Mock 替代真实进程行为）：
 
-1. **[ ] 非阻塞并发验证**：执行睡眠型真实子进程期间，同事件循环另一并发协程计时延迟 `< 50ms`。
-2. **[ ] 零竞态 Windows 进程树与子孙清理（含超时）**：
-   - 在 Windows 上由父进程瞬间快速派生一个长睡眠孙进程并把孙 PID 落盘后父进程休眠/退出；触发 `timeout_seconds=0.5`；
-   - 验证返回 `TIMEOUT`，且返回后校验父 PID 与孙 PID 在 OS 中**均已彻底终止**。
-3. **[ ] Job Object 降级兜底测试**：模拟/触发 `AssignProcessToJobObject` 失败，验证日志记录降级 Warning、不抛未捕获异常、且通过 `taskkill /T /F` 兜底完成进程与子进程清理。
-4. **[ ] 抗重复取消 + HITL 状态闭环验证**：
-   - 通过真实 `tool_executor_node` + `HITLManager` 持有 `EXECUTING` 租约启动长阻塞真实子进程树，随后对 Executor Task 连续触发两次 `.cancel()`；
-   - 验证清理不被二次 cancel 打断、全部父/孙 OS 进程已销毁、临时 `.cmd` 已删除、`asyncio.CancelledError` 最终成功冒泡至最外层、且 `HITLManager` 租约原子转为 `FAILED` 阻断后续重放。
-5. **[ ] Windows 独占 `.cmd` 临时文件与生命周期验证**：
-   - 验证含双引号嵌套路径（`"sys.executable" -c "print(...)"`）、多行、`&&` 及中文 UTF-8 字符串的命令正确执行并返回正确非零 Exit Code；
-   - 验证无论成功、失败、超时还是取消，退出时临时 `.cmd` 文件已被彻底清除（且模拟清理异常时不吞 `CancelledError`）。
-6. **[ ] 共用 Byte Budget + `OUTPUT_LIMIT_EXCEEDED` 与优先级测试**：
-   - 验证 `stdout` 与 `stderr` 同时并发大量输出（>128KB 且无换行）不死锁；
-   - 验证超出共用 `max_output_bytes` 时立即强杀持续输出进程，返回 `OUTPUT_LIMIT_EXCEEDED`，保留有效多字节边界安全截断后的 UTF-8 字符串，不出现内存线性膨胀或解码崩溃；
-   - 验证当超限引发清理阶段同时撞到超时上限时，状态仍确定返回 `OUTPUT_LIMIT_EXCEEDED`。
-7. **[ ] `shell_tools` 双通道一致性与无旧代码检查**：
-   - 代码静态扫描确认 `shell_tools.py` 中不存在 `subprocess.run`；同步调用 `.invoke()` 与异步 `.ainvoke()` 返回相同的限流与超时行为。
-8. **[ ] 工作区 `cwd` 越界防护测试**：覆盖默认 `"."`、相对越界 `"../../"`、绝对系统路径、Windows 跨盘符/UNC、空字符、以及经过祖先 Symlink 的不存在子目录，全部抛出安全拒绝异常且不在工作区外建目录。
-9. **[ ] 基线零回归 + 静态规范**：原有 **92 项测试 + Sprint 1B 新增测试 100% PASS**；新增与修改文件 Ruff Check **All checks passed**。
+1. **[x] 非阻塞并发验证（Phase 2 `test_process_runner.py` 已实测）**：执行睡眠型真实子进程期间，同事件循环另一并发心跳协程计时延迟无阻塞。
+2. **[x] 零竞态 Windows 进程树与子孙清理（Phase 1 & 2 已实测）**：
+   - 在 Windows 上由父进程派生独立/分离孙进程并触发 `timeout_seconds` 超时与外部取消；
+   - 验证返回 `TIMEOUT` / 重抛 `CancelledError`，且校验父 PID 与孙 PID 在 OS 中**均已彻底终止**。
+3. **[x] Job Object Fail-Closed 策略验证（Phase 1 & 2 已实测，替代原降级设计）**：模拟 `CreateJobObjectW` 与 `AssignProcessToJobObject` 失败，验证不静默降级、不执行未纳管进程、释放全部句柄并抛出 `ProcessIsolationError`；模拟 `ResumeThread` 失败验证终止 Job/进程、释放句柄并抛出 `ProcessLaunchError`。
+4. **[ ] 抗重复取消 + HITL 状态闭环验证**：Phase 2 已实测 `AsyncProcessRunner` 连续多次 `Task.cancel()` 下清理完整、Reader/Cleanup Task 零残留且重抛 `CancelledError`；结合 `shell_tools.py` + `tool_executor_node` + `HITLManager` 的端到端闭环留待 **Phase 3** 实施。
+5. **[ ] Windows 独占 `.cmd` 临时文件与生命周期验证**：留待 **Phase 3**（`shell_tools.py`）实施。
+6. **[x] 共用 Byte Budget + `OUTPUT_LIMIT_EXCEEDED` 与优先级测试（Phase 2 `test_process_runner.py` 已实测）**：
+   - 验证 `stdout` 与 `stderr` 同时并发大量输出（>120KB）以及 >150KB 无换行单行均不死锁、不抛 `LimitOverrunError`；
+   - 验证超出共用 `max_output_bytes` 时立即强杀持续输出进程，返回 `OUTPUT_LIMIT_EXCEEDED`，保留有效多字节边界安全截断后的 UTF-8 字符串且记录读取/保留字节数；
+   - 验证超限清理期触发超时时仍确定返回 `OUTPUT_LIMIT_EXCEEDED`，而触发 `Task.cancel()` 时在完成清理后确定重抛 `CancelledError`。
+7. **[ ] `shell_tools` 双通道一致性与无旧代码检查**：留待 **Phase 3** 实施。
+8. **[ ] 工作区 `cwd` 越界防护测试**：留待 **Phase 3** 实施。
+9. **[x] 基线零回归 + 静态规范（Phase 1 & 2 范围）**：原有 **92 项基线测试 + Phase 1 & 2 新增测试全部 PASS**；Ruff Format & Check **All checks passed**。
 
 ---
 
 ## 十、 潜在风险与回滚方案
 
-1. **风险**：Windows `CREATE_NO_WINDOW` 下无控制台句柄时，少数依赖传统 Win32 Console API 的 CLI 可能产生异常编码，且 `.cmd` 脚本对 `%` 展开存在批处理差异。缓解：明确文档约束并在 `shell_tools` 字符串解码加入 UTF-8 -> 本地代码页安全回退。
-2. **回滚**：所有运行态封装均隔离于 `src/jarvis_studio/core/process/`，仅 [`shell_tools.py`](file:///d:/myProject/JarvisStudio/src/jarvis_studio/tools/builtin/shell_tools.py) 调用；若需回滚，仅需单文件还原 `shell_tools.py` 即可无缝恢复原行为，不影响 Agent 图结构、HITL 授权链及数据库状态。
+1. **风险**：Windows `CREATE_NO_WINDOW` 下无控制台句柄时，少数依赖传统 Win32 Console API 的 CLI 可能产生异常编码，且 `.cmd` 脚本对 `%` 展开存在批处理差异。缓解：明确文档约束并在运行时字符串解码加入 UTF-8 -> 本地代码页安全回退。
+2. **平台实测边界说明**：当前所有真实 OS 集成测试均在 `win32`（Windows 11 / Python 3.12.14）完成实机执行；POSIX 分支（`setsid`/`os.killpg`）当前仅通过 unit/mock 测试验证了逻辑，**Linux 实机测试尚未运行**。
+3. **回滚**：所有运行态封装均隔离于 `src/jarvis_studio/core/process/`，尚未修改 `shell_tools.py`；Phase 3 接入后如需回滚也仅需单文件还原 `shell_tools.py`，不影响 Agent 图结构、HITL 授权链及数据库状态。
 
 ---
 
@@ -451,4 +449,5 @@ Sprint 1B 实施完成合入前，必须通过以下全部真实子进程自动�
 | 版本 | 日期 | 修订人 | 核心修订摘要 |
 | :--- | :--- | :--- | :--- |
 | **v1.0** | 2026-11-10 | Principal Python Runtime Engineer | 完成 `main` 基线与 Sprint 1A 安全审计核查、现状执行链路追踪及 Sprint 1B 初步运行时框架设计。 |
-| **v1.1** | 2026-11-10 | Principal Python Runtime Engineer | 依据设计评审意见深度增补：<br>1. 实证 stdlib `create_subprocess_exec` 在 Win32 关闭 `ht` 的竞态本质，确立自定义 `ctypes CreateProcessW(CREATE_SUSPENDED)` + Job Object 零竞态主方案与 `taskkill /T /F` 降级边界。<br>2. 完善独占随机无 BOM UTF-8 `.cmd` 生命期、顺序清理及非沙箱边界说明。<br>3. 明确 `stdout/stderr` 共享原始字节预算、有限排空、`OUTPUT_LIMIT_EXCEEDED > TIMEOUT` 优先级与多字节 UTF-8 安全解码策略。<br>4. 设计带壁钟超时上限与抗外层重复 `cancel()` 的防护性清理协议。<br>5. 强制消除旧 `subprocess.run` 路径，明确异步优先与共管同步桥接语义一致性。<br>6. 细化 6 类 `cwd` `resolve_safe_path` 校验矩阵并补充能力保证矩阵与完整验收清单。 |
+| **v1.1** | 2026-11-10 | Principal Python Runtime Engineer | 依据设计评审意见深度增补 Win32 原子启动器、`.cmd` 策略、共享 Byte Budget、抗重复取消协议与 6 类 `cwd` 防护。 |
+| **v1.2** | 2026-11-10 | Principal Python Runtime Engineer | 记录 Phase 1（`models.py` / `platform.py`，Strict Fail-Closed Job Object 授权规则）与 Phase 2（`runner.py` / `AsyncProcessRunner`、保留字节计数字段、`Timeout/Overflow/Cancel` 竞争矩阵及实测状态）实施进度，标注 Phase 3 待授权及 Linux 实机未测边界。 |
