@@ -1,11 +1,10 @@
 # Jarvis Studio — Sprint 1B: Process Execution Runtime 架构勘察与设计方案
 
-> **版本**：v1.2 (Phase 1 & Phase 2 Implemented)  
+> **版本**：v1.3 (Phase 1, Phase 2 Self-Review & Phase 3 Implemented)  
 > **角色**：Principal Python Runtime Engineer  
-> **性质**：Sprint 1B 架构设计规范与分阶段实施状态追踪（当前处于 `feature/v2-sprint-1b-execution-runtime`，尚未进入 Phase 3 `shell_tools.py` 集成）  
+> **性质**：Sprint 1B 架构设计规范与实施完成记录（分支 `feature/v2-sprint-1b-execution-runtime`，尚未合并至 `main`）  
 > **基准分支**：`main`（Commit `393612f`，已合入 Sprint 1A / 1A.1 / 1A.2 安全基线）  
 > **运行平台实测**：`win32` / Python 3.12.14 (AMD64) / `WindowsProactorEventLoopPolicy`（Linux 实机测试尚未执行）  
-> **基线测试验证**：`92 passed in 15.36s`（Phase 1 + Phase 2 完成后将同步记录最新实测结果）  
 > **日期**：2026-11-10  
 
 ---
@@ -404,9 +403,10 @@ async def _run_cancel_resilient_cleanup(
 | **Phase 1/2** | 已完成并实测 | `src/jarvis_studio/core/process/models.py` | `ProcessStatus`、`ProcessExecutionSpec`、`ProcessResult`（含 `stdout_bytes_retained`/`stderr_bytes_retained`）与错误类型 |
 | **Phase 1** | 已完成并获批 | `src/jarvis_studio/core/process/platform.py` | Win32 `ctypes CreateProcessW(CREATE_SUSPENDED)` + Job Object (Fail-Closed) + Proactor 重叠管道；POSIX `setsid/killpg` |
 | **Phase 1** | 已完成并实测 | `tests/test_process_platform.py` | Phase 1 真实 Win32 进程与 Fail-Closed 测试 + POSIX mock 单测（10 项 PASS） |
-| **Phase 2** | 已完成待评审 | `src/jarvis_studio/core/process/runner.py` | `AsyncProcessRunner` / `run_process`（共享字节预算、有限块读取、UTF-8 安全截断、超时清理、抗重复取消清理、EOF 延迟收口） |
-| **Phase 2** | 已完成待评审 | `tests/test_process_runner.py` | Phase 2 真实 OS 进程并发/超时/取消/截断/EOF延迟/心跳测试（PASS） |
-| **Phase 3** | 待授权实施 | `src/jarvis_studio/tools/builtin/shell_tools.py` | 接入 `core/process`（尚未修改） |
+| **Phase 2** | 已完成并通过自审 | `src/jarvis_studio/core/process/runner.py` | `AsyncProcessRunner` / `run_process`（共享字节预算、有限块读取、UTF-8 安全截断、超时清理、抗重复取消清理、EOF 延迟收口与异常兜底） |
+| **Phase 2** | 已完成并通过自审 | `tests/test_process_runner.py` | Phase 2 真实 OS 进程并发/超时/取消/截断/EOF延迟/心跳/异常兜底测试 |
+| **Phase 3** | 已完成并实测 | `src/jarvis_studio/tools/builtin/shell_tools.py` | 接入 `core.process`（无 `subprocess.run`、双通道共享 `run_process`、独占无 BOM `.cmd`、复用 `resolve_safe_path` 限 `cwd`） |
+| **Phase 3** | 已完成并实测 | `tests/test_shell_runtime_integration.py` | Phase 3 双通道一致性、`cwd` 六类越界拦截、`.cmd` 清理及 HITL+Job 抗二次取消端到端测试 |
 
 ### 显式严禁修改范围
 - `src/jarvis_studio/agent/hitl/*`、`src/jarvis_studio/agent/nodes/*`（Sprint 1A 基线保持冻结）
@@ -424,15 +424,20 @@ Sprint 1B 实施完成合入前，必须通过以下全部真实子进程自动�
    - 在 Windows 上由父进程派生独立/分离孙进程并触发 `timeout_seconds` 超时与外部取消；
    - 验证返回 `TIMEOUT` / 重抛 `CancelledError`，且校验父 PID 与孙 PID 在 OS 中**均已彻底终止**。
 3. **[x] Job Object Fail-Closed 策略验证（Phase 1 & 2 已实测，替代原降级设计）**：模拟 `CreateJobObjectW` 与 `AssignProcessToJobObject` 失败，验证不静默降级、不执行未纳管进程、释放全部句柄并抛出 `ProcessIsolationError`；模拟 `ResumeThread` 失败验证终止 Job/进程、释放句柄并抛出 `ProcessLaunchError`。
-4. **[ ] 抗重复取消 + HITL 状态闭环验证**：Phase 2 已实测 `AsyncProcessRunner` 连续多次 `Task.cancel()` 下清理完整、Reader/Cleanup Task 零残留且重抛 `CancelledError`；结合 `shell_tools.py` + `tool_executor_node` + `HITLManager` 的端到端闭环留待 **Phase 3** 实施。
-5. **[ ] Windows 独占 `.cmd` 临时文件与生命周期验证**：留待 **Phase 3**（`shell_tools.py`）实施。
+4. **[x] 抗重复取消 + HITL 状态闭环验证（Phase 3 `test_shell_runtime_integration.py` 已实测）**：
+   - 通过真实 `tool_executor_node` + `HITLManager` 持有 `EXECUTING` 租约启动真实阻塞子进程树，随后对 Executor Task 连续触发两次 `.cancel()`；
+   - 验证清理不被二次 cancel 打断、全部父/孙 OS 进程已销毁、临时 `.cmd` 已删除、`asyncio.CancelledError` 最终成功冒泡至最外层、且 `HITLManager` 租约原子转为 `FAILED` 阻断后续重放。
+5. **[x] Windows 独占 `.cmd` 临时文件与生命周期验证（Phase 3 `test_shell_runtime_integration.py` 已实测）**：
+   - 验证含双引号嵌套路径、多行、`&&` 及中文 UTF-8 字符串的命令正确执行并返回正确非零 Exit Code；
+   - 验证无论成功、失败、超时还是取消，退出时临时 `.cmd` 文件已被彻底清除（且模拟 `unlink` 异常时不覆盖结果也不吞 `CancelledError`）。
 6. **[x] 共用 Byte Budget + `OUTPUT_LIMIT_EXCEEDED` 与优先级测试（Phase 2 `test_process_runner.py` 已实测）**：
    - 验证 `stdout` 与 `stderr` 同时并发大量输出（>120KB）以及 >150KB 无换行单行均不死锁、不抛 `LimitOverrunError`；
    - 验证超出共用 `max_output_bytes` 时立即强杀持续输出进程，返回 `OUTPUT_LIMIT_EXCEEDED`，保留有效多字节边界安全截断后的 UTF-8 字符串且记录读取/保留字节数；
    - 验证超限清理期触发超时时仍确定返回 `OUTPUT_LIMIT_EXCEEDED`，而触发 `Task.cancel()` 时在完成清理后确定重抛 `CancelledError`。
-7. **[ ] `shell_tools` 双通道一致性与无旧代码检查**：留待 **Phase 3** 实施。
-8. **[ ] 工作区 `cwd` 越界防护测试**：留待 **Phase 3** 实施。
-9. **[x] 基线零回归 + 静态规范（Phase 1 & 2 范围）**：原有 **92 项基线测试 + Phase 1 & 2 新增测试全部 PASS**；Ruff Format & Check **All checks passed**。
+7. **[x] `shell_tools` 双通道一致性与无旧代码检查（Phase 3 `test_shell_runtime_integration.py` 已实测）**：
+   - 确认 `shell_tools.py` 中不存在 `subprocess.run` / `subprocess.Popen`；同步 `.invoke()` 与异步 `.ainvoke()` 返回相同的执行结果、限流与超时行为。
+8. **[x] 工作区 `cwd` 越界防护测试（Phase 3 `test_shell_runtime_integration.py` 已实测）**：覆盖默认 `"."`、相对越界、绝对系统路径、Windows 跨盘符/UNC、空字符/非法冒号、以及经过祖先 Symlink 的不存在子目录，全部抛出安全拒绝异常且不在工作区外建目录。
+9. **[x] 基线零回归 + 静态规范**：原有 **92 项基线测试 + Sprint 1B Phase 1/2/3 新增测试**全部通过；Ruff Format & Check 全部通过（待独立合入审查）。
 
 ---
 
@@ -440,7 +445,7 @@ Sprint 1B 实施完成合入前，必须通过以下全部真实子进程自动�
 
 1. **风险**：Windows `CREATE_NO_WINDOW` 下无控制台句柄时，少数依赖传统 Win32 Console API 的 CLI 可能产生异常编码，且 `.cmd` 脚本对 `%` 展开存在批处理差异。缓解：明确文档约束并在运行时字符串解码加入 UTF-8 -> 本地代码页安全回退。
 2. **平台实测边界说明**：当前所有真实 OS 集成测试均在 `win32`（Windows 11 / Python 3.12.14）完成实机执行；POSIX 分支（`setsid`/`os.killpg`）当前仅通过 unit/mock 测试验证了逻辑，**Linux 实机测试尚未运行**。
-3. **回滚**：所有运行态封装均隔离于 `src/jarvis_studio/core/process/`，尚未修改 `shell_tools.py`；Phase 3 接入后如需回滚也仅需单文件还原 `shell_tools.py`，不影响 Agent 图结构、HITL 授权链及数据库状态。
+3. **回滚**：所有运行态封装均隔离于 `src/jarvis_studio/core/process/`，仅 [`shell_tools.py`](file:///d:/myProject/JarvisStudio/src/jarvis_studio/tools/builtin/shell_tools.py) 调用；如需回滚，仅需单文件还原 `shell_tools.py` 即可无缝恢复原行为，不影响 Agent 图结构、HITL 授权链及数据库状态。
 
 ---
 
@@ -450,4 +455,5 @@ Sprint 1B 实施完成合入前，必须通过以下全部真实子进程自动�
 | :--- | :--- | :--- | :--- |
 | **v1.0** | 2026-11-10 | Principal Python Runtime Engineer | 完成 `main` 基线与 Sprint 1A 安全审计核查、现状执行链路追踪及 Sprint 1B 初步运行时框架设计。 |
 | **v1.1** | 2026-11-10 | Principal Python Runtime Engineer | 依据设计评审意见深度增补 Win32 原子启动器、`.cmd` 策略、共享 Byte Budget、抗重复取消协议与 6 类 `cwd` 防护。 |
-| **v1.2** | 2026-11-10 | Principal Python Runtime Engineer | 记录 Phase 1（`models.py` / `platform.py`，Strict Fail-Closed Job Object 授权规则）与 Phase 2（`runner.py` / `AsyncProcessRunner`、保留字节计数字段、`Timeout/Overflow/Cancel` 竞争矩阵及实测状态）实施进度，标注 Phase 3 待授权及 Linux 实机未测边界。 |
+| **v1.2** | 2026-11-10 | Principal Python Runtime Engineer | 记录 Phase 1（`models.py` / `platform.py`，Strict Fail-Closed Job Object 授权规则）与 Phase 2（`runner.py` / `AsyncProcessRunner`）实施进度。 |
+| **v1.3** | 2026-11-10 | Principal Python Runtime Engineer | 记录 Phase 2 源码自审修复（紧超时下 `proc.close()` 隔离保底、排空阶段溢出即刻唤醒、非取消异常资源清理）及 Phase 3 `shell_tools.py` 全量集成与测试验收状态。 |

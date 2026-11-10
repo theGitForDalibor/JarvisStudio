@@ -410,8 +410,6 @@ async def test_runner_handles_delayed_eof_from_grandchild_inheriting_pipe() -> N
     fake_proc.terminate_tree = AsyncMock()
     fake_proc.close = AsyncMock()
 
-    orig_spawn = AsyncProcessRunner.run
-
     async def _run_with_fake() -> None:
         from jarvis_studio.core.process import runner as runner_mod
 
@@ -431,7 +429,6 @@ async def test_runner_handles_delayed_eof_from_grandchild_inheriting_pipe() -> N
         finally:
             runner_mod.spawn_isolated_process = old
 
-    _ = orig_spawn
     await _run_with_fake()
     assert _runner_task_names() == []
 
@@ -685,4 +682,77 @@ async def test_runner_cancellation_during_timeout_or_overflow_reraises(
         await task
 
     proc.close.assert_awaited_once()
+    assert _runner_task_names() == []
+
+
+async def test_runner_cleanup_runs_on_unexpected_error_and_tight_cancel_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Self-review checks: tight cleanup_max_seconds still closes handles, and errors clean up."""
+    from jarvis_studio.core.process import runner as runner_mod
+
+    async def never_exit() -> int:
+        await asyncio.sleep(10)
+        return 0
+
+    # 1. terminate_tree hangs beyond term_budget under tight cleanup_max_seconds -> proc.close() still runs.
+    proc_hang = MagicMock(spec=SpawnedProcess)
+    proc_hang.pid = 62000
+    proc_hang.returncode = None
+    proc_hang.stdout = asyncio.StreamReader()
+    proc_hang.stderr = asyncio.StreamReader()
+    proc_hang.wait_exit = never_exit
+
+    async def hanging_term(graceful_timeout: float = 2.0) -> None:
+        await asyncio.sleep(5.0)
+
+    proc_hang.terminate_tree = AsyncMock(side_effect=hanging_term)
+    proc_hang.close = AsyncMock()
+    monkeypatch.setattr(
+        runner_mod, "spawn_isolated_process", AsyncMock(return_value=proc_hang)
+    )
+
+    task = asyncio.create_task(
+        run_process(
+            ProcessExecutionSpec(
+                argv=["hanging"],
+                timeout_seconds=10.0,
+                cleanup_max_seconds=0.2,
+                graceful_termination_timeout=0.1,
+                reap_timeout=0.1,
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    proc_hang.close.assert_awaited_once()
+    assert _runner_task_names() == []
+
+    # 2. Unexpected internal error after spawn still terminates tree and closes process handles.
+    proc_err = MagicMock(spec=SpawnedProcess)
+    proc_err.pid = 62001
+    proc_err.returncode = None
+    proc_err.stdout = asyncio.StreamReader()
+    proc_err.stderr = asyncio.StreamReader()
+    proc_err.wait_exit = never_exit
+    proc_err.terminate_tree = AsyncMock()
+    proc_err.close = AsyncMock()
+    monkeypatch.setattr(
+        runner_mod, "spawn_isolated_process", AsyncMock(return_value=proc_err)
+    )
+
+    boom_runner = AsyncProcessRunner()
+    monkeypatch.setattr(
+        boom_runner,
+        "_terminate_and_drain",
+        AsyncMock(side_effect=RuntimeError("unexpected runtime error")),
+    )
+    with pytest.raises(RuntimeError, match="unexpected runtime error"):
+        await boom_runner.run(ProcessExecutionSpec(argv=["boom"], timeout_seconds=0.05))
+
+    proc_err.terminate_tree.assert_awaited_once()
+    proc_err.close.assert_awaited_once()
     assert _runner_task_names() == []

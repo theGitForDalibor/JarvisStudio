@@ -316,9 +316,10 @@ class AsyncProcessRunner:
 
         async def _cleanup_on_cancellation() -> None:
             term_budget = min(
-                spec.cleanup_max_seconds * 0.7,
+                spec.cleanup_max_seconds * 0.65,
                 max(spec.graceful_termination_timeout, 0.5) + spec.reap_timeout,
             )
+            drain_budget = max(0.05, min(0.5, spec.cleanup_max_seconds * 0.2))
             try:
                 async with asyncio.timeout(term_budget):
                     await proc.terminate_tree(
@@ -338,13 +339,16 @@ class AsyncProcessRunner:
                     f"Error terminating cancelled process pid={proc.pid}: {exc}"
                 )
             finally:
-                await _cancel_and_drain_tasks(all_tasks, timeout=0.5)
                 try:
-                    await proc.close()
-                except Exception as exc:  # noqa: BLE001 — do not mask outer CancelledError
-                    logger.warning(
-                        f"Error closing handles after cancellation for pid={proc.pid}: {exc}"
-                    )
+                    await _cancel_and_drain_tasks(all_tasks, timeout=drain_budget)
+                finally:
+                    _force_cancel_tasks(all_tasks)
+                    try:
+                        await proc.close()
+                    except Exception as exc:  # noqa: BLE001 — do not mask outer CancelledError
+                        logger.warning(
+                            f"Error closing handles after cancellation for pid={proc.pid}: {exc}"
+                        )
 
         try:
             watch_tasks: set[asyncio.Task[Any]] = {wait_task, overflow_waiter}
@@ -373,11 +377,16 @@ class AsyncProcessRunner:
             exit_code: int | None = proc.returncode
             if exited_naturally and not budget.limit_exceeded and not soft_cancelled:
                 exit_code = await self._reap_exit_code(wait_task, proc)
-                await self._drain_readers_bounded(
+                hit_overflow = await self._drain_readers_bounded(
                     stdout_task,
                     stderr_task,
+                    overflow_waiter=overflow_waiter,
                     drain_grace_seconds=spec.drain_grace_seconds,
                 )
+                if hit_overflow or budget.limit_exceeded:
+                    await proc.terminate_tree(
+                        graceful_timeout=spec.graceful_termination_timeout
+                    )
             else:
                 await self._terminate_and_drain(
                     proc=proc,
@@ -409,6 +418,9 @@ class AsyncProcessRunner:
                 spec.cleanup_max_seconds,
                 all_tasks,
             )
+            raise
+        except BaseException:
+            await _cleanup_on_cancellation()
             raise
         finally:
             _force_cancel_tasks(all_tasks)
@@ -444,20 +456,37 @@ class AsyncProcessRunner:
         stdout_task: asyncio.Task[None],
         stderr_task: asyncio.Task[None],
         *,
+        overflow_waiter: asyncio.Task[Any],
         drain_grace_seconds: float,
-    ) -> None:
-        """Allow flushed pipe output up to ``drain_grace_seconds`` to finish without hanging on open child FDs."""
+    ) -> bool:
+        """Allow flushed pipe output up to ``drain_grace_seconds`` to finish without hanging on open child FDs.
+
+        Returns True if ``overflow_waiter`` fired during draining.
+        """
         # Yield one tick even when drain_grace_seconds == 0 so already-queued pipe callbacks run.
         await asyncio.sleep(0)
-        pending = [t for t in (stdout_task, stderr_task) if not t.done()]
-        if not pending or drain_grace_seconds <= 0:
-            return
+        if overflow_waiter.done():
+            return True
 
-        await asyncio.wait(
-            pending,
-            timeout=drain_grace_seconds,
-            return_when=asyncio.ALL_COMPLETED,
-        )
+        deadline = time.monotonic() + drain_grace_seconds
+        while True:
+            pending = [t for t in (stdout_task, stderr_task) if not t.done()]
+            if not pending or drain_grace_seconds <= 0:
+                return overflow_waiter.done()
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return overflow_waiter.done()
+
+            done, _ = await asyncio.wait(
+                [*pending, overflow_waiter],
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if overflow_waiter in done or overflow_waiter.done():
+                return True
+            if not done:
+                return False
 
     async def _terminate_and_drain(
         self,
