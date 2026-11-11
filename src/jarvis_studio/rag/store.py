@@ -3,13 +3,17 @@
 import json
 import sqlite3
 import time
-from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import sqlite_vec
 
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
+from jarvis_studio.core.persistence.migrations import run_vec_migrations
+from jarvis_studio.core.persistence.sqlite import (
+    SyncSQLiteSession,
+    initialize_sqlite_database,
+)
 from jarvis_studio.rag.splitter import DocumentChunk
 
 
@@ -18,37 +22,58 @@ class SqliteVecStore:
 
     def __init__(self, db_path: str | None = None, dimension: int | None = None):
         settings = get_settings()
-        self.db_path = db_path or settings.rag.vector_db_path
-        self.dimension = dimension or settings.rag.embedding_dimension
-        self._in_memory_conn: sqlite3.Connection | None = None
+        resolved_path = db_path or settings.rag.vector_db_path
+        resolved_dim = (
+            dimension if dimension is not None else settings.rag.embedding_dimension
+        )
+        if not isinstance(resolved_dim, int) or resolved_dim <= 0:
+            raise ValueError(
+                f"Embedding dimension must be a positive integer, got {resolved_dim!r}"
+            )
+        self.dimension = resolved_dim
+        self._db = SyncSQLiteSession(
+            resolved_path,
+            enable_foreign_keys=False,
+            enable_sqlite_vec=True,
+        )
+        self.db_path = self._db.db_path
 
-        if self.db_path != ":memory:":
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        if not self._db.is_memory:
+            initialize_sqlite_database(
+                self.db_path,
+                enable_wal=True,
+                enable_foreign_keys=False,
+                enable_sqlite_vec=True,
+            )
+            run_vec_migrations(self.db_path)
 
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Create and configure a SQLite connection loaded with sqlite-vec."""
-        if self.db_path == ":memory:":
-            if self._in_memory_conn is None:
-                self._in_memory_conn = sqlite3.connect(
-                    ":memory:", check_same_thread=False
-                )
-                self._in_memory_conn.row_factory = sqlite3.Row
-                self._in_memory_conn.enable_load_extension(True)
-                sqlite_vec.load(self._in_memory_conn)
-            return self._in_memory_conn
+    @property
+    def _in_memory_conn(self) -> sqlite3.Connection | None:
+        return self._db.in_memory_conn
 
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        return conn
+    def close(self) -> None:
+        """Idempotently release any private in-memory SQLite connection."""
+        self._db.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     def _init_db(self) -> None:
         """Initialize relational tables and sqlite-vec virtual table."""
-        conn = self._get_connection()
-        try:
+        if not self._db.is_memory:
+            with self._db.read_connection() as conn:
+                tbl_cnt = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('doc_files', 'doc_chunks', 'vec_chunks')"
+                ).fetchone()[0]
+            if tbl_cnt == 3:
+                return
+
+        with self._db.transaction() as conn:
             # Metadata table tracking indexed files
             conn.execute(
                 """
@@ -87,10 +112,6 @@ class SqliteVecStore:
                 )
                 """
             )
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def add_chunks(
         self,
@@ -104,9 +125,8 @@ class SqliteVecStore:
 
         doc_path = chunks[0].doc_path
         now = time.time()
-        conn = self._get_connection()
 
-        try:
+        with self._db.transaction() as conn:
             # Remove any existing chunks for this document first
             self._delete_doc_internal(conn, doc_path)
 
@@ -147,11 +167,6 @@ class SqliteVecStore:
                     (doc_path, file_hash, len(chunks), now),
                 )
 
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
-
         logger.debug(f"Indexed {len(chunks)} chunk(s) for doc '{doc_path}'")
         return len(chunks)
 
@@ -164,9 +179,8 @@ class SqliteVecStore:
         """Perform KNN vector similarity search."""
         serialized_query = sqlite_vec.serialize_float32(query_embedding)
         results = []
-        conn = self._get_connection()
 
-        try:
+        with self._db.read_connection() as conn:
             cursor = conn.execute(
                 """
                 SELECT
@@ -215,9 +229,6 @@ class SqliteVecStore:
 
                 if len(results) >= top_k:
                     break
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
         return results
 
@@ -236,32 +247,22 @@ class SqliteVecStore:
 
     def delete_document(self, doc_path: str) -> bool:
         """Remove an entire document and its vectors from the store."""
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             self._delete_doc_internal(conn, doc_path)
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
         return True
 
     def get_file_hash(self, doc_path: str) -> str | None:
         """Check if a file was previously indexed and get its recorded hash."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             cursor = conn.execute(
                 "SELECT file_hash FROM doc_files WHERE doc_path = ?", (doc_path,)
             )
             row = cursor.fetchone()
             return row["file_hash"] if row else None
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def list_indexed_files(self) -> list[dict[str, Any]]:
         """List all indexed documents and their chunk counts."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             cursor = conn.execute(
                 "SELECT doc_path, file_hash, chunk_count, updated_at FROM doc_files ORDER BY updated_at DESC"
             )
@@ -274,18 +275,10 @@ class SqliteVecStore:
                 }
                 for r in cursor.fetchall()
             ]
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def clear(self) -> None:
         """Purge all vectors and chunks."""
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             conn.execute("DELETE FROM vec_chunks")
             conn.execute("DELETE FROM doc_chunks")
             conn.execute("DELETE FROM doc_files")
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()

@@ -15,10 +15,14 @@ import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from jarvis_studio.config.settings import get_settings
+from jarvis_studio.core.persistence.migrations import run_app_migrations
+from jarvis_studio.core.persistence.sqlite import (
+    SyncSQLiteSession,
+    initialize_sqlite_database,
+)
 
 
 @dataclass
@@ -136,25 +140,44 @@ class TraceStore:
     """SQLite-backed persistent store for conversation lifecycle traces."""
 
     def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or get_settings().storage.sqlite_path
-        self._in_memory_conn: sqlite3.Connection | None = None
-        if self.db_path == ":memory:":
-            self._in_memory_conn = sqlite3.connect(":memory:", check_same_thread=False)
-            self._in_memory_conn.row_factory = sqlite3.Row
+        resolved_path = db_path or get_settings().storage.sqlite_path
+        self._db = SyncSQLiteSession(resolved_path, enable_foreign_keys=True)
+        self.db_path = self._db.db_path
+        if not self._db.is_memory:
+            initialize_sqlite_database(
+                self.db_path, enable_wal=True, enable_foreign_keys=True
+            )
+            run_app_migrations(self.db_path)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        if self._in_memory_conn is not None:
-            return self._in_memory_conn
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    @property
+    def _in_memory_conn(self) -> sqlite3.Connection | None:
+        return self._db.in_memory_conn
+
+    def close(self) -> None:
+        """Idempotently release any private in-memory SQLite connection."""
+        self._db.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     def _init_db(self) -> None:
         """Create traces table if not exists."""
-        conn = self._get_connection()
-        try:
+        if not self._db.is_memory:
+            with self._db.read_connection() as conn:
+                has_table = (
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
+                    ).fetchone()
+                    is not None
+                )
+            if has_table:
+                return
+
+        with self._db.transaction() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_conversation_traces (
@@ -176,16 +199,11 @@ class TraceStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_traces_session ON agent_conversation_traces(session_id, start_time DESC)"
             )
-            conn.commit()
-        finally:
-            if self._in_memory_conn is None:
-                conn.close()
 
     def save_trace(self, trace: ConversationTrace) -> None:
         """Persist completed trace into SQLite."""
-        conn = self._get_connection()
-        try:
-            payload = json.dumps(trace.to_dict(), ensure_ascii=False)
+        payload = json.dumps(trace.to_dict(), ensure_ascii=False)
+        with self._db.transaction() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO agent_conversation_traces (
@@ -209,15 +227,10 @@ class TraceStore:
                     payload,
                 ),
             )
-            conn.commit()
-        finally:
-            if self._in_memory_conn is None:
-                conn.close()
 
     def list_traces(self, limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
         """List summary of traces sorted by most recent."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             if session_id:
                 cursor = conn.execute(
                     """
@@ -241,14 +254,10 @@ class TraceStore:
                 )
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
-        finally:
-            if self._in_memory_conn is None:
-                conn.close()
 
     def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         """Get full detailed trace payload by trace_id."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             cursor = conn.execute(
                 "SELECT payload FROM agent_conversation_traces WHERE trace_id = ?",
                 (trace_id,),
@@ -257,9 +266,6 @@ class TraceStore:
             if not row:
                 return None
             return json.loads(row["payload"])
-        finally:
-            if self._in_memory_conn is None:
-                conn.close()
 
 
 _global_trace_store: TraceStore | None = None

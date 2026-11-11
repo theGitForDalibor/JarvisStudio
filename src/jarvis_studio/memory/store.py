@@ -3,10 +3,15 @@
 import builtins
 import sqlite3
 import time
-from pathlib import Path
+from typing import Self
 
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
+from jarvis_studio.core.persistence.migrations import run_app_migrations
+from jarvis_studio.core.persistence.sqlite import (
+    SyncSQLiteSession,
+    initialize_sqlite_database,
+)
 from jarvis_studio.memory.models import MemoryCategory, MemoryItem
 
 
@@ -18,57 +23,68 @@ class MemoryStore:
             settings = get_settings()
             db_path = settings.storage.sqlite_path
 
-        self.db_path = db_path
-        self._in_memory_conn: sqlite3.Connection | None = None
+        self._db = SyncSQLiteSession(db_path, enable_foreign_keys=True)
+        self.db_path = self._db.db_path
 
-        if self.db_path != ":memory:":
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        if not self._db.is_memory:
+            initialize_sqlite_database(
+                self.db_path, enable_wal=True, enable_foreign_keys=True
+            )
+            run_app_migrations(self.db_path)
 
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        if self.db_path == ":memory:":
-            if self._in_memory_conn is None:
-                self._in_memory_conn = sqlite3.connect(
-                    ":memory:", check_same_thread=False
-                )
-                self._in_memory_conn.row_factory = sqlite3.Row
-            return self._in_memory_conn
+    @property
+    def _in_memory_conn(self) -> sqlite3.Connection | None:
+        return self._db.in_memory_conn
 
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def close(self) -> None:
+        """Idempotently release any private in-memory SQLite connection."""
+        self._db.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     def _init_db(self) -> None:
         """Create the memory table if it does not already exist."""
-        conn = self._get_connection()
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ltm_memories (
-                id TEXT PRIMARY KEY,
-                category TEXT NOT NULL,
-                content TEXT NOT NULL,
-                source TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                importance REAL DEFAULT 1.0
+        if not self._db.is_memory:
+            with self._db.read_connection() as conn:
+                has_table = (
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ltm_memories'"
+                    ).fetchone()
+                    is not None
+                )
+            if has_table:
+                return
+
+        with self._db.transaction() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ltm_memories (
+                    id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    importance REAL DEFAULT 1.0
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ltm_category ON ltm_memories(category)"
-        )
-        conn.commit()
-        if self.db_path != ":memory:":
-            conn.close()
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ltm_category ON ltm_memories(category)"
+            )
 
     def add(self, memory: MemoryItem) -> MemoryItem:
         """Insert a new memory record."""
         now = time.time()
         memory.created_at = now
         memory.updated_at = now
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO ltm_memories (id, category, content, source, created_at, updated_at, importance)
@@ -86,18 +102,13 @@ class MemoryStore:
                     memory.importance,
                 ),
             )
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
         logger.debug(f"Saved memory [{memory.category.value}] id={memory.id}")
         return memory
 
     def get(self, memory_id: str) -> MemoryItem | None:
         """Fetch a memory record by ID."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             cursor = conn.execute(
                 "SELECT * FROM ltm_memories WHERE id = ?", (memory_id,)
             )
@@ -113,15 +124,11 @@ class MemoryStore:
                 updated_at=row["updated_at"],
                 importance=row["importance"],
             )
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def update(self, memory: MemoryItem) -> MemoryItem | None:
         """Update an existing memory record."""
         memory.updated_at = time.time()
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE ltm_memories
@@ -139,25 +146,16 @@ class MemoryStore:
                     memory.id,
                 ),
             )
-            conn.commit()
             if cursor.rowcount == 0:
                 return None
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
         return memory
 
     def delete(self, memory_id: str) -> bool:
         """Delete a memory record by ID."""
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM ltm_memories WHERE id = ?", (memory_id,))
-            conn.commit()
             return cursor.rowcount > 0
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def list(
         self,
@@ -165,8 +163,7 @@ class MemoryStore:
         limit: int = 50,
     ) -> list[MemoryItem]:
         """List stored memories, optionally filtered by category."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             if category:
                 cat_val = (
                     category.value if isinstance(category, MemoryCategory) else category
@@ -193,9 +190,6 @@ class MemoryStore:
                 )
                 for r in rows
             ]
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def search(
         self,
@@ -205,8 +199,7 @@ class MemoryStore:
     ) -> builtins.list[MemoryItem]:
         """Simple keyword matching search across memory content."""
         pattern = f"%{query}%"
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             if category:
                 cat_val = (
                     category.value if isinstance(category, MemoryCategory) else category
@@ -243,16 +236,8 @@ class MemoryStore:
                 )
                 for r in rows
             ]
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def clear(self) -> None:
         """Clear all memories (primarily used for test cleanup)."""
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             conn.execute("DELETE FROM ltm_memories")
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()

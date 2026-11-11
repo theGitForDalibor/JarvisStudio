@@ -4,13 +4,17 @@ import json
 import sqlite3
 import time
 import uuid
-from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from pydantic import BaseModel, Field
 
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
+from jarvis_studio.core.persistence.migrations import run_app_migrations
+from jarvis_studio.core.persistence.sqlite import (
+    SyncSQLiteSession,
+    initialize_sqlite_database,
+)
 
 
 class ChatMessageRecord(BaseModel):
@@ -40,28 +44,41 @@ class SessionService:
     """Service to track, persist, and manage sessions and message histories."""
 
     def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or get_settings().storage.sqlite_path
-        self._in_memory_conn: sqlite3.Connection | None = None
+        resolved_path = db_path or get_settings().storage.sqlite_path
+        self._db = SyncSQLiteSession(resolved_path, enable_foreign_keys=True)
+        self.db_path = self._db.db_path
+        if not self._db.is_memory:
+            initialize_sqlite_database(
+                self.db_path, enable_wal=True, enable_foreign_keys=True
+            )
+            run_app_migrations(self.db_path)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        if self.db_path == ":memory:":
-            if self._in_memory_conn is None:
-                self._in_memory_conn = sqlite3.connect(
-                    ":memory:", check_same_thread=False
-                )
-                self._in_memory_conn.row_factory = sqlite3.Row
-            return self._in_memory_conn
+    @property
+    def _in_memory_conn(self) -> sqlite3.Connection | None:
+        return self._db.in_memory_conn
 
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def close(self) -> None:
+        """Idempotently release any private in-memory SQLite connection."""
+        self._db.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     def _init_db(self) -> None:
         """Create sessions and messages tables if they do not exist."""
-        conn = self._get_connection()
-        try:
+        if not self._db.is_memory:
+            with self._db.read_connection() as conn:
+                tbl_cnt = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('chat_sessions', 'chat_messages')"
+                ).fetchone()[0]
+            if tbl_cnt == 2:
+                return
+
+        with self._db.transaction() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -88,10 +105,6 @@ class SessionService:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_chat_msg_session ON chat_messages(session_id, created_at)"
             )
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def create_session(
         self, title: str | None = None, session_id: str | None = None
@@ -100,8 +113,7 @@ class SessionService:
         now = time.time()
         sid = session_id or f"sess_{uuid.uuid4().hex[:10]}"
         sess_title = title or "新会话"
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO chat_sessions (session_id, title, created_at, updated_at, metadata)
@@ -109,10 +121,6 @@ class SessionService:
                 """,
                 (sid, sess_title, now, now, json.dumps({})),
             )
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
         logger.info(f"Created session: {sid} ('{sess_title}')")
         return SessionMetadata(
@@ -135,25 +143,19 @@ class SessionService:
         if existing:
             # Touch updated_at
             now = time.time()
-            conn = self._get_connection()
-            try:
+            with self._db.transaction() as conn:
                 conn.execute(
                     "UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?",
                     (now, session_id),
                 )
-                conn.commit()
-                existing.updated_at = now
-            finally:
-                if self.db_path != ":memory:":
-                    conn.close()
+            existing.updated_at = now
             return existing
 
         return self.create_session(title=title, session_id=session_id)
 
     def get_session(self, session_id: str) -> SessionMetadata | None:
         """Get session metadata and stats by ID."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             cursor = conn.execute(
                 "SELECT * FROM chat_sessions WHERE session_id = ?", (session_id,)
             )
@@ -190,14 +192,10 @@ class SessionService:
                 last_message=last_msg[:100],
                 metadata=meta,
             )
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def list_sessions(self) -> list[SessionMetadata]:
         """Return all tracked sessions sorted by most recent."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             cursor = conn.execute(
                 """
                 SELECT s.session_id, s.title, s.created_at, s.updated_at, s.metadata,
@@ -229,9 +227,6 @@ class SessionService:
                     )
                 )
             return results
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def update_session_title(
         self, session_id: str, title: str
@@ -241,35 +236,25 @@ class SessionService:
         if not clean_title:
             return None
 
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             now = time.time()
             cursor = conn.execute(
                 "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE session_id = ?",
                 (clean_title, now, session_id),
             )
-            conn.commit()
             if cursor.rowcount == 0:
                 return None
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
         return self.get_session(session_id)
 
     def delete_session(self, session_id: str) -> bool:
         """Remove a session and all its messages."""
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
             cursor = conn.execute(
                 "DELETE FROM chat_sessions WHERE session_id = ?", (session_id,)
             )
-            conn.commit()
             return cursor.rowcount > 0
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def add_message(
         self,
@@ -284,8 +269,7 @@ class SessionService:
         now = time.time()
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO chat_messages (id, session_id, role, content, tool_calls, created_at)
@@ -318,11 +302,6 @@ class SessionService:
                     (now, session_id),
                 )
 
-            conn.commit()
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
-
         return ChatMessageRecord(
             id=msg_id,
             session_id=session_id,
@@ -336,8 +315,7 @@ class SessionService:
         self, session_id: str, limit: int = 200
     ) -> list[ChatMessageRecord]:
         """Fetch chronological message history for a session."""
-        conn = self._get_connection()
-        try:
+        with self._db.read_connection() as conn:
             cursor = conn.execute(
                 """
                 SELECT id, session_id, role, content, tool_calls, created_at
@@ -367,22 +345,14 @@ class SessionService:
                     )
                 )
             return messages
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
     def clear_session_messages(self, session_id: str) -> bool:
         """Remove all messages for a session while retaining session metadata."""
-        conn = self._get_connection()
-        try:
+        with self._db.transaction() as conn:
             cursor = conn.execute(
                 "DELETE FROM chat_messages WHERE session_id = ?", (session_id,)
             )
-            conn.commit()
             return cursor.rowcount > 0
-        finally:
-            if self.db_path != ":memory:":
-                conn.close()
 
 
 _global_session_service: SessionService | None = None
