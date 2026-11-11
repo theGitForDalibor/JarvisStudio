@@ -223,11 +223,13 @@ def create_verified_backup(
             f"SQLite Backup API failed for {src_path} -> {bak_path}: {exc}"
         ) from exc
     finally:
-        if dst_conn is not None:
-            dst_conn.close()
-        src_conn.close()
-        if not backup_completed and bak_path.exists():
-            bak_path.unlink(missing_ok=True)
+        try:
+            if dst_conn is not None:
+                dst_conn.close()
+        finally:
+            src_conn.close()
+            if not backup_completed and bak_path.exists():
+                bak_path.unlink(missing_ok=True)
 
     verify_sqlite_backup(bak_path, expected_version=from_version)
     return bak_path

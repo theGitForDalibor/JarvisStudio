@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import sqlite_vec
 
+from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.trace_logger import ConversationTrace, TraceStore
 from jarvis_studio.core.persistence import (
     APP_SCHEMA_VERSION,
@@ -27,6 +28,7 @@ from jarvis_studio.core.persistence import (
     verify_sqlite_backup,
 )
 from jarvis_studio.core.persistence import migrations as migrations_mod
+from jarvis_studio.core.persistence.sqlite import get_path_lock
 from jarvis_studio.memory.models import MemoryCategory, MemoryItem
 from jarvis_studio.memory.store import MemoryStore
 from jarvis_studio.rag.splitter import DocumentChunk
@@ -84,6 +86,42 @@ def test_open_sync_connection_pragmas_and_blank_path_guard(tmp_path: Path):
     finally:
         mem_conn.close()
     assert not (Path.cwd() / ":memory:").exists()
+    with pytest.raises(ValueError, match="does not apply to ':memory:'"):
+        get_path_lock(":memory:")
+
+
+def test_default_stores_resolve_to_isolated_temp_databases():
+    """Verify default Store construction resolves to pytest temp DBs, never project `data/`."""
+    settings = get_settings()
+    project_app_db = Path("data/jarvis_studio.db").resolve()
+    project_vec_db = Path("data/jarvis_vec.db").resolve()
+
+    assert Path(settings.storage.sqlite_path).resolve() != project_app_db
+    assert Path(settings.rag.vector_db_path).resolve() != project_vec_db
+
+    ss = SessionService()
+    ms = MemoryStore()
+    ts = TraceStore()
+    vs = SqliteVecStore()
+    try:
+        for store, forbidden in [
+            (ss, project_app_db),
+            (ms, project_app_db),
+            (ts, project_app_db),
+            (vs, project_vec_db),
+        ]:
+            with store._db.read_connection() as conn:
+                db_list = conn.execute("PRAGMA database_list").fetchall()
+            main_file = next(r["file"] for r in db_list if r["name"] == "main")
+            resolved = Path(main_file).resolve()
+            assert resolved != forbidden
+            assert resolved.parent == Path(settings.storage.sqlite_path).resolve().parent
+            assert resolved.exists()
+    finally:
+        vs.close()
+        ts.close()
+        ms.close()
+        ss.close()
 
 
 def test_open_sync_connection_closes_handle_on_setup_failure(
@@ -184,24 +222,72 @@ def test_backup_verification_blocks_corrupted_snapshots_and_preserves_old_backup
     with pytest.raises(BackupVerificationError, match="user_version mismatch"):
         verify_sqlite_backup(valid_bak, expected_version=0)
 
-    # Simulate backup verification raising during migration -> blocks migration & preserves files
-    def _fail_backup(*args, **kwargs):
-        raise BackupVerificationError("corrupt backup detected")
+    # Corrupt backup generated during real `create_verified_backup -> verify_sqlite_backup`
+    # must raise BackupVerificationError, abort migration, and leave user_version=0.
+    corrupted_paths: list[Path] = []
+    orig_backup_fn = migrations_mod.verify_sqlite_backup
 
-    monkeypatch.setattr(migrations_mod, "create_verified_backup", _fail_backup)
-    with pytest.raises(BackupVerificationError, match="corrupt backup detected"):
+    def _corrupt_snapshot_before_verify(backup_path, *, expected_version=None):
+        p = Path(backup_path)
+        corrupted_paths.append(p)
+        p.write_bytes(b"corrupted during snapshot write")
+        return orig_backup_fn(p, expected_version=expected_version)
+
+    monkeypatch.setattr(
+        migrations_mod, "verify_sqlite_backup", _corrupt_snapshot_before_verify
+    )
+    with pytest.raises(BackupVerificationError):
         run_app_migrations(app_db)
+    monkeypatch.undo()
+
+    assert len(corrupted_paths) == 1
+    assert corrupted_paths[0].exists()
+
+    # Seed user data first, then fail mid-`src_conn.backup()`: must clean incomplete
+    # backup artifact, close source/dest handles, and preserve pre-existing backups & data.
+    with sync_transaction(app_db) as seed_conn:
+        seed_conn.execute("CREATE TABLE IF NOT EXISTS keep_data (v INT)")
+        seed_conn.execute("INSERT INTO keep_data VALUES (42)")
+
+    pre_existing_baks = set(tmp_path.glob("studio.bak.*"))
+    backup_conn_closes: list[str] = []
+    real_connect = sqlite3.connect
+
+    class _TrackedSrcBackupConn(sqlite3.Connection):
+        def backup(self, target, *args, **kwargs):
+            raise sqlite3.OperationalError("simulated I/O error mid-backup")
+
+        def close(self) -> None:
+            backup_conn_closes.append("src")
+            super().close()
+
+    def _spy_open_for_backup(db_path, **kwargs):
+        return real_connect(
+            str(db_path),
+            isolation_level=None,
+            check_same_thread=False,
+            factory=_TrackedSrcBackupConn,
+        )
+
+    monkeypatch.setattr(migrations_mod, "open_sync_connection", _spy_open_for_backup)
+    with pytest.raises(BackupVerificationError, match="Backup API failed"):
+        run_app_migrations(app_db)
+    monkeypatch.undo()
+
+    # Source connection closed, incomplete backup cleaned up, pre-existing backups untouched
+    assert "src" in backup_conn_closes
+    assert pre_existing_baks == set(tmp_path.glob("studio.bak.*"))
 
     conn = open_sync_connection(app_db)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert conn.execute("SELECT v FROM keep_data").fetchone()[0] == 42
     finally:
         conn.close()
     assert corrupt_bak.exists()
     assert valid_bak.exists()
 
     # Negative user_version must fail with MigrationError before touching anything
-    monkeypatch.undo()
     with sync_transaction(app_db) as neg_conn:
         neg_conn.execute("PRAGMA user_version = -1")
     with pytest.raises(MigrationError, match="negative"):
@@ -256,13 +342,15 @@ def test_in_memory_stores_isolated_and_idempotent_close(
         assert ss1.get_session(s1.session_id) is not None
         assert ss2.get_session(s1.session_id) is None
 
-    # Re-check idempotent close and post-close guard on all 4 Stores
+    # Re-check idempotent close and post-close guard on all 4 Stores (read & write)
     ss = SessionService(":memory:")
     ss.close()
     ss.close()
     assert ss._in_memory_conn is None
     with pytest.raises(RuntimeError, match="closed"):
         ss.create_session("after close")
+    with pytest.raises(RuntimeError, match="closed"):
+        ss.get_session("after close")
 
     ms1 = MemoryStore(":memory:")
     ms2 = MemoryStore(":memory:")
@@ -273,6 +361,10 @@ def test_in_memory_stores_isolated_and_idempotent_close(
     ms1.close()
     ms2.close()
     assert ms1._in_memory_conn is None
+    with pytest.raises(RuntimeError, match="closed"):
+        ms1.add(MemoryItem(id="b", category=MemoryCategory.FACT, content="closed"))
+    with pytest.raises(RuntimeError, match="closed"):
+        ms1.get("a")
 
     ts1 = TraceStore(":memory:")
     ts2 = TraceStore(":memory:")
@@ -282,8 +374,13 @@ def test_in_memory_stores_isolated_and_idempotent_close(
     assert ts1.get_trace(tr.trace_id) is not None
     assert ts2.get_trace(tr.trace_id) is None
     ts1.close()
+    ts1.close()
     ts2.close()
     assert ts1._in_memory_conn is None
+    with pytest.raises(RuntimeError, match="closed"):
+        ts1.save_trace(tr)
+    with pytest.raises(RuntimeError, match="closed"):
+        ts1.list_traces()
 
     vs1 = SqliteVecStore(":memory:", dimension=4)
     vs2 = SqliteVecStore(":memory:", dimension=4)
@@ -292,8 +389,13 @@ def test_in_memory_stores_isolated_and_idempotent_close(
     assert vs1.get_file_hash("f.txt") == "fh"
     assert vs2.get_file_hash("f.txt") is None
     vs1.close()
+    vs1.close()
     vs2.close()
     assert vs1._in_memory_conn is None
+    with pytest.raises(RuntimeError, match="closed"):
+        vs1.add_chunks([ch], [[1.0, 0.0, 0.0, 0.0]])
+    with pytest.raises(RuntimeError, match="closed"):
+        vs1.get_file_hash("f.txt")
 
     assert list(tmp_path.iterdir()) == []
 
@@ -362,6 +464,97 @@ def test_sync_transaction_forbids_nested_transaction_without_breaking_outer(
         verify_conn.close()
 
 
+def test_sync_transaction_commit_and_rollback_failure_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify connection cleanup and original error preservation when COMMIT or ROLLBACK fails."""
+    disk_db = tmp_path / "commit_rb_fail.db"
+    initialize_sqlite_database(disk_db)
+    with sync_transaction(disk_db) as conn:
+        conn.execute("CREATE TABLE items (id INT PRIMARY KEY)")
+
+    real_connect = sqlite3.connect
+    tracked_records: list[dict[str, object]] = []
+    fail_on_sql: dict[str, str | None] = {"target": "COMMIT"}
+
+    class _TxFaultConn(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._rec: dict[str, object] = {
+                "conn": self,
+                "closed": False,
+                "in_tx_at_close": None,
+            }
+            tracked_records.append(self._rec)
+
+        def execute(self, sql: str, *args, **kwargs):
+            if fail_on_sql["target"] and sql.strip().upper() == fail_on_sql["target"]:
+                raise sqlite3.OperationalError(f"simulated {fail_on_sql['target']} failure")
+            return super().execute(sql, *args, **kwargs)
+
+        def close(self) -> None:
+            self._rec["in_tx_at_close"] = self.in_transaction
+            try:
+                super().close()
+            finally:
+                self._rec["closed"] = True
+
+    def _spy_connect(*args, **kwargs):
+        kwargs["factory"] = _TxFaultConn
+        return real_connect(*args, **kwargs)
+
+    # 1. Disk COMMIT failure -> rolls back, closes conn, leaves zero uncommitted rows
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect)
+    with (
+        pytest.raises(sqlite3.OperationalError, match="simulated COMMIT failure"),
+        sync_transaction(disk_db) as tx_conn,
+    ):
+        tx_conn.execute("INSERT INTO items VALUES (1)")
+    monkeypatch.undo()
+
+    assert len(tracked_records) == 1
+    assert tracked_records[0]["closed"] is True
+    assert tracked_records[0]["in_tx_at_close"] is False
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        tracked_records[0]["conn"].execute("SELECT 1")  # type: ignore[union-attr]
+
+    check = open_sync_connection(disk_db)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
+    finally:
+        check.close()
+
+    # 2. In-memory COMMIT failure -> rolls back tx cleanly and does NOT close shared conn
+    mem_conn = real_connect(":memory:", isolation_level=None, factory=_TxFaultConn)
+    try:
+        mem_conn.execute("CREATE TABLE mem_items (id INT)")
+        tracked_records[-1]["closed"] = False
+        with (
+            pytest.raises(sqlite3.OperationalError, match="simulated COMMIT failure"),
+            sync_transaction(":memory:", in_memory_conn=mem_conn),
+        ):
+            mem_conn.execute("INSERT INTO mem_items VALUES (7)")
+        assert mem_conn.in_transaction is False
+        assert tracked_records[-1]["closed"] is False
+        assert mem_conn.execute("SELECT COUNT(*) FROM mem_items").fetchone()[0] == 0
+    finally:
+        mem_conn.close()
+
+    # 3. Disk ROLLBACK failure -> closes disk conn AND preserves original application error
+    fail_on_sql["target"] = "ROLLBACK"
+    tracked_records.clear()
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect)
+    with pytest.raises(ValueError, match="primary app error"), sync_transaction(disk_db) as tx_conn:
+        tx_conn.execute("INSERT INTO items VALUES (2)")
+        raise ValueError("primary app error")
+    monkeypatch.undo()
+
+    assert len(tracked_records) == 1
+    assert tracked_records[0]["closed"] is True
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        tracked_records[0]["conn"].execute("SELECT 1")  # type: ignore[union-attr]
+
+
 def test_sqlite_vec_extension_lockdown_and_dedup(monkeypatch: pytest.MonkeyPatch):
     """Verify enable_load_extension is disabled after load (even on error) and dedup works."""
     load_calls = 0
@@ -405,50 +598,75 @@ def test_sqlite_vec_extension_lockdown_and_dedup(monkeypatch: pytest.MonkeyPatch
 def test_memory_store_init_failure_does_not_leak_disk_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Verify fixing MemoryStore._init_db() closes disk connection even when DDL fails."""
+    """Verify every created connection (and specifically the failing DDL connection) closes cleanly."""
     db_file = tmp_path / "leak_check.db"
     initialize_sqlite_database(db_file)
     run_app_migrations(db_file)
-    # Remove ltm_memories so MemoryStore._init_db enters DDL path
+    # Remove ltm_memories so MemoryStore._init_db enters DDL transaction path
     with sync_transaction(db_file) as conn:
         conn.execute("DROP TABLE ltm_memories")
 
-    closed_count = 0
-    real_open = open_sync_connection
+    real_connect = sqlite3.connect
+    records: list[dict[str, object]] = []
 
-    class _SpyConn:
-        def __init__(self, inner: sqlite3.Connection):
-            self._inner = inner
-
-        def __getattr__(self, name: str):
-            return getattr(self._inner, name)
+    class _TrackedInitConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._rec: dict[str, object] = {
+                "conn": self,
+                "closed": False,
+                "hit_target_ddl": False,
+                "in_tx_at_close": None,
+            }
+            records.append(self._rec)
 
         def execute(self, sql: str, *args, **kwargs):
             if "CREATE TABLE IF NOT EXISTS ltm_memories" in sql:
+                self._rec["hit_target_ddl"] = True
                 raise sqlite3.OperationalError("simulated init DDL error")
-            return self._inner.execute(sql, *args, **kwargs)
+            return super().execute(sql, *args, **kwargs)
 
         def close(self) -> None:
-            nonlocal closed_count
-            closed_count += 1
-            self._inner.close()
+            self._rec["in_tx_at_close"] = self.in_transaction
+            try:
+                super().close()
+            finally:
+                self._rec["closed"] = True
 
-    def _spy_open(*args, **kwargs):
-        return _SpyConn(real_open(*args, **kwargs))
+    def _spy_connect(*args, **kwargs):
+        kwargs["factory"] = _TrackedInitConnection
+        return real_connect(*args, **kwargs)
 
-    monkeypatch.setattr(
-        "jarvis_studio.core.persistence.sqlite.open_sync_connection", _spy_open
-    )
-
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect)
     with pytest.raises(sqlite3.OperationalError, match="simulated init DDL error"):
         MemoryStore(db_path=str(db_file))
+    monkeypatch.undo()
 
-    assert closed_count >= 1
+    # Every disk connection opened during MemoryStore.__init__ must be accounted for & closed
+    assert len(records) >= 4
+    target_conns = [r for r in records if r["hit_target_ddl"]]
+    assert len(target_conns) == 1
+    target = target_conns[0]
+    assert target["closed"] is True
+    assert target["in_tx_at_close"] is False
+    assert [r for r in records if not r["closed"]] == []
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        target["conn"].execute("SELECT 1")  # type: ignore[union-attr]
+
+    # Verify DB has no lingering write lock or active transaction afterward
+    with sync_transaction(db_file) as verify_conn:
+        verify_conn.execute("CREATE TABLE probe_post_err (id INT)")
+        assert (
+            verify_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ltm_memories'"
+            ).fetchone()
+            is None
+        )
 
 
 def test_concurrent_multithread_in_memory_and_disk_writes(tmp_path: Path):
     """Verify multi-threaded mixed writes succeed on shared :memory: and disk Stores."""
-    # 1. Shared :memory: Store across 6 threads -> RLock must avoid false NestedTransactionError
+    # 1. Shared :memory: MemoryStore across 6 threads -> RLock avoids false NestedTransactionError
     with MemoryStore(":memory:") as mem_store:
         workers = 6
         per_worker = 10
@@ -472,7 +690,31 @@ def test_concurrent_multithread_in_memory_and_disk_writes(tmp_path: Path):
 
         assert len(mem_store.list(limit=100)) == workers * per_worker
 
-    # 2. Concurrent multi-Store initialization & mixed writes on fresh shared disk DB
+    # 2. Shared :memory: SqliteVecStore across 4 threads (concurrent writes + searches)
+    with SqliteVecStore(":memory:", dimension=8) as mem_vec:
+        vec_workers = 4
+        vec_barrier = threading.Barrier(vec_workers)
+
+        def _mem_vec_worker(idx: int) -> None:
+            vec_barrier.wait(timeout=5.0)
+            vec = [float(idx + 1)] + [0.1] * 7
+            ch = DocumentChunk(
+                chunk_id=f"mvc_{idx}",
+                doc_path=f"mem_doc_{idx}.md",
+                chunk_index=0,
+                content=f"memory vec {idx}",
+            )
+            assert mem_vec.add_chunks([ch], [vec], file_hash=f"mh_{idx}") == 1
+            matches = mem_vec.search(vec, top_k=2)
+            assert len(matches) >= 1
+
+        with ThreadPoolExecutor(max_workers=vec_workers) as pool:
+            for fut in [pool.submit(_mem_vec_worker, i) for i in range(vec_workers)]:
+                fut.result()
+
+        assert len(mem_vec.list_indexed_files()) == vec_workers
+
+    # 3. Concurrent multi-Store initialization & mixed writes on fresh shared disk DB
     disk_db = str(tmp_path / "concurrent_app.db")
     disk_workers = 6
     disk_barrier = threading.Barrier(disk_workers)
@@ -508,3 +750,30 @@ def test_concurrent_multithread_in_memory_and_disk_writes(tmp_path: Path):
     assert len(ts_check.list_traces(limit=50)) == disk_workers
     backups = list(tmp_path.glob("concurrent_app.bak.v0_to_v1.*.db"))
     assert len(backups) == 1
+
+    # 4. Concurrent SqliteVecStore initialization & writes/searches on fresh disk vector DB
+    disk_vec_db = str(tmp_path / "concurrent_vec.db")
+    vec_disk_workers = 4
+    vec_disk_barrier = threading.Barrier(vec_disk_workers)
+
+    def _disk_vec_worker(idx: int) -> None:
+        vec_disk_barrier.wait(timeout=5.0)
+        vs = SqliteVecStore(db_path=disk_vec_db, dimension=8)
+        vec = [float(idx + 1)] + [0.25] * 7
+        ch = DocumentChunk(
+            chunk_id=f"dvc_{idx}",
+            doc_path=f"disk_doc_{idx}.md",
+            chunk_index=0,
+            content=f"disk vec {idx}",
+        )
+        assert vs.add_chunks([ch], [vec], file_hash=f"dh_{idx}") == 1
+        assert len(vs.search(vec, top_k=2)) >= 1
+
+    with ThreadPoolExecutor(max_workers=vec_disk_workers) as pool:
+        for fut in [pool.submit(_disk_vec_worker, i) for i in range(vec_disk_workers)]:
+            fut.result()
+
+    vs_check = SqliteVecStore(db_path=disk_vec_db, dimension=8)
+    assert len(vs_check.list_indexed_files()) == vec_disk_workers
+    vec_backups = list(tmp_path.glob("concurrent_vec.bak.v0_to_v1.*.db"))
+    assert len(vec_backups) == 1

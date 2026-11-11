@@ -30,7 +30,10 @@ _PATH_LOCKS: dict[str, threading.RLock] = {}
 
 def get_path_lock(db_path: str | Path) -> threading.RLock:
     """Return an in-process re-entrant lock keyed by canonical resolved DB path."""
-    key = str(Path(normalize_db_path(db_path)).resolve())
+    normalized = normalize_db_path(db_path)
+    if normalized == ":memory:":
+        raise ValueError("get_path_lock does not apply to ':memory:' databases")
+    key = str(Path(normalized).resolve())
     with _PATH_LOCKS_GUARD:
         lock = _PATH_LOCKS.get(key)
         if lock is None:
