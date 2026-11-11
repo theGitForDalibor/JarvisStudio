@@ -12,6 +12,7 @@ import logging
 import os
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -197,6 +198,19 @@ def verify_sqlite_backup(
         conn.close()
 
 
+def _run_cleanup_step(
+    cleanup_errors: list[BaseException],
+    description: str,
+    action: Callable[[], object],
+) -> None:
+    """Execute one backup cleanup step while keeping subsequent steps independent."""
+    try:
+        action()
+    except BaseException as exc:  # noqa: BLE001 - always recorded and re-raised/noted by caller
+        _logger.warning("%s: %s", description, exc)
+        cleanup_errors.append(exc)
+
+
 def create_verified_backup(
     db_path: str | Path,
     *,
@@ -212,24 +226,61 @@ def create_verified_backup(
     src_conn = open_sync_connection(src_path, enable_foreign_keys=False)
     dst_conn: sqlite3.Connection | None = None
     backup_completed = False
+    primary_exc: BaseException | None = None
     try:
-        dst_conn = sqlite3.connect(str(bak_path), isolation_level=None)
-        src_conn.backup(dst_conn)
-        # Keep the backup snapshot self-contained as a single file without WAL/SHM sidecars.
-        dst_conn.execute("PRAGMA journal_mode = DELETE")
-        backup_completed = True
-    except sqlite3.Error as exc:
-        raise BackupVerificationError(
-            f"SQLite Backup API failed for {src_path} -> {bak_path}: {exc}"
-        ) from exc
-    finally:
         try:
-            if dst_conn is not None:
-                dst_conn.close()
-        finally:
-            src_conn.close()
-            if not backup_completed and bak_path.exists():
-                bak_path.unlink(missing_ok=True)
+            dst_conn = sqlite3.connect(str(bak_path), isolation_level=None)
+            src_conn.backup(dst_conn)
+            # Keep the backup snapshot self-contained as a single file without WAL/SHM sidecars.
+            dst_conn.execute("PRAGMA journal_mode = DELETE")
+            backup_completed = True
+        except sqlite3.Error as exc:
+            primary_exc = BackupVerificationError(
+                f"SQLite Backup API failed for {src_path} -> {bak_path}: {exc}"
+            )
+            primary_exc.__cause__ = exc
+        except BaseException as exc:  # noqa: BLE001 - preserved and re-raised unchanged below
+            primary_exc = exc
+    finally:
+        cleanup_errors: list[BaseException] = []
+        if dst_conn is not None:
+            _run_cleanup_step(
+                cleanup_errors,
+                f"Failed closing backup destination connection {bak_path}",
+                dst_conn.close,
+            )
+        _run_cleanup_step(
+            cleanup_errors,
+            f"Failed closing backup source connection {src_path}",
+            src_conn.close,
+        )
+        if not backup_completed:
+            for artifact in (
+                bak_path,
+                Path(f"{bak_path}-journal"),
+                Path(f"{bak_path}-wal"),
+                Path(f"{bak_path}-shm"),
+            ):
+                _run_cleanup_step(
+                    cleanup_errors,
+                    f"Failed removing incomplete backup artifact {artifact}",
+                    lambda path=artifact: path.unlink(missing_ok=True),
+                )
+
+        if primary_exc is not None:
+            if cleanup_errors:
+                primary_exc.add_note(
+                    "Additional cleanup error(s) occurred during backup finalization: "
+                    + "; ".join(f"{type(e).__name__}: {e}" for e in cleanup_errors)
+                )
+            raise primary_exc
+        if len(cleanup_errors) == 1:
+            raise cleanup_errors[0]
+        if len(cleanup_errors) > 1:
+            raise BaseExceptionGroup(
+                "Multiple cleanup errors occurred while finalizing SQLite backup",
+                cleanup_errors,
+            )
 
     verify_sqlite_backup(bak_path, expected_version=from_version)
     return bak_path

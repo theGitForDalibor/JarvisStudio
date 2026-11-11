@@ -1,5 +1,7 @@
 """Tests for Phase 1 unified SQLite connection governance and dual-DB migrations."""
 
+import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -243,40 +245,79 @@ def test_backup_verification_blocks_corrupted_snapshots_and_preserves_old_backup
     assert len(corrupted_paths) == 1
     assert corrupted_paths[0].exists()
 
-    # Seed user data first, then fail mid-`src_conn.backup()`: must clean incomplete
-    # backup artifact, close source/dest handles, and preserve pre-existing backups & data.
+    # Seed user data first, then simulate a genuine mid-backup failure after partial bytes
+    # are written to the backup target: must unlink partial backup, close both src & dst
+    # handles, and preserve pre-existing backups & source DB data.
     with sync_transaction(app_db) as seed_conn:
         seed_conn.execute("CREATE TABLE IF NOT EXISTS keep_data (v INT)")
         seed_conn.execute("INSERT INTO keep_data VALUES (42)")
 
-    pre_existing_baks = set(tmp_path.glob("studio.bak.*"))
-    backup_conn_closes: list[str] = []
+    pre_existing_baks = {p: p.read_bytes() for p in tmp_path.glob("studio.bak.*")}
+    backup_conns: list[dict[str, object]] = []
+    partial_writes: list[tuple[Path, int]] = []
+    pending_conn_meta: dict[str, object] = {}
     real_connect = sqlite3.connect
 
-    class _TrackedSrcBackupConn(sqlite3.Connection):
+    class _TrackedBackupConn(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._rec: dict[str, object] = {
+                "role": pending_conn_meta.get("role"),
+                "path": pending_conn_meta.get("path"),
+                "conn": self,
+                "closed": False,
+            }
+            backup_conns.append(self._rec)
+
         def backup(self, target, *args, **kwargs):
+            # Materialize real partial SQLite pages in the backup file before failing mid-backup.
+            target.execute("CREATE TABLE _partial_backup_stage (payload BLOB)")
+            target.execute(
+                "INSERT INTO _partial_backup_stage VALUES (?)",
+                (b"partial-backup-chunk" * 512,),
+            )
+            dst_path = Path(str(target._rec["path"]))  # type: ignore[attr-defined]
+            assert dst_path.exists()
+            partial_size = dst_path.stat().st_size
+            assert partial_size > 0
+            partial_writes.append((dst_path, partial_size))
             raise sqlite3.OperationalError("simulated I/O error mid-backup")
 
         def close(self) -> None:
-            backup_conn_closes.append("src")
-            super().close()
+            try:
+                super().close()
+            finally:
+                self._rec["closed"] = True
 
-    def _spy_open_for_backup(db_path, **kwargs):
-        return real_connect(
-            str(db_path),
-            isolation_level=None,
-            check_same_thread=False,
-            factory=_TrackedSrcBackupConn,
-        )
+    def _spy_connect_for_backup(database, *args, **kwargs):
+        db_path_obj = Path(str(database))
+        pending_conn_meta["role"] = "dst" if ".bak." in db_path_obj.name else "src"
+        pending_conn_meta["path"] = db_path_obj
+        kwargs["factory"] = _TrackedBackupConn
+        return real_connect(database, *args, **kwargs)
 
-    monkeypatch.setattr(migrations_mod, "open_sync_connection", _spy_open_for_backup)
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect_for_backup)
     with pytest.raises(BackupVerificationError, match="Backup API failed"):
         run_app_migrations(app_db)
     monkeypatch.undo()
 
-    # Source connection closed, incomplete backup cleaned up, pre-existing backups untouched
-    assert "src" in backup_conn_closes
-    assert pre_existing_baks == set(tmp_path.glob("studio.bak.*"))
+    # Partial backup wrote bytes then was deleted; pre-existing backups untouched; src & dst closed
+    assert len(partial_writes) == 1
+    partial_bak_path, partial_written_bytes = partial_writes[0]
+    assert partial_written_bytes > 0
+    assert not partial_bak_path.exists()
+    for suffix in ("-journal", "-wal", "-shm"):
+        assert not Path(f"{partial_bak_path}{suffix}").exists()
+    assert {p: p.read_bytes() for p in tmp_path.glob("studio.bak.*")} == pre_existing_baks
+
+    src_records = [r for r in backup_conns if r["role"] == "src"]
+    dst_records = [r for r in backup_conns if r["role"] == "dst"]
+    assert len(src_records) >= 1
+    assert len(dst_records) == 1
+    for rec in backup_conns:
+        assert rec["closed"] is True
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            rec["conn"].execute("SELECT 1")  # type: ignore[union-attr]
 
     conn = open_sync_connection(app_db)
     try:
@@ -294,37 +335,232 @@ def test_backup_verification_blocks_corrupted_snapshots_and_preserves_old_backup
         run_app_migrations(app_db)
 
 
+def test_create_verified_backup_cleanup_fault_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify backup cleanup isolates close errors, removes failed files, and keeps completed ones."""
+    from jarvis_studio.core.persistence import create_verified_backup
+
+    app_db = tmp_path / "backup_faults.db"
+    initialize_sqlite_database(app_db)
+    with sync_transaction(app_db) as seed_conn:
+        seed_conn.execute("CREATE TABLE seed (id INT PRIMARY KEY)")
+        seed_conn.execute("INSERT INTO seed VALUES (10)")
+
+    real_connect = sqlite3.connect
+
+    # 1. Backup fails AND both dst_conn.close() and src_conn.close() fail:
+    #    - dst failure must not block src close
+    #    - src failure must not block incomplete backup unlink
+    #    - original BackupVerificationError must NOT be overwritten
+    close_attempts_fail: list[str] = []
+    dst_paths_fail: list[Path] = []
+    pending_meta: dict[str, object] = {}
+
+    class _FaultBothOnFailedBackup(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._role = str(pending_meta.get("role"))
+            if self._role == "dst":
+                dst_paths_fail.append(Path(str(pending_meta["path"])))
+
+        def backup(self, target, *args, **kwargs):
+            target.execute("CREATE TABLE _partial (x INT)")
+            target.execute("INSERT INTO _partial VALUES (1)")
+            raise sqlite3.OperationalError("simulated mid-backup failure")
+
+        def close(self) -> None:
+            close_attempts_fail.append(self._role)
+            try:
+                super().close()
+            finally:
+                if self._role == "dst":
+                    raise RuntimeError("simulated dst_conn.close() failure")
+                raise OSError("simulated src_conn.close() failure")
+
+    def _spy_connect_fail(database, *args, **kwargs):
+        db_path_obj = Path(str(database))
+        pending_meta["role"] = "dst" if ".bak." in db_path_obj.name else "src"
+        pending_meta["path"] = db_path_obj
+        kwargs["factory"] = _FaultBothOnFailedBackup
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect_fail)
+    with pytest.raises(BackupVerificationError, match="Backup API failed") as exc_info:
+        create_verified_backup(app_db, from_version=0, to_version=1)
+    monkeypatch.undo()
+
+    assert close_attempts_fail == ["dst", "src"]
+    assert len(dst_paths_fail) == 1
+    assert not dst_paths_fail[0].exists()
+    assert list(tmp_path.glob("backup_faults.bak.*")) == []
+    notes_text = "\n".join(getattr(exc_info.value, "__notes__", []))
+    assert "simulated dst_conn.close() failure" in notes_text
+    assert "simulated src_conn.close() failure" in notes_text
+
+    # 1b. Backup fails AND ONLY src_conn.close() fails (even without closing real handle before
+    # raising): incomplete backup artifact MUST still be cleaned up and BackupVerificationError kept.
+    src_close_only_attempts: list[str] = []
+    dst_paths_src_err: list[Path] = []
+    unclosed_src_handles: list[sqlite3.Connection] = []
+
+    class _FaultSrcOnlyOnFailedBackup(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._role = str(pending_meta.get("role"))
+            if self._role == "dst":
+                dst_paths_src_err.append(Path(str(pending_meta["path"])))
+
+        def backup(self, target, *args, **kwargs):
+            target.execute("CREATE TABLE _partial (x INT)")
+            target.execute("INSERT INTO _partial VALUES (2)")
+            raise sqlite3.OperationalError("simulated mid-backup failure 1b")
+
+        def close(self) -> None:
+            src_close_only_attempts.append(self._role)
+            if self._role == "src":
+                unclosed_src_handles.append(self)
+                raise OSError("direct src_conn.close() failure")
+            super().close()
+
+    def _spy_connect_src_err(database, *args, **kwargs):
+        db_path_obj = Path(str(database))
+        pending_meta["role"] = "dst" if ".bak." in db_path_obj.name else "src"
+        pending_meta["path"] = db_path_obj
+        kwargs["factory"] = _FaultSrcOnlyOnFailedBackup
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect_src_err)
+    try:
+        with pytest.raises(BackupVerificationError, match="Backup API failed") as exc_src_info:
+            create_verified_backup(app_db, from_version=0, to_version=1)
+    finally:
+        monkeypatch.undo()
+        for handle in unclosed_src_handles:
+            sqlite3.Connection.close(handle)
+
+    assert src_close_only_attempts == ["dst", "src"]
+    assert len(dst_paths_src_err) == 1
+    assert not dst_paths_src_err[0].exists()
+    assert list(tmp_path.glob("backup_faults.bak.*")) == []
+    assert "direct src_conn.close() failure" in "\n".join(
+        getattr(exc_src_info.value, "__notes__", [])
+    )
+
+    # 2. Backup succeeds AND dst_conn.close() fails:
+    #    - src_conn.close() still runs
+    #    - close error propagates (not swallowed)
+    #    - completed backup file MUST NOT be deleted
+    close_attempts_dst_err: list[str] = []
+    dst_paths_ok_1: list[Path] = []
+
+    class _FaultDstAfterCompletedBackup(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._role = str(pending_meta.get("role"))
+            if self._role == "dst":
+                dst_paths_ok_1.append(Path(str(pending_meta["path"])))
+
+        def close(self) -> None:
+            close_attempts_dst_err.append(self._role)
+            try:
+                super().close()
+            finally:
+                if self._role == "dst":
+                    raise RuntimeError("post-backup dst close error")
+
+    def _spy_connect_dst_err(database, *args, **kwargs):
+        db_path_obj = Path(str(database))
+        pending_meta["role"] = "dst" if ".bak." in db_path_obj.name else "src"
+        pending_meta["path"] = db_path_obj
+        kwargs["factory"] = _FaultDstAfterCompletedBackup
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect_dst_err)
+    with pytest.raises(RuntimeError, match="post-backup dst close error"):
+        create_verified_backup(app_db, from_version=0, to_version=1)
+    monkeypatch.undo()
+
+    assert close_attempts_dst_err == ["dst", "src"]
+    assert len(dst_paths_ok_1) == 1
+    assert dst_paths_ok_1[0].exists()
+    assert verify_sqlite_backup(dst_paths_ok_1[0], expected_version=0) == 0
+
+    # 3. Backup succeeds AND both dst_conn.close() and src_conn.close() fail:
+    #    - both errors preserved via ExceptionGroup
+    #    - completed backup file MUST still remain intact
+    close_attempts_both_err: list[str] = []
+    dst_paths_ok_2: list[Path] = []
+
+    class _FaultBothAfterCompletedBackup(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._role = str(pending_meta.get("role"))
+            if self._role == "dst":
+                dst_paths_ok_2.append(Path(str(pending_meta["path"])))
+
+        def close(self) -> None:
+            close_attempts_both_err.append(self._role)
+            try:
+                super().close()
+            finally:
+                if self._role == "dst":
+                    raise RuntimeError("post-backup dst close error 2")
+                raise OSError("post-backup src close error 2")
+
+    def _spy_connect_both_err(database, *args, **kwargs):
+        db_path_obj = Path(str(database))
+        pending_meta["role"] = "dst" if ".bak." in db_path_obj.name else "src"
+        pending_meta["path"] = db_path_obj
+        kwargs["factory"] = _FaultBothAfterCompletedBackup
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect_both_err)
+    with pytest.raises(ExceptionGroup) as eg_info:
+        create_verified_backup(app_db, from_version=0, to_version=1)
+    monkeypatch.undo()
+
+    assert close_attempts_both_err == ["dst", "src"]
+    sub_messages = [str(e) for e in eg_info.value.exceptions]
+    assert "post-backup dst close error 2" in sub_messages
+    assert "post-backup src close error 2" in sub_messages
+    assert len(dst_paths_ok_2) == 1
+    assert dst_paths_ok_2[0].exists()
+    assert verify_sqlite_backup(dst_paths_ok_2[0], expected_version=0) == 0
+
+
 def test_shared_app_db_multi_store_init_and_dynamic_vec_dimension(tmp_path: Path):
     """Verify shared app DB across Stores regardless of order & vec dimension flexibility."""
     app_db = str(tmp_path / "shared_app.db")
     vec_db = str(tmp_path / "custom_vec.db")
 
     # Initialize SessionService FIRST (advances user_version to 1), then MemoryStore & TraceStore
-    ss = SessionService(db_path=app_db)
-    ms = MemoryStore(db_path=app_db)
-    ts = TraceStore(db_path=app_db)
+    with (
+        SessionService(db_path=app_db) as ss,
+        MemoryStore(db_path=app_db) as ms,
+        TraceStore(db_path=app_db) as ts,
+    ):
+        sess = ss.create_session(title="Shared DB Session")
+        ss.add_message(sess.session_id, "user", "hello")
+        ms.add(MemoryItem(id="m1", category=MemoryCategory.FACT, content="shared disk fact"))
+        tr = ConversationTrace(session_id=sess.session_id, run_id="r1", query="hi")
+        tr.finish(output="done")
+        ts.save_trace(tr)
 
-    sess = ss.create_session(title="Shared DB Session")
-    ss.add_message(sess.session_id, "user", "hello")
-    ms.add(MemoryItem(id="m1", category=MemoryCategory.FACT, content="shared disk fact"))
-    tr = ConversationTrace(session_id=sess.session_id, run_id="r1", query="hi")
-    tr.finish(output="done")
-    ts.save_trace(tr)
-
-    assert len(ss.get_messages(sess.session_id)) == 1
-    assert ms.get("m1") is not None
-    assert ts.get_trace(tr.trace_id) is not None
+        assert len(ss.get_messages(sess.session_id)) == 1
+        assert ms.get("m1") is not None
+        assert ts.get_trace(tr.trace_id) is not None
 
     # Vector store with custom dimension=32 must not fail from v0->v1 migration
-    vs = SqliteVecStore(db_path=vec_db, dimension=32)
-    chunk = DocumentChunk(chunk_id="c1", doc_path="doc.md", chunk_index=0, content="hello vec")
-    vec = [0.25] * 32
-    assert vs.add_chunks([chunk], [vec], file_hash="h1") == 1
-    assert len(vs.search(vec, top_k=1)) == 1
+    with SqliteVecStore(db_path=vec_db, dimension=32) as vs:
+        chunk = DocumentChunk(chunk_id="c1", doc_path="doc.md", chunk_index=0, content="hello vec")
+        vec = [0.25] * 32
+        assert vs.add_chunks([chunk], [vec], file_hash="h1") == 1
+        assert len(vs.search(vec, top_k=1)) == 1
 
     # Re-open on same DB reads WAL + v1 cleanly
-    vs2 = SqliteVecStore(db_path=vec_db, dimension=32)
-    assert vs2.get_file_hash("doc.md") == "h1"
+    with SqliteVecStore(db_path=vec_db, dimension=32) as vs2:
+        assert vs2.get_file_hash("doc.md") == "h1"
 
 
 def test_in_memory_stores_isolated_and_idempotent_close(
@@ -465,7 +701,7 @@ def test_sync_transaction_forbids_nested_transaction_without_breaking_outer(
 
 
 def test_sync_transaction_commit_and_rollback_failure_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
     """Verify connection cleanup and original error preservation when COMMIT or ROLLBACK fails."""
     disk_db = tmp_path / "commit_rb_fail.db"
@@ -484,11 +720,20 @@ def test_sync_transaction_commit_and_rollback_failure_cleanup(
                 "conn": self,
                 "closed": False,
                 "in_tx_at_close": None,
+                "executed_sql": [],
+                "faults_triggered": [],
             }
             tracked_records.append(self._rec)
 
         def execute(self, sql: str, *args, **kwargs):
-            if fail_on_sql["target"] and sql.strip().upper() == fail_on_sql["target"]:
+            normalized_sql = sql.strip().upper()
+            executed_sql = self._rec["executed_sql"]
+            assert isinstance(executed_sql, list)
+            executed_sql.append(normalized_sql)
+            if fail_on_sql["target"] and normalized_sql == fail_on_sql["target"]:
+                faults_triggered = self._rec["faults_triggered"]
+                assert isinstance(faults_triggered, list)
+                faults_triggered.append(normalized_sql)
                 raise sqlite3.OperationalError(f"simulated {fail_on_sql['target']} failure")
             return super().execute(sql, *args, **kwargs)
 
@@ -513,6 +758,9 @@ def test_sync_transaction_commit_and_rollback_failure_cleanup(
     monkeypatch.undo()
 
     assert len(tracked_records) == 1
+    assert "BEGIN IMMEDIATE" in tracked_records[0]["executed_sql"]  # type: ignore[operator]
+    assert "COMMIT" in tracked_records[0]["executed_sql"]  # type: ignore[operator]
+    assert tracked_records[0]["faults_triggered"] == ["COMMIT"]
     assert tracked_records[0]["closed"] is True
     assert tracked_records[0]["in_tx_at_close"] is False
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
@@ -534,25 +782,40 @@ def test_sync_transaction_commit_and_rollback_failure_cleanup(
             sync_transaction(":memory:", in_memory_conn=mem_conn),
         ):
             mem_conn.execute("INSERT INTO mem_items VALUES (7)")
+        assert tracked_records[-1]["faults_triggered"] == ["COMMIT"]
         assert mem_conn.in_transaction is False
         assert tracked_records[-1]["closed"] is False
         assert mem_conn.execute("SELECT COUNT(*) FROM mem_items").fetchone()[0] == 0
     finally:
         mem_conn.close()
 
-    # 3. Disk ROLLBACK failure -> closes disk conn AND preserves original application error
+    # 3. Disk ROLLBACK failure -> confirms ROLLBACK attempt & fault trigger, preserves original error, closes conn
     fail_on_sql["target"] = "ROLLBACK"
     tracked_records.clear()
     monkeypatch.setattr(sqlite3, "connect", _spy_connect)
-    with pytest.raises(ValueError, match="primary app error"), sync_transaction(disk_db) as tx_conn:
+    with (
+        caplog.at_level(logging.WARNING, logger="jarvis_studio.core.persistence.sqlite"),
+        pytest.raises(ValueError, match="primary app error"),
+        sync_transaction(disk_db) as tx_conn,
+    ):
         tx_conn.execute("INSERT INTO items VALUES (2)")
         raise ValueError("primary app error")
     monkeypatch.undo()
 
     assert len(tracked_records) == 1
+    assert "BEGIN IMMEDIATE" in tracked_records[0]["executed_sql"]  # type: ignore[operator]
+    assert "ROLLBACK" in tracked_records[0]["executed_sql"]  # type: ignore[operator]
+    assert tracked_records[0]["faults_triggered"] == ["ROLLBACK"]
+    assert "simulated ROLLBACK failure" in caplog.text
     assert tracked_records[0]["closed"] is True
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         tracked_records[0]["conn"].execute("SELECT 1")  # type: ignore[union-attr]
+
+    check_after_rb = open_sync_connection(disk_db)
+    try:
+        assert check_after_rb.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
+    finally:
+        check_after_rb.close()
 
 
 def test_sqlite_vec_extension_lockdown_and_dedup(monkeypatch: pytest.MonkeyPatch):
@@ -721,33 +984,37 @@ def test_concurrent_multithread_in_memory_and_disk_writes(tmp_path: Path):
 
     def _disk_worker(idx: int) -> None:
         disk_barrier.wait(timeout=5.0)
-        ss = SessionService(db_path=disk_db)
-        ms = MemoryStore(db_path=disk_db)
-        ts = TraceStore(db_path=disk_db)
-        sess = ss.create_session(title=f"Sess {idx}", session_id=f"sess_t_{idx}")
-        ss.add_message(sess.session_id, "user", f"msg from {idx}")
-        ms.add(
-            MemoryItem(
-                id=f"dm_{idx}",
-                category=MemoryCategory.FACT,
-                content=f"disk fact {idx}",
+        with (
+            SessionService(db_path=disk_db) as ss,
+            MemoryStore(db_path=disk_db) as ms,
+            TraceStore(db_path=disk_db) as ts,
+        ):
+            sess = ss.create_session(title=f"Sess {idx}", session_id=f"sess_t_{idx}")
+            ss.add_message(sess.session_id, "user", f"msg from {idx}")
+            ms.add(
+                MemoryItem(
+                    id=f"dm_{idx}",
+                    category=MemoryCategory.FACT,
+                    content=f"disk fact {idx}",
+                )
             )
-        )
-        tr = ConversationTrace(session_id=sess.session_id, run_id=f"r_{idx}", query="q")
-        tr.finish(output="ok")
-        ts.save_trace(tr)
+            tr = ConversationTrace(session_id=sess.session_id, run_id=f"r_{idx}", query="q")
+            tr.finish(output="ok")
+            ts.save_trace(tr)
 
     with ThreadPoolExecutor(max_workers=disk_workers) as pool:
         futures = [pool.submit(_disk_worker, i) for i in range(disk_workers)]
         for fut in futures:
             fut.result()
 
-    ss_check = SessionService(db_path=disk_db)
-    ms_check = MemoryStore(db_path=disk_db)
-    ts_check = TraceStore(db_path=disk_db)
-    assert len(ss_check.list_sessions()) == disk_workers
-    assert len(ms_check.list(limit=50)) == disk_workers
-    assert len(ts_check.list_traces(limit=50)) == disk_workers
+    with (
+        SessionService(db_path=disk_db) as ss_check,
+        MemoryStore(db_path=disk_db) as ms_check,
+        TraceStore(db_path=disk_db) as ts_check,
+    ):
+        assert len(ss_check.list_sessions()) == disk_workers
+        assert len(ms_check.list(limit=50)) == disk_workers
+        assert len(ts_check.list_traces(limit=50)) == disk_workers
     backups = list(tmp_path.glob("concurrent_app.bak.v0_to_v1.*.db"))
     assert len(backups) == 1
 
@@ -758,22 +1025,178 @@ def test_concurrent_multithread_in_memory_and_disk_writes(tmp_path: Path):
 
     def _disk_vec_worker(idx: int) -> None:
         vec_disk_barrier.wait(timeout=5.0)
-        vs = SqliteVecStore(db_path=disk_vec_db, dimension=8)
-        vec = [float(idx + 1)] + [0.25] * 7
-        ch = DocumentChunk(
-            chunk_id=f"dvc_{idx}",
-            doc_path=f"disk_doc_{idx}.md",
-            chunk_index=0,
-            content=f"disk vec {idx}",
-        )
-        assert vs.add_chunks([ch], [vec], file_hash=f"dh_{idx}") == 1
-        assert len(vs.search(vec, top_k=2)) >= 1
+        with SqliteVecStore(db_path=disk_vec_db, dimension=8) as vs:
+            vec = [float(idx + 1)] + [0.25] * 7
+            ch = DocumentChunk(
+                chunk_id=f"dvc_{idx}",
+                doc_path=f"disk_doc_{idx}.md",
+                chunk_index=0,
+                content=f"disk vec {idx}",
+            )
+            assert vs.add_chunks([ch], [vec], file_hash=f"dh_{idx}") == 1
+            assert len(vs.search(vec, top_k=2)) >= 1
 
     with ThreadPoolExecutor(max_workers=vec_disk_workers) as pool:
         for fut in [pool.submit(_disk_vec_worker, i) for i in range(vec_disk_workers)]:
             fut.result()
 
-    vs_check = SqliteVecStore(db_path=disk_vec_db, dimension=8)
-    assert len(vs_check.list_indexed_files()) == vec_disk_workers
+    with SqliteVecStore(db_path=disk_vec_db, dimension=8) as vs_check:
+        assert len(vs_check.list_indexed_files()) == vec_disk_workers
     vec_backups = list(tmp_path.glob("concurrent_vec.bak.v0_to_v1.*.db"))
     assert len(vec_backups) == 1
+
+
+def test_conftest_lifecycle_teardown_fault_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify conftest singleton reset & session teardown survive Store.close() exceptions."""
+    import jarvis_studio.agent.checkpoints.saver as saver_mod
+    import jarvis_studio.agent.hitl.manager as hitl_mod
+    import jarvis_studio.config.settings as settings_mod
+    import jarvis_studio.core.guard.route_guard as guard_mod
+    import jarvis_studio.core.observability.trace_logger as trace_mod
+    import jarvis_studio.memory.manager as mem_mod
+    import jarvis_studio.service.agent_service as agent_mod
+    import jarvis_studio.service.session_service as sess_mod
+    import jarvis_studio.tools.registry as reg_mod
+
+    conftest_mod = next(
+        mod
+        for mod in sys.modules.values()
+        if getattr(mod, "__file__", None)
+        and Path(mod.__file__).name == "conftest.py"
+        and Path(mod.__file__).parent.name == "tests"
+    )
+
+    events: list[str] = []
+
+    class _FakeStore:
+        def __init__(self, label: str, *, fail: bool = False) -> None:
+            self.label = label
+            self.fail = fail
+            self.closed = False
+
+        def close(self) -> None:
+            events.append(f"close:{self.label}")
+            self.closed = True
+            if self.fail:
+                raise RuntimeError(f"boom closing {self.label}")
+
+    class _FakeMemMgr:
+        def __init__(self, store: _FakeStore) -> None:
+            self.store = store
+
+    class _FakeAgentSvc:
+        def __init__(self, ss: _FakeStore, hitl: "_FakeHITL") -> None:
+            self.session_service = ss
+            self.hitl_manager = hitl
+
+    class _FakeHITL:
+        def __init__(self) -> None:
+            self.cleared = False
+
+        def clear(self) -> None:
+            events.append("clear:hitl")
+            self.cleared = True
+
+    # Production AgentService intentionally exposes no .close() lifecycle method
+    assert not hasattr(agent_mod.AgentService, "close")
+
+    agent_ss = _FakeStore("agent_ss", fail=True)
+    global_ss = _FakeStore("global_ss")
+    mem_store = _FakeStore("mem_store", fail=True)
+    trace_store = _FakeStore("trace_store")
+    hitl = _FakeHITL()
+
+    monkeypatch.setattr(agent_mod, "_global_agent_service", _FakeAgentSvc(agent_ss, hitl))  # type: ignore[arg-type]
+    monkeypatch.setattr(sess_mod, "_global_session_service", global_ss)
+    monkeypatch.setattr(mem_mod, "_global_memory_manager", _FakeMemMgr(mem_store))
+    monkeypatch.setattr(trace_mod, "_global_trace_store", trace_store)
+    monkeypatch.setattr(hitl_mod, "_global_hitl_manager", hitl)
+    monkeypatch.setattr(saver_mod, "_cached_checkpointer", object())
+    monkeypatch.setattr(guard_mod, "_global_guard", object())
+    monkeypatch.setattr(reg_mod, "_global_registry", object())
+    monkeypatch.setattr(settings_mod, "_global_settings", get_settings())
+
+    with pytest.raises(ExceptionGroup) as eg_info:
+        conftest_mod._reset_runtime_singletons(close_stores=True)
+
+    # All closeable targets ran despite two failures; all singletons were cleared
+    assert [str(e) for e in eg_info.value.exceptions] == [
+        "boom closing agent_ss",
+        "boom closing mem_store",
+    ]
+    assert events == [
+        "close:agent_ss",
+        "close:global_ss",
+        "close:mem_store",
+        "close:trace_store",
+        "clear:hitl",
+    ]
+    assert agent_mod._global_agent_service is None
+    assert sess_mod._global_session_service is None
+    assert mem_mod._global_memory_manager is None
+    assert trace_mod._global_trace_store is None
+    assert hitl_mod._global_hitl_manager is None
+    assert saver_mod._cached_checkpointer is None
+    assert guard_mod._global_guard is None
+    assert reg_mod._global_registry is None
+    assert settings_mod._global_settings is None
+
+    # Now verify _isolate_test_databases teardown STILL restores env vars & deletes temp dir
+    # even when _reset_runtime_singletons raises during teardown.
+    class _FakeFactory:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+
+        def mktemp(self, name: str) -> Path:
+            p = self.root / name
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+
+    inner_root = tmp_path / "fixture_teardown_probe"
+    orig_sqlite_env = os.environ.get("SQLITE_DB_PATH")
+    orig_vec_env = os.environ.get("VECTOR_DB_PATH")
+    monkeypatch.setenv("SQLITE_DB_PATH", "sentinel_sqlite.db")
+    monkeypatch.setenv("VECTOR_DB_PATH", "sentinel_vec.db")
+
+    gen = conftest_mod._isolate_test_databases.__wrapped__(_FakeFactory(inner_root))
+    yielded_dir = next(gen)
+    assert yielded_dir.exists()
+    assert os.environ["SQLITE_DB_PATH"] == str(yielded_dir / "jarvis_studio.db")
+    assert os.environ["VECTOR_DB_PATH"] == str(yielded_dir / "jarvis_vec.db")
+
+    # Inject single failing store for teardown
+    monkeypatch.setattr(trace_mod, "_global_trace_store", _FakeStore("teardown_trace", fail=True))
+
+    with pytest.raises(RuntimeError, match="boom closing teardown_trace"):
+        next(gen)
+
+    # Env vars MUST be restored to sentinels and temp directory MUST be deleted
+    assert os.environ["SQLITE_DB_PATH"] == "sentinel_sqlite.db"
+    assert os.environ["VECTOR_DB_PATH"] == "sentinel_vec.db"
+    assert not yielded_dir.exists()
+
+    # Double-fault fixture teardown: BOTH Store.close() AND rmtree fail ->
+    # env vars are STILL restored and BOTH errors are preserved via ExceptionGroup.
+    monkeypatch.setattr(
+        conftest_mod.shutil,
+        "rmtree",
+        lambda _p: (_ for _ in ()).throw(PermissionError("simulated rmtree lock")),
+    )
+    gen2 = conftest_mod._isolate_test_databases.__wrapped__(_FakeFactory(inner_root))
+    yielded_dir2 = next(gen2)
+    assert os.environ["SQLITE_DB_PATH"] == str(yielded_dir2 / "jarvis_studio.db")
+    monkeypatch.setattr(sess_mod, "_global_session_service", _FakeStore("teardown_ss", fail=True))
+
+    with pytest.raises(ExceptionGroup) as eg2:
+        next(gen2)
+
+    assert [type(e) for e in eg2.value.exceptions] == [RuntimeError, PermissionError]
+    assert os.environ["SQLITE_DB_PATH"] == "sentinel_sqlite.db"
+    assert os.environ["VECTOR_DB_PATH"] == "sentinel_vec.db"
+
+    # Restore exact outer session state before final verification & clean inner_root
+    monkeypatch.undo()
+    assert os.environ.get("SQLITE_DB_PATH") == orig_sqlite_env
+    assert os.environ.get("VECTOR_DB_PATH") == orig_vec_env
