@@ -387,3 +387,44 @@ async def test_p2_cp_04_orphaned_persisted_interrupt_fails_closed_without_hitl_r
     finally:
         session_svc.close()
         await managed_b.aclose()
+
+
+@pytest.mark.asyncio
+async def test_p2_cp_05_worker_thread_still_alive_raises_checkpoint_close_error(
+    tmp_path: Path,
+) -> None:
+    """P2: close_async_checkpoint_connection verifies worker thread exited after join."""
+    import threading
+
+    from jarvis_studio.core.persistence.async_sqlite import (
+        CheckpointCloseError,
+        close_async_checkpoint_connection,
+    )
+
+    db_path = tmp_path / "stuck_worker_unit.db"
+    managed = await open_managed_sqlite_checkpointer(db_path)
+
+    release_thread = threading.Event()
+    stuck_thread = threading.Thread(target=release_thread.wait, daemon=True)
+    stuck_thread.start()
+
+    # Cleanly stop the real aiosqlite worker first, then expose a live thread for join verification
+    await managed.conn.close()
+    managed.conn._thread = stuck_thread  # type: ignore[attr-defined]
+
+    async def _noop_close() -> None:
+        return None
+
+    managed.conn.close = _noop_close  # type: ignore[method-assign]
+
+    try:
+        with pytest.raises(CheckpointCloseError, match="remained alive"):
+            await close_async_checkpoint_connection(managed.conn, join_timeout=0.05)
+        assert managed._closed is False
+    finally:
+        release_thread.set()
+        stuck_thread.join(timeout=2.0)
+
+    # Once the thread has exited, ManagedSqliteCheckpointer.aclose() can complete cleanly
+    await managed.aclose()
+    assert managed._closed is True

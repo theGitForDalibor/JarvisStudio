@@ -57,6 +57,9 @@ def _reset_runtime_singletons(*, close_stores: bool) -> None:
     # 1. Detach top-level orchestrator first (AgentService exposes no close();
     # its compiled graph uses in-memory MemorySaver and refs SessionService/HITLManager).
     agent_service = _pop_module_attr("jarvis_studio.service.agent_service", "_global_agent_service")
+    default_agent_service = _pop_module_attr(
+        "jarvis_studio.service.agent_service", "_default_agent_service"
+    )
     session_service = _pop_module_attr(
         "jarvis_studio.service.session_service", "_global_session_service"
     )
@@ -76,6 +79,7 @@ def _reset_runtime_singletons(*, close_stores: bool) -> None:
             seen_close_ids: set[int] = set()
             for candidate in (
                 getattr(agent_service, "session_service", None),
+                getattr(default_agent_service, "session_service", None),
                 session_service,
                 getattr(memory_manager, "store", None),
                 trace_store,
@@ -86,7 +90,11 @@ def _reset_runtime_singletons(*, close_stores: bool) -> None:
                     _run_teardown_step(errors, close_fn)
 
             seen_clear_ids: set[int] = set()
-            for candidate in (hitl_manager, getattr(agent_service, "hitl_manager", None)):
+            for candidate in (
+                hitl_manager,
+                getattr(agent_service, "hitl_manager", None),
+                getattr(default_agent_service, "hitl_manager", None),
+            ):
                 clear_fn = getattr(candidate, "clear", None)
                 if callable(clear_fn) and id(candidate) not in seen_clear_ids:
                     seen_clear_ids.add(id(candidate))

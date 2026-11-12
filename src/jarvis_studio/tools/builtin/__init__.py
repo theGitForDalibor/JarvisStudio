@@ -17,25 +17,24 @@ from jarvis_studio.tools.builtin.rag_tools import (
 from jarvis_studio.tools.builtin.shell_tools import execute_shell_command
 from jarvis_studio.tools.registry import ToolRegistry, get_default_registry
 
+_BUILTIN_TOOLS = (
+    read_file,
+    list_directory,
+    write_file,
+    execute_shell_command,
+    save_personal_memory,
+    recall_personal_memory,
+    search_knowledge_base,
+    index_workspace_directory,
+    list_indexed_documents,
+)
+
 
 def register_builtin_tools(registry: ToolRegistry) -> None:
-    """Register all builtin tools into the designated registry."""
-    # File tools
-    registry.register(read_file)
-    registry.register(list_directory)
-    registry.register(write_file)
-
-    # Shell tools
-    registry.register(execute_shell_command)
-
-    # Long-Term Memory (LTM) tools
-    registry.register(save_personal_memory)
-    registry.register(recall_personal_memory)
-
-    # Local Knowledge Base & RAG tools
-    registry.register(search_knowledge_base)
-    registry.register(index_workspace_directory)
-    registry.register(list_indexed_documents)
+    """Idempotently register all builtin tools into the designated registry."""
+    for builtin_tool in _BUILTIN_TOOLS:
+        if registry.get(builtin_tool.name) is not builtin_tool:
+            registry.register(builtin_tool)
 
 
 # Register into default registry immediately

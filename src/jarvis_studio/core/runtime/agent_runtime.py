@@ -58,20 +58,10 @@ def set_active_runtime(runtime: AgentRuntime | None) -> None:
     _active_runtime = runtime
 
 
-def _run_cleanup_action(errors: list[BaseException], action: Callable[[], object]) -> None:
+def _run_cleanup_action(errors: list[Exception], action: Callable[[], object]) -> None:
     try:
         action()
-    except BaseException as exc:  # noqa: BLE001 - collected and surfaced after all steps finish
-        errors.append(exc)
-
-
-async def _run_async_cleanup_action(
-    errors: list[BaseException],
-    coro_fn: Callable[[], object],
-) -> None:
-    try:
-        await coro_fn()  # type: ignore[misc]
-    except BaseException as exc:  # noqa: BLE001 - collected and surfaced after all steps finish
+    except Exception as exc:  # noqa: BLE001 - collected and surfaced after all steps finish
         errors.append(exc)
 
 
@@ -86,6 +76,9 @@ def _pop_loaded_attr(module_name: str, attr_name: str) -> object | None:
 
 def _collect_loaded_global_stores() -> list[object]:
     """Detach and collect currently loaded module-level persistent store singletons."""
+    default_agent_svc = _pop_loaded_attr(
+        "jarvis_studio.service.agent_service", "_default_agent_service"
+    )
     session_svc = _pop_loaded_attr(
         "jarvis_studio.service.session_service", "_global_session_service"
     )
@@ -97,6 +90,7 @@ def _collect_loaded_global_stores() -> list[object]:
 
     stores: list[object] = []
     for candidate in (
+        getattr(default_agent_svc, "session_service", None),
         getattr(mem_mgr, "store", None),
         trace_store,
         session_svc,
@@ -230,17 +224,31 @@ class AgentRuntime:
             self._active_tasks[task] = remaining
 
     async def start(self) -> AgentRuntime:
-        """Bind main loop, acquire lock, open checkpointer, connect MCP, and start service."""
+        """Bind main loop, acquire lock, open checkpointer, connect MCP, and start service.
+
+        `AgentRuntime` instances are single-use: if startup fails, any partially initialized
+        resources are rolled back and the runtime transitions to `RuntimeState.CLOSED`.
+        Retry by constructing a fresh `AgentRuntime` instance.
+        """
         if self._state != RuntimeState.CREATED:
             raise RuntimeError(
-                f"AgentRuntime cannot start from state {self._state.value!r}"
+                f"AgentRuntime cannot start from state {self._state.value!r}; "
+                "create a new AgentRuntime instance to retry"
             )
 
         loop = asyncio.get_running_loop()
         self._bound_loop = loop
         self._state = RuntimeState.STARTING
 
-        self._lock.acquire()
+        try:
+            self._lock.acquire()
+        except BaseException:
+            # Lock was never acquired; do not disturb any active holder, global stores,
+            # or lock files. Transition to terminal CLOSED state.
+            self._bound_loop = None
+            self._state = RuntimeState.CLOSED
+            raise
+
         try:
             backend = self._settings.storage.checkpoint_backend.strip().lower()
             if backend == "sqlite":
@@ -255,15 +263,18 @@ class AgentRuntime:
                 raise ValueError(f"Unsupported checkpoint_backend: {backend!r}")
 
             registry = self._tool_registry
-            if self._manage_mcp:
+            if self._manage_mcp or self._register_as_active:
                 from jarvis_studio.tools.builtin import register_builtin_tools
-                from jarvis_studio.tools.mcp.client import get_mcp_manager
                 from jarvis_studio.tools.registry import get_default_registry
 
                 if registry is None:
                     registry = get_default_registry()
                     self._tool_registry = registry
                 register_builtin_tools(registry)
+
+            if self._manage_mcp:
+                from jarvis_studio.tools.mcp.client import get_mcp_manager
+
                 mcp_mgr = get_mcp_manager()
                 self._mcp_manager = mcp_mgr
                 try:
@@ -282,45 +293,67 @@ class AgentRuntime:
                 run_begin_hook=self._begin_run,
                 run_end_hook=self._end_run,
             )
+            self._state = RuntimeState.READY
             if self._register_as_active:
                 set_active_runtime(self)
-            self._state = RuntimeState.READY
             logger.info(
                 f"AgentRuntime started (instance_id={self.instance_id}, backend={backend})"
             )
             return self
-        except BaseException:
-            await self.shutdown()
+        except BaseException as exc:
+            try:
+                await self.shutdown()
+            except BaseException as shutdown_exc:  # noqa: BLE001
+                exc.add_note(
+                    f"Startup rollback shutdown failed "
+                    f"({type(shutdown_exc).__name__}: {shutdown_exc})"
+                )
             raise
 
-    async def _drain_active_runs(self, errors: list[BaseException]) -> None:
+    def _live_active_tasks(self) -> list[asyncio.Task[Any]]:
         current = asyncio.current_task()
-        pending = [
+        return [
             task
             for task in list(self._active_tasks)
             if task is not current and not task.done()
         ]
+
+    async def _drain_active_runs(self) -> None:
+        """Cancel and drain active tasks; escalate once on timeout, fail closed if still live."""
+        pending = self._live_active_tasks()
         if not pending:
             return
 
+        timeout = max(0.0, self._drain_timeout)
         for task in pending:
-            task.cancel()
+            task.cancel("AgentRuntime shutdown requested")
 
-        try:
-            _, still_pending = await asyncio.wait(pending, timeout=self._drain_timeout)
-        except BaseException as exc:  # noqa: BLE001
-            errors.append(exc)
+        _, still_pending = await asyncio.wait(pending, timeout=timeout)
+        still_live = [task for task in still_pending if not task.done()]
+        if not still_live:
             return
 
-        if still_pending:
-            errors.append(
-                TimeoutError(
-                    f"{len(still_pending)} active run task(s) did not terminate within "
-                    f"{self._drain_timeout}s during runtime shutdown"
-                )
-            )
+        escalation_timeout = min(timeout, 0.5) if timeout > 0 else 0.0
+        logger.warning(
+            f"{len(still_live)} active run task(s) did not terminate within {timeout}s; "
+            f"escalating cancellation (grace={escalation_timeout}s)"
+        )
+        for task in still_live:
+            task.cancel("AgentRuntime escalated shutdown cancellation")
 
-    def _close_stores(self, errors: list[BaseException]) -> None:
+        _, remaining = await asyncio.wait(still_live, timeout=escalation_timeout)
+        remaining_live = [task for task in remaining if not task.done()]
+        if remaining_live:
+            task_names = ", ".join(task.get_name() for task in remaining_live)
+            msg = (
+                f"{len(remaining_live)} active run task(s) remained alive after drain "
+                f"({timeout}s) and escalated cancellation ({escalation_timeout}s): [{task_names}]"
+            )
+            logger.error(msg)
+            raise TimeoutError(msg)
+
+    def _close_stores(self, errors: list[Exception]) -> None:
+        owned_ids = {id(store) for store in self._owned_stores}
         candidates: list[object] = list(reversed(self._owned_stores))
         if self._agent_service is not None:
             candidates.append(getattr(self._agent_service, "session_service", None))
@@ -328,6 +361,7 @@ class AgentRuntime:
             candidates.extend(_collect_loaded_global_stores())
 
         seen_ids: set[int] = set()
+        closed_owned_ids: set[int] = set()
         for store in candidates:
             if store is None or id(store) in seen_ids:
                 continue
@@ -335,7 +369,18 @@ class AgentRuntime:
             if not callable(close_fn):
                 continue
             seen_ids.add(id(store))
-            _run_cleanup_action(errors, close_fn)
+            try:
+                close_fn()
+            except Exception as exc:  # noqa: BLE001 - collected and surfaced after all steps finish
+                errors.append(exc)
+            else:
+                if id(store) in owned_ids:
+                    closed_owned_ids.add(id(store))
+
+        if closed_owned_ids:
+            self._owned_stores = [
+                store for store in self._owned_stores if id(store) not in closed_owned_ids
+            ]
 
     async def shutdown(self) -> None:
         """Gracefully drain runs, close checkpointer/MCP/stores, and release root lock."""
@@ -354,47 +399,70 @@ class AgentRuntime:
             )
 
         self._state = RuntimeState.SHUTTING_DOWN
-        errors: list[BaseException] = []
 
-        # 1. Stop new runs & drain active tasks BEFORE tearing down Checkpointer/Stores
-        await self._drain_active_runs(errors)
+        # 1. Stop new runs & confirm all active tasks terminated BEFORE tearing down resources.
+        # Any TimeoutError or CancelledError aborts here, retaining lock & resources for retry.
+        await self._drain_active_runs()
 
-        # 2. Detach global active runtime reference
-        if self._register_as_active and get_active_runtime() is self:
-            _run_cleanup_action(errors, lambda: set_active_runtime(None))
+        errors: list[Exception] = []
 
-        # 3. Close AsyncSqliteSaver connection & stop worker thread
+        # 2. Close AsyncSqliteSaver connection & verify worker thread exited cleanly
+        checkpointer_closed = True
         if self._managed_sqlite is not None:
             managed = self._managed_sqlite
-            self._managed_sqlite = None
-            await _run_async_cleanup_action(errors, managed.aclose)
+            try:
+                await managed.aclose()
+            except Exception as exc:  # noqa: BLE001 - retain lock if worker thread survived
+                checkpointer_closed = False
+                errors.append(exc)
+            else:
+                self._managed_sqlite = None
+                self._checkpointer = None
+        else:
+            self._checkpointer = None
 
-        # 4. Disconnect external MCP sessions
+        # 3. Disconnect external MCP sessions (preserve manager if shutdown itself is cancelled)
         if self._mcp_manager is not None:
             mcp_mgr = self._mcp_manager
             registry = self._tool_registry
-            self._mcp_manager = None
-            await _run_async_cleanup_action(
-                errors,
-                lambda mgr=mcp_mgr, reg=registry: mgr.disconnect_all(reg),
-            )
+            try:
+                await mcp_mgr.disconnect_all(registry)
+            except Exception as exc:  # noqa: BLE001 - collected and surfaced after cleanup
+                errors.append(exc)
+                self._mcp_manager = None
+            else:
+                self._mcp_manager = None
 
-        # 5. Close owned & loaded persistent stores
+        # 4. Close owned & loaded persistent stores
         self._close_stores(errors)
 
-        self._agent_service = None
-        self._checkpointer = None
-        self._active_tasks.clear()
+        # 5. Detach runtime & release OS lock ONLY when active runs and checkpointer are closed
+        if checkpointer_closed:
+            self._agent_service = None
+            self._active_tasks.clear()
+            if self._register_as_active and get_active_runtime() is self:
+                _run_cleanup_action(errors, lambda: set_active_runtime(None))
 
-        # 6. Release OS persistence root lock last
-        _run_cleanup_action(errors, self._lock.release)
-        self._state = RuntimeState.CLOSED
-        logger.info(f"AgentRuntime closed (instance_id={self.instance_id})")
+            lock_released = True
+            try:
+                self._lock.release()
+            except Exception as exc:  # noqa: BLE001
+                lock_released = False
+                errors.append(exc)
+
+            if lock_released:
+                self._state = RuntimeState.CLOSED
+                logger.info(f"AgentRuntime closed (instance_id={self.instance_id})")
+        else:
+            logger.error(
+                f"AgentRuntime shutdown incomplete (instance_id={self.instance_id}): "
+                "checkpointer did not close cleanly; retaining RuntimeInstanceLock"
+            )
 
         if len(errors) == 1:
             raise errors[0]
         if len(errors) > 1:
-            raise BaseExceptionGroup(
+            raise ExceptionGroup(
                 "Multiple errors occurred during AgentRuntime shutdown",
                 errors,
             )

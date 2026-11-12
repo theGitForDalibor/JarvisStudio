@@ -198,6 +198,63 @@ async def test_runtime_startup_failure_rolls_back_lock_and_state(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_runtime_startup_lock_conflict_reaches_closed_and_preserves_holder(
+    tmp_path: Path,
+) -> None:
+    """P2: Lock conflict in start() transitions contender to CLOSED without harming active holder."""
+    from jarvis_studio.core.runtime import get_active_runtime
+
+    settings = _make_runtime_settings(tmp_path, checkpoint_backend="sqlite")
+    holder = AgentRuntime(
+        settings,
+        instance_id="rt-holder",
+        register_as_active=True,
+        close_global_stores=True,
+    )
+    await holder.start()
+    try:
+        # Ensure holder's session store is active
+        sess = holder.agent_service.session_service.get_or_create_session("holder-sess")
+        assert sess.session_id == "holder-sess"
+
+        contender = AgentRuntime(
+            settings,
+            instance_id="rt-contender",
+            register_as_active=True,
+            close_global_stores=True,
+        )
+        with pytest.raises(RuntimeLockError) as exc_info:
+            await contender.start()
+
+        assert exc_info.value.holder_metadata is not None
+        assert exc_info.value.holder_metadata["instance_id"] == "rt-holder"
+
+        # Contender must reach terminal CLOSED state with zero partial resources (never STARTING)
+        assert contender.state == RuntimeState.CLOSED
+        assert contender.lock.is_acquired is False
+        assert contender.bound_loop is None
+        assert contender._managed_sqlite is None
+        assert contender._agent_service is None
+
+        # Retrying start() on the same failed instance is explicitly rejected; shutdown() is safe
+        with pytest.raises(RuntimeError, match="create a new AgentRuntime instance"):
+            await contender.start()
+        await contender.shutdown()
+
+        # Existing holder, its active registration, and its stores remain intact
+        assert holder.state == RuntimeState.READY
+        assert holder.lock.is_acquired is True
+        assert get_active_runtime() is holder
+        assert holder.agent_service.session_service.get_session("holder-sess") is not None
+    finally:
+        await holder.shutdown()
+
+    # Retrying with a fresh AgentRuntime instance succeeds after holder releases
+    async with AgentRuntime.open(settings, instance_id="rt-retry-new") as retry_rt:
+        assert retry_rt.state == RuntimeState.READY
+
+
+@pytest.mark.asyncio
 async def test_runtime_shutdown_rejects_mismatched_loop(tmp_path: Path) -> None:
     """Closing AgentRuntime from another live event loop fails closed."""
     settings = _make_runtime_settings(tmp_path, checkpoint_backend="memory")

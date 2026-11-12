@@ -376,7 +376,6 @@ def chat(session: str, connect_mcp: bool):
     from jarvis_studio.core.runtime import AgentRuntime
 
     registry = get_default_registry()
-    register_builtin_tools(registry)
     settings = get_settings()
 
     async def _handle_approval_decision(pending_appr: dict) -> ApprovalDecision:

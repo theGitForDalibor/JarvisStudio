@@ -875,11 +875,12 @@ class AgentService:
 
 
 _global_agent_service: AgentService | None = None
+_default_agent_service: AgentService | None = None
 
 
 def get_agent_service() -> AgentService:
-    """Retrieve the active AgentRuntime service, test override, or fallback singleton."""
-    global _global_agent_service
+    """Retrieve explicit test override, active AgentRuntime service, or fallback singleton."""
+    global _default_agent_service
     if _global_agent_service is not None:
         return _global_agent_service
 
@@ -889,5 +890,6 @@ def get_agent_service() -> AgentService:
     if active_runtime is not None:
         return active_runtime.agent_service
 
-    _global_agent_service = AgentService()
-    return _global_agent_service
+    if _default_agent_service is None:
+        _default_agent_service = AgentService()
+    return _default_agent_service

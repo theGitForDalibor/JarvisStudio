@@ -87,6 +87,10 @@ class CheckpointCompatibilityError(RuntimeError):
     """Raised when legacy checkpoint tables are incompatible and cannot proceed."""
 
 
+class CheckpointCloseError(RuntimeError):
+    """Raised when an async SQLite checkpointer connection fails to shut down cleanly."""
+
+
 @dataclass(frozen=True)
 class CheckpointCompatibilityReport:
     """Result of inspecting (and optionally isolating) legacy checkpoint tables."""
@@ -352,14 +356,36 @@ async def open_async_checkpoint_connection(
     return conn
 
 
-async def close_async_checkpoint_connection(conn: aiosqlite.Connection) -> None:
-    """Close an `aiosqlite.Connection` and wait for its worker thread to exit cleanly."""
+async def close_async_checkpoint_connection(
+    conn: aiosqlite.Connection,
+    *,
+    join_timeout: float = 2.0,
+) -> None:
+    """Close an `aiosqlite.Connection` and confirm its worker thread exited cleanly."""
     worker_thread = getattr(conn, "_thread", None)
-    await conn.close()
+    close_exc: Exception | None = None
+    try:
+        await conn.close()
+    except Exception as exc:  # noqa: BLE001 - join/verify worker thread before re-raising
+        close_exc = exc
+
     # aiosqlite resolves the stop future just before `_connection_worker_thread` breaks
-    # out of its loop; joining avoids lingering non-daemon threads at shutdown.
+    # out of its loop; joining and verifying prevents lingering threads after shutdown.
     if isinstance(worker_thread, threading.Thread) and worker_thread.is_alive():
-        await asyncio.to_thread(worker_thread.join, 2.0)
+        await asyncio.to_thread(worker_thread.join, join_timeout)
+        if worker_thread.is_alive():
+            msg = (
+                f"aiosqlite worker thread {worker_thread.name!r} "
+                f"(ident={worker_thread.ident}) remained alive after join({join_timeout}s)"
+            )
+            _logger.error(msg)
+            err = CheckpointCloseError(msg)
+            if close_exc is not None:
+                raise err from close_exc
+            raise err
+
+    if close_exc is not None:
+        raise close_exc
 
 
 @dataclass
@@ -375,8 +401,8 @@ class ManagedSqliteCheckpointer:
         """Idempotently close the underlying `aiosqlite.Connection` and stop its worker."""
         if self._closed:
             return
-        self._closed = True
         await close_async_checkpoint_connection(self.conn)
+        self._closed = True
 
 
 async def open_managed_sqlite_checkpointer(

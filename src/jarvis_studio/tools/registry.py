@@ -25,6 +25,10 @@ class ToolRegistry:
         category: str = "general",
     ) -> BaseTool:
         """Register a LangChain tool with safety metadata."""
+        existing = self._tools.get(tool.name)
+        if existing is tool and risk_level is None and requires_approval is None:
+            return tool
+
         if risk_level is not None or requires_approval is not None:
             tag_tool_safety(
                 tool,
