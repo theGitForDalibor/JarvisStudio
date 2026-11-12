@@ -1015,7 +1015,7 @@ def test_concurrent_multithread_in_memory_and_disk_writes(tmp_path: Path):
         assert len(ss_check.list_sessions()) == disk_workers
         assert len(ms_check.list(limit=50)) == disk_workers
         assert len(ts_check.list_traces(limit=50)) == disk_workers
-    backups = list(tmp_path.glob("concurrent_app.bak.v0_to_v1.*.db"))
+    backups = list(tmp_path.glob(f"concurrent_app.bak.v0_to_v{APP_SCHEMA_VERSION}.*.db"))
     assert len(backups) == 1
 
     # 4. Concurrent SqliteVecStore initialization & writes/searches on fresh disk vector DB

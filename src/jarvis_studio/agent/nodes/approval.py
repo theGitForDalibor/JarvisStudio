@@ -10,6 +10,7 @@ from jarvis_studio.agent.hitl.manager import (
     ApprovalDecision,
     ApprovalRequest,
     ApprovalStatus,
+    HITLManager,
     get_hitl_manager,
 )
 from jarvis_studio.agent.state import AgentState
@@ -108,10 +109,14 @@ def _apply_user_response(
             logger.warning(f"Error resolving approval request {primary.id}: {exc}")
 
 
-def create_approval_node(registry: ToolRegistry = None):
+def create_approval_node(
+    registry: ToolRegistry = None,
+    *,
+    hitl_mgr: HITLManager | None = None,
+):
     """Create the approval gate node checking high-risk tool calls."""
     tool_registry = registry or get_default_registry()
-    hitl_mgr = get_hitl_manager()
+    bound_hitl_mgr = hitl_mgr
 
     def approval_node(state: AgentState) -> dict[str, Any]:
         """Intercept high-risk tool calls and trigger LangGraph interrupt."""
@@ -133,6 +138,7 @@ def create_approval_node(registry: ToolRegistry = None):
         if not dangerous_calls:
             return {}
 
+        active_hitl = bound_hitl_mgr or get_hitl_manager()
         # Strict Fail-Closed thread identity validation aligned with authorization.py
         thread_id = extract_valid_thread_id(state)
         if not thread_id:
@@ -158,11 +164,11 @@ def create_approval_node(registry: ToolRegistry = None):
             args = call.get("args", {})
             tool_call_id = call.get("id", "")
 
-            existing_req = hitl_mgr.get_by_tool_call_id(tool_call_id, thread_id)
+            existing_req = active_hitl.get_by_tool_call_id(tool_call_id, thread_id)
             if existing_req:
                 all_requests.append(existing_req)
             else:
-                req = hitl_mgr.create_request(
+                req = active_hitl.create_request(
                     thread_id=thread_id,
                     run_id=run_id,
                     tool_name=tool_name,
@@ -216,7 +222,7 @@ def create_approval_node(registry: ToolRegistry = None):
 
             # Parse and apply user response
             _apply_user_response(
-                user_response, pending, all_requests, hitl_mgr, thread_id
+                user_response, pending, all_requests, active_hitl, thread_id
             )
 
         # Construct decision mapping for executor
@@ -227,7 +233,11 @@ def create_approval_node(registry: ToolRegistry = None):
                 "tool_call_id": r.tool_call_id,
                 "tool_name": r.tool_name,
                 "arguments_hash": r.arguments_hash,
-                "decision": r.decision or r.status.value.lower(),
+                "decision": (
+                    "reject"
+                    if r.status in (ApprovalStatus.FAILED, ApprovalStatus.REJECTED, ApprovalStatus.UNKNOWN)
+                    else (r.decision or r.status.value.lower())
+                ),
                 "reason": r.resolution_reason,
                 "modified_arguments": r.modified_arguments,
             }

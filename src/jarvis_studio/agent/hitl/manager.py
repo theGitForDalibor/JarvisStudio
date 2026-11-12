@@ -1,82 +1,79 @@
-"""Human-in-the-Loop (HITL) approval manager and schemas."""
+"""Human-in-the-Loop (HITL) approval manager backed by SQLite `HITLStore`."""
 
-import hashlib
-import json
+from __future__ import annotations
+
 import threading
-import time
-import uuid
-from enum import Enum
+from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
-
+from jarvis_studio.agent.hitl.models import (
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalStatus,
+    ExecutionOutcome,
+    ExecutionOutcomeStatus,
+    compute_arguments_hash,
+)
+from jarvis_studio.agent.hitl.store import DuplicateToolCallError, HITLStore
 from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.tools.base import RiskLevel
 
-
-def compute_arguments_hash(args: dict[str, Any] | None) -> str:
-    """Compute deterministic SHA-256 hash of tool call arguments."""
-    if not args:
-        payload = "{}"
-    else:
-        try:
-            payload = json.dumps(args, sort_keys=True, default=str)
-        except (TypeError, ValueError):
-            payload = str(sorted(args.items()))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-
-class ApprovalStatus(str, Enum):
-    """Status lifecycle of an approval request."""
-
-    PENDING = "PENDING"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    MODIFIED = "MODIFIED"
-    EXECUTING = "EXECUTING"
-    CONSUMED = "CONSUMED"
-    FAILED = "FAILED"
-
-
-class ApprovalRequest(BaseModel):
-    """Record of an operation requiring human confirmation."""
-
-    id: str = Field(default_factory=lambda: f"appr_{uuid.uuid4().hex[:8]}")
-    thread_id: str
-    run_id: str
-    tool_name: str
-    arguments: dict[str, Any]
-    arguments_hash: str = ""
-    tool_call_id: str = ""
-    risk_level: RiskLevel = RiskLevel.HIGH
-    status: ApprovalStatus = ApprovalStatus.PENDING
-    decision: str | None = None
-    description: str = "High-risk tool call intercepted"
-    created_at: float = Field(default_factory=time.time)
-    resolved_at: float | None = None
-    executed_at: float | None = None
-    completed_at: float | None = None
-    resolution_reason: str | None = None
-    execution_error: str | None = None
-    modified_arguments: dict[str, Any] | None = None
-
-
-class ApprovalDecision(BaseModel):
-    """User decision payload to resolve a pending approval."""
-
-    decision: str = Field(
-        description="'approve', 'reject', or 'modify'",
-    )
-    reason: str | None = None
-    modified_arguments: dict[str, Any] | None = None
+__all__ = [
+    "ApprovalDecision",
+    "ApprovalRequest",
+    "ApprovalStatus",
+    "DuplicateToolCallError",
+    "ExecutionOutcome",
+    "ExecutionOutcomeStatus",
+    "HITLManager",
+    "compute_arguments_hash",
+    "get_hitl_manager",
+]
 
 
 class HITLManager:
-    """In-memory manager tracking active and historical approval requests."""
+    """Thread-safe approval & execution outcome manager persisted via SQLite `HITLStore`."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        runtime_instance_id: str | None = None,
+    ) -> None:
+        self._store = HITLStore(db_path=db_path)
+        self._runtime_instance_id = runtime_instance_id
         self._requests: dict[str, ApprovalRequest] = {}
         self._lock = threading.Lock()
+
+    @property
+    def store(self) -> HITLStore:
+        """Underlying SQLite `HITLStore`."""
+        return self._store
+
+    @property
+    def db_path(self) -> str:
+        """Normalized SQLite path used by this manager."""
+        return self._store.db_path
+
+    @property
+    def runtime_instance_id(self) -> str | None:
+        """Active runtime instance ID stamped on acquired execution leases."""
+        return self._runtime_instance_id
+
+    @runtime_instance_id.setter
+    def runtime_instance_id(self, value: str | None) -> None:
+        self._runtime_instance_id = value
+
+    def _sync_cached(self, req: ApprovalRequest | None) -> ApprovalRequest | None:
+        if req is None:
+            return None
+        cached = self._requests.get(req.id)
+        if cached is None:
+            self._requests[req.id] = req
+            return req
+        for field_name in ApprovalRequest.model_fields:
+            setattr(cached, field_name, getattr(req, field_name))
+        return cached
 
     def create_request(
         self,
@@ -87,63 +84,53 @@ class HITLManager:
         tool_call_id: str = "",
         risk_level: RiskLevel = RiskLevel.HIGH,
         description: str = "",
+        *,
+        task_id: str | None = None,
+        checkpoint_id: str | None = None,
     ) -> ApprovalRequest:
-        """Create and record a new approval request."""
-        args_hash = compute_arguments_hash(arguments)
-        req = ApprovalRequest(
-            thread_id=thread_id,
-            run_id=run_id,
-            tool_name=tool_name,
-            arguments=arguments,
-            arguments_hash=args_hash,
-            tool_call_id=tool_call_id,
-            risk_level=risk_level,
-            description=description or f"Execution of dangerous tool '{tool_name}'",
-        )
+        """Create and persist a new `PENDING` approval request."""
         with self._lock:
-            self._requests[req.id] = req
+            req = self._store.create_request(
+                thread_id=thread_id,
+                run_id=run_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                tool_call_id=tool_call_id,
+                risk_level=risk_level,
+                description=description,
+                task_id=task_id,
+                checkpoint_id=checkpoint_id,
+            )
+            synced = self._sync_cached(req)
+            assert synced is not None
+
         logger.warning(
-            f"HITL Interrupt created: [{req.id}] (call_id: '{tool_call_id}') "
+            f"HITL Interrupt created: [{synced.id}] (call_id: '{tool_call_id}') "
             f"for tool '{tool_name}' on thread '{thread_id}'"
         )
-        return req
+        return synced
 
     def get_request(
         self, approval_id: str, thread_id: str | None = None
     ) -> ApprovalRequest | None:
-        """Look up an approval request by its ID, optionally enforcing thread boundary."""
+        """Look up an approval request by ID, optionally enforcing thread boundary."""
         with self._lock:
-            req = self._requests.get(approval_id)
-            if req and thread_id is not None and req.thread_id != thread_id:
-                return None
-            return req
+            req = self._store.get_request(approval_id, thread_id=thread_id)
+            return self._sync_cached(req)
 
     def get_by_tool_call_id(
         self, tool_call_id: str, thread_id: str | None = None
     ) -> ApprovalRequest | None:
-        """Find the latest approval request matching a tool_call_id strictly within thread_id.
-
-        Note: thread_id is strictly required. Omitting thread_id rejects the query
-        to prevent accidental cross-session scanning.
-        """
-        if not thread_id or not tool_call_id:
-            return None
-
+        """Find the approval request matching `tool_call_id` strictly within `thread_id`."""
         with self._lock:
-            for req in reversed(list(self._requests.values())):
-                if req.tool_call_id == tool_call_id and req.thread_id == thread_id:
-                    return req
-        return None
+            req = self._store.get_by_tool_call_id(tool_call_id, thread_id=thread_id)
+            return self._sync_cached(req)
 
     def list_pending(self, thread_id: str | None = None) -> list[ApprovalRequest]:
         """List all pending approval requests, optionally filtered by thread ID."""
         with self._lock:
-            return [
-                r
-                for r in self._requests.values()
-                if r.status == ApprovalStatus.PENDING
-                and (thread_id is None or r.thread_id == thread_id)
-            ]
+            rows = self._store.list_pending(thread_id=thread_id)
+            return [r for r in (self._sync_cached(row) for row in rows) if r is not None]
 
     def resolve_request(
         self,
@@ -151,51 +138,21 @@ class HITLManager:
         decision: ApprovalDecision,
         thread_id: str | None = None,
     ) -> ApprovalRequest | None:
-        """Apply user decision to resolve a pending approval.
-
-        Raises:
-            PermissionError: If thread_id is specified and does not match request.thread_id.
-            ValueError: If the approval request has already been resolved (idempotency guard).
-        """
+        """Apply user decision to resolve a pending approval."""
         with self._lock:
-            req = self._requests.get(approval_id)
-            if not req:
-                return None
+            req = self._store.resolve_request(
+                approval_id=approval_id,
+                decision=decision,
+                thread_id=thread_id,
+            )
+            synced = self._sync_cached(req)
 
-            if thread_id is not None and req.thread_id != thread_id:
-                raise PermissionError(
-                    f"Thread mismatch: Approval request '{approval_id}' belongs to thread '{req.thread_id}', not '{thread_id}'"
-                )
-
-            # Idempotency / duplicate submission protection
-            if req.status != ApprovalStatus.PENDING:
-                raise ValueError(
-                    f"Approval request '{approval_id}' has already been resolved with status '{req.status.value}'"
-                )
-
-            dec_str = decision.decision.lower()
-            match dec_str:
-                case "approve":
-                    req.status = ApprovalStatus.APPROVED
-                    req.decision = "approve"
-                case "reject":
-                    req.status = ApprovalStatus.REJECTED
-                    req.decision = "reject"
-                case "modify":
-                    req.status = ApprovalStatus.MODIFIED
-                    req.decision = "modify"
-                    req.modified_arguments = decision.modified_arguments
-                case _:
-                    req.status = ApprovalStatus.REJECTED
-                    req.decision = "reject"
-
-            req.resolved_at = time.time()
-            req.resolution_reason = decision.reason
-
-        logger.info(
-            f"HITL Request [{approval_id}] resolved: status={req.status.value}, reason='{decision.reason}'"
-        )
-        return req
+        if synced is not None:
+            logger.info(
+                f"HITL Request [{approval_id}] resolved: status={synced.status.value}, "
+                f"reason='{decision.reason}'"
+            )
+        return synced
 
     def acquire_execution_lease(
         self,
@@ -203,83 +160,27 @@ class HITLManager:
         thread_id: str,
         tool_call_id: str,
         arguments_hash: str,
+        *,
+        lease_owner_instance_id: str | None = None,
+        lease_acquired_run_id: str | None = None,
     ) -> tuple[bool, ApprovalRequest | None, str | None]:
-        """Atomically acquire the right to execute an approved tool call.
-
-        Enforces:
-        - Thread binding: caller thread_id must match req.thread_id
-        - ToolCall binding: caller tool_call_id must match req.tool_call_id
-        - Argument binding: arguments_hash must match req.arguments_hash
-        - State machine: req.status must be APPROVED or MODIFIED
-        - Single execution: transitions atomically to EXECUTING
-        """
+        """Atomically transition `APPROVED`/`MODIFIED` -> `EXECUTING` and seed `NOT_STARTED` Outcome."""
+        effective_owner = (
+            lease_owner_instance_id
+            if lease_owner_instance_id is not None
+            else self._runtime_instance_id
+        )
         with self._lock:
-            req = self._requests.get(approval_id)
-            if not req:
-                return False, None, f"Approval request '{approval_id}' not found"
-
-            if req.thread_id != thread_id:
-                return (
-                    False,
-                    None,
-                    f"Thread mismatch: request belongs to '{req.thread_id}', not caller '{thread_id}'",
-                )
-
-            if req.tool_call_id != tool_call_id:
-                return (
-                    False,
-                    None,
-                    f"Tool call ID mismatch: request belongs to '{req.tool_call_id}', not caller '{tool_call_id}'",
-                )
-
-            if req.arguments_hash != arguments_hash:
-                return (
-                    False,
-                    None,
-                    f"Arguments hash mismatch: expected '{req.arguments_hash}', got '{arguments_hash}'",
-                )
-
-            if req.status not in (ApprovalStatus.APPROVED, ApprovalStatus.MODIFIED):
-                if req.status == ApprovalStatus.EXECUTING:
-                    return (
-                        False,
-                        None,
-                        f"Approval request '{approval_id}' is already EXECUTING (concurrent execution blocked)",
-                    )
-                if req.status == ApprovalStatus.CONSUMED:
-                    return (
-                        False,
-                        None,
-                        f"Approval request '{approval_id}' has already been CONSUMED (replay blocked)",
-                    )
-                if req.status == ApprovalStatus.FAILED:
-                    return (
-                        False,
-                        None,
-                        f"Approval request '{approval_id}' execution previously FAILED (replay blocked)",
-                    )
-                if req.status == ApprovalStatus.REJECTED:
-                    return (
-                        False,
-                        None,
-                        f"Approval request '{approval_id}' was REJECTED by user",
-                    )
-                if req.status == ApprovalStatus.PENDING:
-                    return (
-                        False,
-                        None,
-                        f"Approval request '{approval_id}' is still PENDING approval",
-                    )
-                return (
-                    False,
-                    None,
-                    f"Approval request '{approval_id}' has invalid status '{req.status.value}'",
-                )
-
-            # Atomic transition to EXECUTING
-            req.status = ApprovalStatus.EXECUTING
-            req.executed_at = time.time()
-            return True, req, None
+            ok, req, err = self._store.acquire_execution_lease(
+                approval_id=approval_id,
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                arguments_hash=arguments_hash,
+                lease_owner_instance_id=effective_owner,
+                lease_acquired_run_id=lease_acquired_run_id,
+            )
+            synced = self._sync_cached(req)
+            return ok, synced, err
 
     def finalize_execution(
         self,
@@ -290,45 +191,173 @@ class HITLManager:
         """Finalize execution status of a leased approval request.
 
         Transitions:
-        - If success: EXECUTING -> CONSUMED
-        - If failure: EXECUTING -> FAILED
+        - If success: `EXECUTING -> CONSUMED` (`Outcome -> SUCCEEDED`)
+        - If failure: `EXECUTING -> FAILED` (`Outcome -> FAILED`)
         """
         with self._lock:
-            req = self._requests.get(approval_id)
-            if not req:
+            existing = self._store.get_request(approval_id)
+            if existing is None:
                 logger.warning(
                     f"HITL Execution finalize skipped: approval [{approval_id}] not found"
                 )
                 return None
 
-            if req.status == ApprovalStatus.EXECUTING:
-                if success:
-                    req.status = ApprovalStatus.CONSUMED
-                else:
-                    req.status = ApprovalStatus.FAILED
-                    req.execution_error = error
-                req.completed_at = time.time()
+            prev_status = existing.status
+            updated = self._store.finalize_execution(
+                approval_id=approval_id,
+                success=success,
+                error=error,
+            )
+            synced = self._sync_cached(updated)
+
+        if synced is not None:
+            if prev_status == ApprovalStatus.EXECUTING:
                 logger.info(
-                    f"HITL Execution finalized for [{approval_id}]: status={req.status.value}"
+                    f"HITL Execution finalized for [{approval_id}]: status={synced.status.value}"
                 )
             else:
                 logger.warning(
-                    f"HITL Execution finalize ignored for [{approval_id}]: expected EXECUTING, got {req.status.value}"
+                    f"HITL Execution finalize ignored for [{approval_id}]: "
+                    f"expected EXECUTING, got {prev_status.value}"
                 )
-            return req
+        return synced
+
+    def mark_outcome_uncertain(
+        self,
+        *,
+        approval_id: str | None = None,
+        thread_id: str | None = None,
+        tool_call_id: str | None = None,
+        error: str | None = None,
+    ) -> ExecutionOutcome | None:
+        """Record `Outcome=UNKNOWN` (Option B) while keeping `ApprovalStatus` untouched."""
+        with self._lock:
+            return self._store.mark_outcome_uncertain(
+                approval_id=approval_id,
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                error=error,
+            )
+
+    def register_safe_outcome_start(
+        self,
+        thread_id: str,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        *,
+        task_id: str | None = None,
+    ) -> ExecutionOutcome:
+        """Persist `NOT_STARTED` before executing a tracked SAFE tool."""
+        with self._lock:
+            return self._store.register_safe_outcome_start(
+                thread_id=thread_id,
+                run_id=run_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                task_id=task_id,
+            )
+
+    def finalize_safe_outcome(
+        self,
+        thread_id: str,
+        tool_call_id: str,
+        outcome_status: ExecutionOutcomeStatus,
+        *,
+        result_summary: str | None = None,
+        error_message: str | None = None,
+        side_effect_hint: dict[str, Any] | None = None,
+    ) -> ExecutionOutcome | None:
+        """Finalize outcome status for a tracked SAFE tool call."""
+        with self._lock:
+            return self._store.finalize_safe_outcome(
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                outcome_status=outcome_status,
+                result_summary=result_summary,
+                error_message=error_message,
+                side_effect_hint=side_effect_hint,
+            )
+
+    def get_outcome(self, thread_id: str, tool_call_id: str) -> ExecutionOutcome | None:
+        with self._lock:
+            return self._store.get_outcome(thread_id, tool_call_id)
+
+    def get_outcome_by_approval(
+        self, approval_id: str, thread_id: str | None = None
+    ) -> ExecutionOutcome | None:
+        with self._lock:
+            return self._store.get_outcome_by_approval(approval_id, thread_id=thread_id)
+
+    def list_outcomes(self, thread_id: str) -> list[ExecutionOutcome]:
+        with self._lock:
+            return self._store.list_outcomes(thread_id)
+
+    def audit_uncertain_outcome(
+        self,
+        *,
+        thread_id: str,
+        verified_status: ExecutionOutcomeStatus,
+        actor: str,
+        note: str,
+        approval_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> ExecutionOutcome | None:
+        """Record human audit reconciliation on an uncertain outcome without reactivating leases."""
+        with self._lock:
+            return self._store.audit_uncertain_outcome(
+                thread_id=thread_id,
+                verified_status=verified_status,
+                actor=actor,
+                note=note,
+                approval_id=approval_id,
+                tool_call_id=tool_call_id,
+            )
+
+    def abort_approved_request(
+        self,
+        approval_id: str,
+        thread_id: str,
+        reason: str | None = None,
+    ) -> ApprovalRequest | None:
+        """Explicitly abort an unleased `APPROVED`/`MODIFIED` request into `FAILED`."""
+        with self._lock:
+            req = self._store.abort_approved_request(
+                approval_id=approval_id,
+                thread_id=thread_id,
+                reason=reason,
+            )
+            return self._sync_cached(req)
 
     def clear(self) -> None:
-        """Clear all stored approval requests (primarily for test isolation)."""
+        """Clear all stored approval requests and outcomes (primarily for test isolation)."""
         with self._lock:
+            self._store.clear()
+            self._requests.clear()
+
+    def close(self) -> None:
+        """Close underlying SQLite store resources cleanly."""
+        with self._lock:
+            self._store.close()
             self._requests.clear()
 
 
 _global_hitl_manager: HITLManager | None = None
+_default_hitl_manager: HITLManager | None = None
 
 
 def get_hitl_manager() -> HITLManager:
-    """Retrieve the singleton HITLManager instance."""
-    global _global_hitl_manager
-    if _global_hitl_manager is None:
-        _global_hitl_manager = HITLManager()
-    return _global_hitl_manager
+    """Retrieve explicit override, active AgentRuntime HITLManager, or fallback singleton."""
+    global _default_hitl_manager
+    if _global_hitl_manager is not None:
+        return _global_hitl_manager
+
+    from jarvis_studio.core.runtime.agent_runtime import get_active_runtime
+
+    active_runtime = get_active_runtime()
+    if active_runtime is not None and active_runtime._hitl_manager is not None:
+        return active_runtime._hitl_manager
+
+    if _default_hitl_manager is None:
+        _default_hitl_manager = HITLManager()
+    return _default_hitl_manager

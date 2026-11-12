@@ -24,7 +24,7 @@ from jarvis_studio.core.persistence.sqlite import (
     sync_transaction,
 )
 
-APP_SCHEMA_VERSION = 1
+APP_SCHEMA_VERSION = 2
 VEC_SCHEMA_VERSION = 1
 
 _logger = logging.getLogger(__name__)
@@ -82,6 +82,83 @@ _APP_V1_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_traces_session ON agent_conversation_traces(session_id, start_time DESC)",
+)
+
+_APP_V2_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS hitl_approval_requests (
+        id                      TEXT PRIMARY KEY,
+        thread_id               TEXT NOT NULL CHECK (
+                                    length(trim(thread_id)) > 0
+                                    AND lower(trim(thread_id)) != 'default'
+                                ),
+        task_id                 TEXT,
+        run_id                  TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+        checkpoint_id           TEXT,
+        tool_call_id            TEXT NOT NULL CHECK (length(trim(tool_call_id)) > 0),
+        tool_name               TEXT NOT NULL CHECK (length(trim(tool_name)) > 0),
+        arguments_json          TEXT NOT NULL,
+        arguments_hash          TEXT NOT NULL CHECK (length(trim(arguments_hash)) > 0),
+        risk_level              TEXT NOT NULL,
+        status                  TEXT NOT NULL CHECK (status IN (
+                                    'PENDING', 'APPROVED', 'MODIFIED', 'REJECTED',
+                                    'EXECUTING', 'CONSUMED', 'FAILED', 'UNKNOWN'
+                                )),
+        decision                TEXT,
+        description             TEXT NOT NULL,
+        modified_arguments_json TEXT,
+        resolution_reason       TEXT,
+        lease_owner_instance_id TEXT,
+        lease_acquired_run_id   TEXT,
+        execution_error         TEXT,
+        audit_note              TEXT,
+        audit_actor             TEXT,
+        audited_at              REAL,
+        created_at              REAL NOT NULL,
+        resolved_at             REAL,
+        executed_at             REAL,
+        completed_at            REAL,
+        UNIQUE (thread_id, tool_call_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_hitl_thread_status ON hitl_approval_requests(thread_id, status, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_hitl_status_lease_owner ON hitl_approval_requests(status, lease_owner_instance_id)",
+    "CREATE INDEX IF NOT EXISTS idx_hitl_task_id ON hitl_approval_requests(task_id)",
+    """
+    CREATE TABLE IF NOT EXISTS tool_execution_outcomes (
+        outcome_id       TEXT PRIMARY KEY,
+        thread_id        TEXT NOT NULL CHECK (
+                             length(trim(thread_id)) > 0
+                             AND lower(trim(thread_id)) != 'default'
+                         ),
+        task_id          TEXT,
+        run_id           TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+        tool_call_id     TEXT NOT NULL CHECK (length(trim(tool_call_id)) > 0),
+        approval_id      TEXT,
+        tool_name        TEXT NOT NULL CHECK (length(trim(tool_name)) > 0),
+        is_high_risk     INTEGER NOT NULL DEFAULT 0 CHECK (is_high_risk IN (0, 1)),
+        outcome_status   TEXT NOT NULL CHECK (outcome_status IN (
+                             'NOT_STARTED', 'SUCCEEDED', 'FAILED', 'PARTIAL', 'UNKNOWN'
+                         )),
+        side_effect_hint TEXT,
+        result_summary   TEXT,
+        error_message    TEXT,
+        reconciled_by    TEXT,
+        reconciled_note  TEXT,
+        reconciled_at    REAL,
+        started_at       REAL NOT NULL,
+        finished_at      REAL,
+        updated_at       REAL NOT NULL,
+        FOREIGN KEY (approval_id) REFERENCES hitl_approval_requests(id) ON DELETE SET NULL,
+        UNIQUE (thread_id, tool_call_id)
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_outcome_approval
+        ON tool_execution_outcomes(approval_id)
+        WHERE approval_id IS NOT NULL
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_outcome_task_status ON tool_execution_outcomes(task_id, outcome_status)",
 )
 
 # `vec_chunks` virtual table depends on per-instance embedding dimension (e.g. 32 in tests,
@@ -206,7 +283,7 @@ def _run_cleanup_step(
     """Execute one backup cleanup step while keeping subsequent steps independent."""
     try:
         action()
-    except BaseException as exc:  # noqa: BLE001 - always recorded and re-raised/noted by caller
+    except BaseException as exc:
         _logger.warning("%s: %s", description, exc)
         cleanup_errors.append(exc)
 
@@ -239,7 +316,7 @@ def create_verified_backup(
                 f"SQLite Backup API failed for {src_path} -> {bak_path}: {exc}"
             )
             primary_exc.__cause__ = exc
-        except BaseException as exc:  # noqa: BLE001 - preserved and re-raised unchanged below
+        except BaseException as exc:
             primary_exc = exc
     finally:
         cleanup_errors: list[BaseException] = []
@@ -372,7 +449,7 @@ def run_app_migrations(
     return _run_migrations(
         db_path,
         target_version=APP_SCHEMA_VERSION,
-        steps={1: _APP_V1_STATEMENTS},
+        steps={1: _APP_V1_STATEMENTS, 2: _APP_V2_STATEMENTS},
         enable_foreign_keys=True,
         enable_sqlite_vec=False,
         in_memory_conn=in_memory_conn,

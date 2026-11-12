@@ -14,11 +14,16 @@ from jarvis_studio.agent.graph import build_agent_graph
 from jarvis_studio.agent.hitl.manager import (
     ApprovalDecision,
     ApprovalStatus,
+    HITLManager,
+    compute_arguments_hash,
     get_hitl_manager,
 )
 from jarvis_studio.core.guard.route_guard import GuardAction, get_route_guard
 from jarvis_studio.core.observability.logger import logger
-from jarvis_studio.core.observability.trace_logger import ConversationTrace, get_trace_store
+from jarvis_studio.core.observability.trace_logger import (
+    ConversationTrace,
+    get_trace_store,
+)
 from jarvis_studio.core.observability.tracer import set_trace_context, timed_step
 from jarvis_studio.core.thinking.engine import ThinkingEngine
 from jarvis_studio.service.session_service import get_session_service
@@ -130,14 +135,17 @@ class AgentService:
         *,
         registry=None,
         checkpointer=None,
+        hitl_manager: HITLManager | None = None,
         bound_loop: asyncio.AbstractEventLoop | None = None,
         strict_loop_binding: bool | None = None,
         run_begin_hook: Callable[[], asyncio.Task[Any] | None] | None = None,
         run_end_hook: Callable[[asyncio.Task[Any] | None], None] | None = None,
     ):
-        self.graph = graph or build_agent_graph(registry=registry, checkpointer=checkpointer)
         self.session_service = get_session_service()
-        self.hitl_manager = get_hitl_manager()
+        self.hitl_manager = hitl_manager or get_hitl_manager()
+        self.graph = graph or build_agent_graph(
+            registry=registry, checkpointer=checkpointer, hitl_mgr=self.hitl_manager
+        )
         self._bound_loop: asyncio.AbstractEventLoop | None = bound_loop
         self._explicit_strict_loop_binding: bool | None = strict_loop_binding
         self._run_begin_hook = run_begin_hook
@@ -201,6 +209,7 @@ class AgentService:
             model=model,
             registry=registry,
             checkpointer=checkpointer,
+            hitl_mgr=self.hitl_manager,
         )
 
     async def invoke_agent(
@@ -638,14 +647,21 @@ class AgentService:
 
         clean_appr_id = approval_id.strip()
         req = self.hitl_manager.get_request(clean_appr_id, thread_id=clean_tid)
-        if not req or req.status != ApprovalStatus.PENDING:
+        if not req:
+            return False
+        is_pending = req.status == ApprovalStatus.PENDING
+        is_resumable_unleased = (
+            req.status in (ApprovalStatus.APPROVED, ApprovalStatus.MODIFIED)
+            and req.lease_owner_instance_id is None
+        )
+        if not (is_pending or is_resumable_unleased):
             return False
 
         try:
             state_snapshot = await self.graph.aget_state(
                 {"configurable": {"thread_id": clean_tid}}
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(
                 f"Checkpoint lookup failed during approval verification for '{clean_tid}': {exc}"
             )
@@ -676,6 +692,41 @@ class AgentService:
                         return True
 
         return False
+
+    def _prepare_persisted_resume_decision(
+        self,
+        thread_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+    ) -> str | None:
+        """Enforce Scenario C rules when resuming a previously persisted APPROVED/MODIFIED request."""
+        req = self.hitl_manager.get_request(approval_id, thread_id=thread_id)
+        if req is None:
+            return "Approval request not found"
+        if req.status not in (ApprovalStatus.APPROVED, ApprovalStatus.MODIFIED):
+            return None
+
+        submitted = decision.decision.lower()
+        if submitted == "reject":
+            self.hitl_manager.abort_approved_request(
+                approval_id, thread_id=thread_id, reason=decision.reason
+            )
+            return None
+
+        persisted_dec = (req.decision or "").lower()
+        if submitted != persisted_dec:
+            return (
+                f"Cannot overwrite persisted approval decision '{persisted_dec}' "
+                f"with '{submitted}'"
+            )
+        if (
+            req.status == ApprovalStatus.MODIFIED
+            and decision.modified_arguments is not None
+            and compute_arguments_hash(decision.modified_arguments)
+            != compute_arguments_hash(req.modified_arguments)
+        ):
+            return "Cannot overwrite persisted modified arguments"
+        return None
 
     async def resume_approval(
         self,
@@ -708,6 +759,15 @@ class AgentService:
                 run_id="",
                 status="error",
                 error="Approval request not found",
+            )
+
+        prep_err = self._prepare_persisted_resume_decision(thread_id, approval_id, decision)
+        if prep_err is not None:
+            return AgentExecutionResult(
+                thread_id=thread_id,
+                run_id="",
+                status="error",
+                error=prep_err,
             )
 
         effective_run_id = set_trace_context(thread_id)
@@ -801,6 +861,11 @@ class AgentService:
                 f"Blocked stream_resume_approval due to invalid thread/approval binding: thread='{thread_id}', approval='{approval_id}'"
             )
             yield {"event": "error", "data": {"error": "Approval request not found"}}
+            return
+
+        prep_err = self._prepare_persisted_resume_decision(thread_id, approval_id, decision)
+        if prep_err is not None:
+            yield {"event": "error", "data": {"error": prep_err}}
             return
 
         effective_run_id = set_trace_context(thread_id)

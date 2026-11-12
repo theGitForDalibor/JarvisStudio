@@ -6,8 +6,15 @@ from typing import Any, NoReturn
 from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
-from jarvis_studio.agent.hitl.manager import ApprovalDecision, get_hitl_manager
-from jarvis_studio.api.schemas.request import ApprovalDecisionRequest
+from jarvis_studio.agent.hitl.manager import (
+    ApprovalDecision,
+    ExecutionOutcomeStatus,
+    get_hitl_manager,
+)
+from jarvis_studio.api.schemas.request import (
+    ApprovalDecisionRequest,
+    OutcomeAuditRequest,
+)
 from jarvis_studio.api.schemas.response import ChatResponse
 from jarvis_studio.service.agent_service import get_agent_service
 from jarvis_studio.service.session_service import get_session_service
@@ -220,3 +227,63 @@ async def submit_approval_decision_stream(
             }
 
     return EventSourceResponse(event_generator())
+
+@router.get("/{approval_id}/outcome", response_model=dict[str, Any])
+async def get_approval_outcome(
+    approval_id: str,
+    request: Request,
+    thread_id: str | None = Query(
+        default=None, description="Session / Thread identifier owning the approval"
+    ),
+) -> dict[str, Any]:
+    """Retrieve the execution outcome linked to an approval request within its thread."""
+    trusted_tid = _resolve_verified_session_thread_id(
+        request, query_thread_id=thread_id
+    )
+    hitl_mgr = get_hitl_manager()
+    outcome = hitl_mgr.get_outcome_by_approval(approval_id, thread_id=trusted_tid)
+    if outcome is None:
+        _raise_not_found()
+    return outcome.model_dump()
+
+
+@router.post("/{approval_id}/audit", response_model=dict[str, Any])
+async def audit_approval_outcome(
+    approval_id: str,
+    payload: OutcomeAuditRequest,
+    request: Request,
+    thread_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Record human audit verification for an uncertain outcome without reactivating approval."""
+    trusted_tid = _resolve_verified_session_thread_id(
+        request,
+        body_thread_id=payload.thread_id,
+        query_thread_id=thread_id,
+    )
+    try:
+        target_status = ExecutionOutcomeStatus(payload.verified_status.upper())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid verified_status; expected 'SUCCEEDED', 'FAILED', or 'PARTIAL'",
+        ) from exc
+    if target_status not in (
+        ExecutionOutcomeStatus.SUCCEEDED,
+        ExecutionOutcomeStatus.FAILED,
+        ExecutionOutcomeStatus.PARTIAL,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid verified_status; expected 'SUCCEEDED', 'FAILED', or 'PARTIAL'",
+        )
+    hitl_mgr = get_hitl_manager()
+    outcome = hitl_mgr.audit_uncertain_outcome(
+        thread_id=trusted_tid,
+        approval_id=approval_id,
+        verified_status=target_status,
+        actor=payload.actor,
+        note=payload.note,
+    )
+    if outcome is None:
+        _raise_not_found()
+    return outcome.model_dump()

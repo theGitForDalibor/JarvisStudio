@@ -29,3 +29,13 @@ class ApprovalDecisionRequest(BaseModel):
         default=None,
         description="Modified tool arguments if decision is 'modify'",
     )
+
+class OutcomeAuditRequest(BaseModel):
+    """Human reconciliation payload for an uncertain tool execution outcome."""
+
+    thread_id: str = Field(description="The thread ID owning the outcome record")
+    verified_status: str = Field(
+        description="Human-confirmed outcome status: 'SUCCEEDED', 'FAILED', or 'PARTIAL'"
+    )
+    actor: str = Field(default="local_user", description="Auditor identifier")
+    note: str = Field(default="", description="Audit note summarizing verification")

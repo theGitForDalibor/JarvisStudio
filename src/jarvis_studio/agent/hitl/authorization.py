@@ -139,7 +139,7 @@ def verify_tool_execution_authorization(
     if not decision_data:
         req = hitl.get_by_tool_call_id(tool_call_id, thread_id=thread_id)
         if req:
-            if req.status in (ApprovalStatus.CONSUMED, ApprovalStatus.FAILED):
+            if req.status in (ApprovalStatus.CONSUMED, ApprovalStatus.FAILED, ApprovalStatus.UNKNOWN):
                 return AuthorizationResult(
                     is_authorized=False,
                     effective_args=raw_args,
@@ -267,7 +267,7 @@ def verify_tool_execution_authorization(
         if tool and hasattr(tool, "args_schema") and tool.args_schema:
             try:
                 tool.args_schema.model_validate(modified_args)
-            except Exception as val_err:  # noqa: BLE001
+            except Exception as val_err:
                 logger.error(
                     f"Modified arguments validation failed for '{tool_name}': {val_err}"
                 )
@@ -321,11 +321,22 @@ def verify_tool_execution_authorization(
                 ),
             )
 
+        run_ctx = state.get("run_context") or {}
+        raw_run_id = run_ctx.get("run_id") if isinstance(run_ctx, dict) else None
+        lease_run_id = (
+            raw_run_id.strip()
+            if isinstance(raw_run_id, str) and raw_run_id.strip()
+            else None
+        )
+        lease_kwargs: dict[str, Any] = {}
+        if lease_run_id is not None:
+            lease_kwargs["lease_acquired_run_id"] = lease_run_id
         success, _leased_req, err = hitl.acquire_execution_lease(
             approval_id=appr_id,
             thread_id=thread_id,
             tool_call_id=tool_call_id,
             arguments_hash=expected_hash,
+            **lease_kwargs,
         )
         if not success:
             logger.warning(

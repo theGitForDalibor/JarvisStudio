@@ -30,7 +30,7 @@ def _run_teardown_step(errors: list[BaseException], action: Callable[[], object]
     """Run one teardown step and record any failure without skipping remaining cleanup."""
     try:
         action()
-    except BaseException as exc:  # noqa: BLE001 - collected and re-raised by _raise_collected_errors
+    except BaseException as exc:
         errors.append(exc)
 
 
@@ -68,6 +68,9 @@ def _reset_runtime_singletons(*, close_stores: bool) -> None:
         "jarvis_studio.core.observability.trace_logger", "_global_trace_store"
     )
     hitl_manager = _pop_module_attr("jarvis_studio.agent.hitl.manager", "_global_hitl_manager")
+    default_hitl_manager = _pop_module_attr(
+        "jarvis_studio.agent.hitl.manager", "_default_hitl_manager"
+    )
     mcp_manager = _pop_module_attr("jarvis_studio.tools.mcp.client", "_global_mcp_manager")
     registry = _pop_module_attr("jarvis_studio.tools.registry", "_global_registry")
     _pop_module_attr("jarvis_studio.agent.checkpoints.saver", "_cached_checkpointer")
@@ -92,6 +95,7 @@ def _reset_runtime_singletons(*, close_stores: bool) -> None:
             seen_clear_ids: set[int] = set()
             for candidate in (
                 hitl_manager,
+                default_hitl_manager,
                 getattr(agent_service, "hitl_manager", None),
                 getattr(default_agent_service, "hitl_manager", None),
             ):
@@ -99,6 +103,18 @@ def _reset_runtime_singletons(*, close_stores: bool) -> None:
                 if callable(clear_fn) and id(candidate) not in seen_clear_ids:
                     seen_clear_ids.add(id(candidate))
                     _run_teardown_step(errors, clear_fn)
+
+            seen_hitl_close_ids: set[int] = set()
+            for candidate in (
+                hitl_manager,
+                default_hitl_manager,
+                getattr(agent_service, "hitl_manager", None),
+                getattr(default_agent_service, "hitl_manager", None),
+            ):
+                close_fn = getattr(candidate, "close", None)
+                if callable(close_fn) and id(candidate) not in seen_hitl_close_ids:
+                    seen_hitl_close_ids.add(id(candidate))
+                    _run_teardown_step(errors, close_fn)
 
             connections = getattr(mcp_manager, "connections", None)
             if isinstance(connections, dict) and any(

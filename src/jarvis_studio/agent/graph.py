@@ -5,6 +5,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from jarvis_studio.agent.checkpoints.saver import get_checkpointer
+from jarvis_studio.agent.hitl.manager import HITLManager
 from jarvis_studio.agent.nodes.approval import create_approval_node
 from jarvis_studio.agent.nodes.assistant import create_assistant_node
 from jarvis_studio.agent.nodes.executor import create_tool_executor_node
@@ -20,6 +21,8 @@ def build_agent_graph(
     registry: ToolRegistry | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     system_prompt: str | None = None,
+    *,
+    hitl_mgr: HITLManager | None = None,
 ):
     """Construct, link, and compile the production LangGraph StateGraph."""
     tool_registry = registry or get_default_registry()
@@ -51,8 +54,8 @@ def build_agent_graph(
             else "You are Jarvis Studio personal assistant.",
         ),
     )
-    workflow.add_node("approval_gate", create_approval_node(tool_registry))
-    workflow.add_node("tools", create_tool_executor_node(tool_registry))
+    workflow.add_node("approval_gate", create_approval_node(tool_registry, hitl_mgr=hitl_mgr))
+    workflow.add_node("tools", create_tool_executor_node(tool_registry, hitl_mgr=hitl_mgr))
 
     # Edges
     workflow.add_edge(START, "assistant")

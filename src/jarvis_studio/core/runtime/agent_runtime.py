@@ -29,7 +29,9 @@ from jarvis_studio.core.persistence.async_sqlite import (
 from jarvis_studio.core.persistence.runtime_lock import RuntimeInstanceLock
 
 if TYPE_CHECKING:
+    from jarvis_studio.agent.hitl.manager import HITLManager
     from jarvis_studio.config.settings import Settings
+    from jarvis_studio.core.persistence.recovery import StartupRecoveryReport
     from jarvis_studio.service.agent_service import AgentService
     from jarvis_studio.tools.registry import ToolRegistry
 
@@ -61,7 +63,7 @@ def set_active_runtime(runtime: AgentRuntime | None) -> None:
 def _run_cleanup_action(errors: list[Exception], action: Callable[[], object]) -> None:
     try:
         action()
-    except Exception as exc:  # noqa: BLE001 - collected and surfaced after all steps finish
+    except Exception as exc:
         errors.append(exc)
 
 
@@ -97,6 +99,7 @@ def _collect_loaded_global_stores() -> list[tuple[object, list[_GlobalStoreBindi
     """
     specs: tuple[tuple[str, str, str | None], ...] = (
         ("jarvis_studio.service.agent_service", "_default_agent_service", "session_service"),
+        ("jarvis_studio.agent.hitl.manager", "_default_hitl_manager", None),
         ("jarvis_studio.memory.manager", "_global_memory_manager", "store"),
         ("jarvis_studio.core.observability.trace_logger", "_global_trace_store", None),
         ("jarvis_studio.service.session_service", "_global_session_service", None),
@@ -133,6 +136,7 @@ class AgentRuntime:
         register_as_active: bool = False,
         manage_mcp: bool = False,
         tool_registry: ToolRegistry | None = None,
+        hitl_manager: HITLManager | None = None,
         stores: Sequence[object] = (),
         close_global_stores: bool | None = None,
         drain_timeout: float = 5.0,
@@ -149,6 +153,7 @@ class AgentRuntime:
         self._register_as_active = register_as_active
         self._manage_mcp = manage_mcp
         self._tool_registry = tool_registry
+        self._injected_hitl_manager = hitl_manager
         self._owned_stores: list[object] = list(stores)
         self._close_global_stores = (
             register_as_active if close_global_stores is None else close_global_stores
@@ -159,6 +164,8 @@ class AgentRuntime:
         self._bound_loop: asyncio.AbstractEventLoop | None = None
         self._managed_sqlite: ManagedSqliteCheckpointer | None = None
         self._checkpointer: BaseCheckpointSaver | None = None
+        self._hitl_manager: HITLManager | None = None
+        self._recovery_report: StartupRecoveryReport | None = None
         self._agent_service: AgentService | None = None
         self._mcp_manager: Any | None = None
         self._active_tasks: dict[asyncio.Task[Any], int] = {}
@@ -212,6 +219,18 @@ class AgentRuntime:
     def tool_registry(self) -> ToolRegistry | None:
         """Tool registry associated with this runtime, if initialized."""
         return self._tool_registry
+
+    @property
+    def hitl_manager(self) -> HITLManager:
+        """Persistent HITL manager owned by this runtime."""
+        if self._hitl_manager is None:
+            raise RuntimeError("AgentRuntime HITLManager is not initialized")
+        return self._hitl_manager
+
+    @property
+    def startup_recovery(self) -> StartupRecoveryReport | None:
+        """Result of the lock-gated startup reconciliation run during `start()`."""
+        return self._recovery_report
 
     @property
     def agent_service(self) -> AgentService:
@@ -299,15 +318,35 @@ class AgentRuntime:
                 self._mcp_manager = mcp_mgr
                 try:
                     await mcp_mgr.connect_and_register_all(registry)
-                except Exception as exc:  # noqa: BLE001 - preserve MCP graceful degradation
+                except Exception as exc:
                     logger.error(f"Error during MCP servers initialization: {exc}")
 
+            from jarvis_studio.agent.hitl.manager import HITLManager
+            from jarvis_studio.core.persistence.recovery import reconcile_on_startup
             from jarvis_studio.service.agent_service import AgentService
+
+            if self._injected_hitl_manager is not None:
+                hitl_mgr = self._injected_hitl_manager
+                hitl_mgr.runtime_instance_id = self.instance_id
+            else:
+                hitl_mgr = HITLManager(
+                    db_path=self._settings.storage.sqlite_path,
+                    runtime_instance_id=self.instance_id,
+                )
+            self._hitl_manager = hitl_mgr
+            self._recovery_report = await reconcile_on_startup(
+                hitl_store=hitl_mgr.store,
+                current_runtime_id=self.instance_id,
+                checkpointer=saver,
+                check_checkpoints=(backend == "sqlite"),
+                runtime_lock=self._lock,
+            )
 
             self._checkpointer = saver
             self._agent_service = AgentService(
                 registry=registry,
                 checkpointer=saver,
+                hitl_manager=hitl_mgr,
                 bound_loop=loop,
                 strict_loop_binding=self._strict_loop_binding,
                 run_begin_hook=self._begin_run,
@@ -323,7 +362,7 @@ class AgentRuntime:
         except BaseException as exc:
             try:
                 await self.shutdown()
-            except BaseException as shutdown_exc:  # noqa: BLE001
+            except BaseException as shutdown_exc:
                 exc.add_note(
                     f"Startup rollback shutdown failed "
                     f"({type(shutdown_exc).__name__}: {shutdown_exc})"
@@ -382,6 +421,8 @@ class AgentRuntime:
             svc_store = getattr(self._agent_service, "session_service", None)
             if svc_store is not None:
                 candidates.append((svc_store, []))
+        if self._hitl_manager is not None:
+            candidates.append((self._hitl_manager, []))
         if self._close_global_stores:
             candidates.extend(_collect_loaded_global_stores())
 
@@ -412,7 +453,7 @@ class AgentRuntime:
             store_id = id(store)
             try:
                 store.close()  # type: ignore[attr-defined]
-            except Exception as exc:  # noqa: BLE001 - continue closing remaining stores
+            except Exception as exc:
                 all_closed = False
                 errors.append(exc)
             else:
@@ -459,7 +500,7 @@ class AgentRuntime:
             managed = self._managed_sqlite
             try:
                 await managed.aclose()
-            except Exception as exc:  # noqa: BLE001 - retain lock if worker thread survived
+            except Exception as exc:
                 checkpointer_closed = False
                 errors.append(exc)
             else:
@@ -475,7 +516,7 @@ class AgentRuntime:
             registry = self._tool_registry
             try:
                 await mcp_mgr.disconnect_all(registry)
-            except Exception as exc:  # noqa: BLE001 - retain _mcp_manager for retry
+            except Exception as exc:
                 mcp_disconnected = False
                 errors.append(exc)
             else:
@@ -487,6 +528,7 @@ class AgentRuntime:
         # 5. Detach runtime & release OS lock ONLY when all resources closed cleanly
         if checkpointer_closed and mcp_disconnected and stores_closed:
             self._agent_service = None
+            self._hitl_manager = None
             self._active_tasks.clear()
             if self._register_as_active and get_active_runtime() is self:
                 _run_cleanup_action(errors, lambda: set_active_runtime(None))
@@ -494,7 +536,7 @@ class AgentRuntime:
             lock_released = True
             try:
                 self._lock.release()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 lock_released = False
                 errors.append(exc)
 
@@ -534,6 +576,7 @@ class AgentRuntime:
         register_as_active: bool = False,
         manage_mcp: bool = False,
         tool_registry: ToolRegistry | None = None,
+        hitl_manager: HITLManager | None = None,
         stores: Sequence[object] = (),
         close_global_stores: bool | None = None,
         drain_timeout: float = 5.0,
@@ -547,6 +590,7 @@ class AgentRuntime:
             register_as_active=register_as_active,
             manage_mcp=manage_mcp,
             tool_registry=tool_registry,
+            hitl_manager=hitl_manager,
             stores=stores,
             close_global_stores=close_global_stores,
             drain_timeout=drain_timeout,
