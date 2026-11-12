@@ -318,6 +318,13 @@ class MCPClientManager:
         if not conn:
             return
 
+        if (
+            not conn.is_connected
+            and getattr(conn, "_exit_stack", None) is None
+            and not conn.registered_tools
+        ):
+            return
+
         target_registry = registry or get_default_registry()
         for tool_name in list(conn.registered_tools):
             target_registry.unregister(tool_name)
@@ -348,12 +355,22 @@ class MCPClientManager:
         return self.connections
 
     async def disconnect_all(self, registry: ToolRegistry | None = None) -> None:
-        """Disconnect all active MCP servers."""
+        """Disconnect all active MCP servers, surfacing errors after attempting all."""
+        errors: list[Exception] = []
         for name in list(self.connections.keys()):
             try:
                 await self.disconnect_server(name, registry=registry)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - collected after attempting all servers
                 logger.error(f"Error disconnecting MCP server '{name}': {e}")
+                errors.append(e)
+
+        if len(errors) == 1:
+            raise errors[0]
+        if len(errors) > 1:
+            raise ExceptionGroup(
+                "Multiple errors occurred while disconnecting MCP servers",
+                errors,
+            )
 
     def get_status(self) -> dict[str, Any]:
         """Return runtime status summary of all configured MCP servers."""

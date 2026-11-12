@@ -193,45 +193,107 @@ async def test_p2_shut_02_graceful_shutdown_orders_drain_before_resources_and_re
 @pytest.mark.asyncio
 async def test_p2_shut_03_shutdown_collects_errors_without_leaking_connection_or_lock(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """P2-SHUT-03 (R5): Cleanup errors are preserved together without skipping lock/DB close."""
+    """P2-SHUT-03: Store close failure keeps SHUTTING_DOWN, lock, and failed refs until retry succeeds."""
+    from jarvis_studio.core.observability import trace_logger as trace_mod
+    from jarvis_studio.core.persistence import RuntimeLockError
+    from jarvis_studio.service import session_service as sess_mod
+
     cfg = _make_sqlite_settings(tmp_path)
     closed_markers: list[str] = []
 
-    class _FailingMCP:
-        async def disconnect_all(self, registry: Any) -> None:
-            raise RuntimeError("mcp disconnect boom")
+    class _FlakyStore:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self.should_fail = True
+            self.close_calls = 0
 
-    class _FailingStore:
         def close(self) -> None:
-            raise OSError("store close boom")
+            self.close_calls += 1
+            if self.should_fail:
+                raise OSError(f"{self.label} close boom")
+            closed_markers.append(f"{self.label}_closed")
 
     class _HealthyStore:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
         def close(self) -> None:
+            self.close_calls += 1
             closed_markers.append("healthy_store_closed")
+
+    healthy_store = _HealthyStore()
+    failing_owned = _FlakyStore("owned_store")
+    failing_global_trace = _FlakyStore("global_trace")
 
     rt = AgentRuntime(
         cfg,
         register_as_active=True,
-        stores=[_HealthyStore(), _FailingStore()],
+        close_global_stores=True,
+        stores=[healthy_store, failing_owned],
     )
     await rt.start()
-    rt._mcp_manager = _FailingMCP()
-    worker_thread = rt._managed_sqlite.conn._thread  # type: ignore[union-attr]
+    monkeypatch.setattr(trace_mod, "_global_trace_store", failing_global_trace)
 
+    worker_thread = rt._managed_sqlite.conn._thread  # type: ignore[union-attr]
+    managed = rt._managed_sqlite
+    assert managed is not None
+    orig_aclose = managed.aclose
+    checkpointer_close_calls = 0
+
+    async def _counting_aclose() -> None:
+        nonlocal checkpointer_close_calls
+        checkpointer_close_calls += 1
+        await orig_aclose()
+
+    managed.aclose = _counting_aclose  # type: ignore[method-assign]
+
+    # 1. First shutdown: checkpointer & healthy stores close, failing stores keep lock & references
     with pytest.raises(BaseExceptionGroup) as exc_info:
         await rt.shutdown()
 
     exc_msgs = [str(e) for e in exc_info.value.exceptions]
-    assert "mcp disconnect boom" in exc_msgs
-    assert "store close boom" in exc_msgs
+    assert "owned_store close boom" in exc_msgs
+    assert "global_trace close boom" in exc_msgs
 
-    # Everything else still closed cleanly with zero leaked worker thread or lock
+    # Healthy store & checkpointer closed once; failing stores did NOT block remaining stores
+    assert healthy_store.close_calls == 1
     assert closed_markers == ["healthy_store_closed"]
+    assert checkpointer_close_calls == 1
     assert not worker_thread.is_alive()
-    assert rt.lock.is_acquired is False
+    assert rt._managed_sqlite is None
+
+    # Runtime stays SHUTTING_DOWN and retains lock, failing owned store, and failing global store ref
+    assert rt.state == RuntimeState.SHUTTING_DOWN
+    assert rt.lock.is_acquired is True
+    assert failing_owned in rt._owned_stores
+    assert healthy_store not in rt._owned_stores
+    assert trace_mod._global_trace_store is failing_global_trace
+    assert sess_mod._global_session_service is None
+
+    # Second runtime cannot acquire lock on the same persistence root while store cleanup failed
+    rt2 = AgentRuntime(cfg, instance_id="blocked-by-store-failure")
+    with pytest.raises(RuntimeLockError):
+        await rt2.start()
+
+    # 2. Repair failing stores and retry shutdown -> completes cleanly without re-closing healthy ones
+    failing_owned.should_fail = False
+    failing_global_trace.should_fail = False
+
+    await rt.shutdown()
+
     assert rt.state == RuntimeState.CLOSED
+    assert rt.lock.is_acquired is False
     assert get_active_runtime() is None
+    assert rt._owned_stores == []
+    assert trace_mod._global_trace_store is None
+    assert healthy_store.close_calls == 1
+    assert checkpointer_close_calls == 1
+    assert failing_owned.close_calls == 2
+    assert failing_global_trace.close_calls == 2
+    assert "owned_store_closed" in closed_markers
+    assert "global_trace_closed" in closed_markers
 
     probe = RuntimeInstanceLock(rt.lock.lock_paths, instance_id="after-error-shutdown")
     probe.acquire()
@@ -569,3 +631,97 @@ def test_p2_cli_chat_mcp_registers_builtins_once_and_disconnects(
     assert cli_mcp_mgr.connections["live_srv"].is_connected is False
     assert cli_registry.get("live_srv_calculate_sum") is None
     assert get_active_runtime() is None
+
+
+@pytest.mark.asyncio
+async def test_p2_shut_06_mcp_disconnect_failure_preserves_manager_handles_partial_and_retries(
+    tmp_path: Path,
+) -> None:
+    """P2: MCP disconnect failure preserves _mcp_manager, avoids re-closing disconnected servers, and retries cleanly."""
+    from langchain_core.tools import tool
+
+    from jarvis_studio.core.persistence import RuntimeLockError
+    from jarvis_studio.tools.mcp.client import (
+        MCPClientManager,
+        MCPConnection,
+        MCPServerConfig,
+    )
+    from jarvis_studio.tools.registry import ToolRegistry
+
+    @tool
+    def srv_ok_ping(q: str) -> str:
+        """Ping OK."""
+        return q
+
+    @tool
+    def srv_flaky_ping(q: str) -> str:
+        """Ping flaky."""
+        return q
+
+    class _TrackedMCPConnection(MCPConnection):
+        def __init__(self, name: str, *, fail_first: bool = False) -> None:
+            super().__init__(name=name, config=MCPServerConfig(command="echo", enabled=True))
+            self.is_connected = True
+            self.fail_first = fail_first
+            self.disconnect_calls = 0
+
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            if self.fail_first and self.disconnect_calls == 1:
+                raise RuntimeError(f"mcp disconnect boom on {self.name}")
+            self.is_connected = False
+            self._exit_stack = None
+            self.session = None
+
+    cfg = _make_sqlite_settings(tmp_path)
+    registry = ToolRegistry()
+    registry.register(srv_ok_ping)
+    registry.register(srv_flaky_ping)
+
+    mcp_mgr = MCPClientManager(config_path="nonexistent.json")
+    conn_ok = _TrackedMCPConnection("srv_ok", fail_first=False)
+    conn_ok.registered_tools = ["srv_ok_ping"]
+    conn_flaky = _TrackedMCPConnection("srv_flaky", fail_first=True)
+    conn_flaky.registered_tools = ["srv_flaky_ping"]
+    mcp_mgr.connections["srv_ok"] = conn_ok
+    mcp_mgr.connections["srv_flaky"] = conn_flaky
+
+    rt = AgentRuntime(cfg, register_as_active=True, tool_registry=registry)
+    await rt.start()
+    rt._mcp_manager = mcp_mgr
+    worker_thread = rt._managed_sqlite.conn._thread  # type: ignore[union-attr]
+
+    # 1. First shutdown: srv_ok disconnects, srv_flaky fails -> manager & lock retained
+    with pytest.raises(RuntimeError, match="mcp disconnect boom on srv_flaky"):
+        await rt.shutdown()
+
+    assert rt._mcp_manager is mcp_mgr
+    assert rt.state == RuntimeState.SHUTTING_DOWN
+    assert rt.lock.is_acquired is True
+    assert not worker_thread.is_alive()
+    assert conn_ok.disconnect_calls == 1
+    assert conn_ok.is_connected is False
+    assert conn_flaky.disconnect_calls == 1
+    assert conn_flaky.is_connected is True
+    assert registry.get("srv_ok_ping") is None
+    assert registry.get("srv_flaky_ping") is None
+
+    # Contender cannot acquire lock while runtime still holds partial-disconnect state
+    rt2 = AgentRuntime(cfg, instance_id="blocked-by-mcp-failure")
+    with pytest.raises(RuntimeLockError):
+        await rt2.start()
+
+    # 2. Retry shutdown: srv_ok is NOT re-disconnected; srv_flaky succeeds & runtime closes
+    await rt.shutdown()
+
+    assert conn_ok.disconnect_calls == 1
+    assert conn_flaky.disconnect_calls == 2
+    assert conn_flaky.is_connected is False
+    assert rt._mcp_manager is None
+    assert rt.state == RuntimeState.CLOSED
+    assert rt.lock.is_acquired is False
+    assert get_active_runtime() is None
+
+    probe = RuntimeInstanceLock(rt.lock.lock_paths, instance_id="after-mcp-retry")
+    probe.acquire()
+    probe.release()

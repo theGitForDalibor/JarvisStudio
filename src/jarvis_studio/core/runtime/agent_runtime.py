@@ -65,40 +65,45 @@ def _run_cleanup_action(errors: list[Exception], action: Callable[[], object]) -
         errors.append(exc)
 
 
-def _pop_loaded_attr(module_name: str, attr_name: str) -> object | None:
+def _get_loaded_attr(module_name: str, attr_name: str) -> tuple[object, object] | None:
     module = sys.modules.get(module_name)
     if module is None:
         return None
     value = getattr(module, attr_name, None)
-    setattr(module, attr_name, None)
-    return value
+    if value is None:
+        return None
+    return module, value
 
 
-def _collect_loaded_global_stores() -> list[object]:
-    """Detach and collect currently loaded module-level persistent store singletons."""
-    default_agent_svc = _pop_loaded_attr(
-        "jarvis_studio.service.agent_service", "_default_agent_service"
-    )
-    session_svc = _pop_loaded_attr(
-        "jarvis_studio.service.session_service", "_global_session_service"
-    )
-    mem_mgr = _pop_loaded_attr("jarvis_studio.memory.manager", "_global_memory_manager")
-    trace_store = _pop_loaded_attr(
-        "jarvis_studio.core.observability.trace_logger", "_global_trace_store"
-    )
-    rag_store = _pop_loaded_attr("jarvis_studio.rag.store", "_global_vec_store")
+def _collect_loaded_global_stores() -> list[tuple[object, list[tuple[object, str, object]]]]:
+    """Collect loaded global persistent stores paired with their module bindings.
 
-    stores: list[object] = []
-    for candidate in (
-        getattr(default_agent_svc, "session_service", None),
-        getattr(mem_mgr, "store", None),
-        trace_store,
-        session_svc,
-        rag_store,
-    ):
-        if candidate is not None and callable(getattr(candidate, "close", None)):
-            stores.append(candidate)
-    return stores
+    Module globals are NOT cleared upfront; callers clear bindings only after the
+    underlying store closes cleanly.
+    """
+    specs: tuple[tuple[str, str, str | None], ...] = (
+        ("jarvis_studio.service.agent_service", "_default_agent_service", "session_service"),
+        ("jarvis_studio.memory.manager", "_global_memory_manager", "store"),
+        ("jarvis_studio.core.observability.trace_logger", "_global_trace_store", None),
+        ("jarvis_studio.service.session_service", "_global_session_service", None),
+        ("jarvis_studio.rag.store", "_global_vec_store", None),
+    )
+
+    stores_by_id: dict[int, tuple[object, list[tuple[object, str, object]]]] = {}
+    for module_name, attr_name, store_attr in specs:
+        loaded = _get_loaded_attr(module_name, attr_name)
+        if loaded is None:
+            continue
+        module, holder = loaded
+        candidate = getattr(holder, store_attr, None) if store_attr is not None else holder
+        if candidate is None or not callable(getattr(candidate, "close", None)):
+            continue
+        store_id = id(candidate)
+        if store_id not in stores_by_id:
+            stores_by_id[store_id] = (candidate, [])
+        stores_by_id[store_id][1].append((module, attr_name, holder))
+
+    return list(stores_by_id.values())
 
 
 class AgentRuntime:
@@ -143,6 +148,7 @@ class AgentRuntime:
         self._agent_service: AgentService | None = None
         self._mcp_manager: Any | None = None
         self._active_tasks: dict[asyncio.Task[Any], int] = {}
+        self._closed_store_ids: set[int] = set()
 
     @property
     def state(self) -> RuntimeState:
@@ -352,35 +358,64 @@ class AgentRuntime:
             logger.error(msg)
             raise TimeoutError(msg)
 
-    def _close_stores(self, errors: list[Exception]) -> None:
+    def _close_stores(self, errors: list[Exception]) -> bool:
+        """Close owned, service, and loaded global stores; return True iff all succeeded."""
         owned_ids = {id(store) for store in self._owned_stores}
-        candidates: list[object] = list(reversed(self._owned_stores))
+        candidates: list[tuple[object, list[tuple[object, str, object]]]] = [
+            (store, []) for store in reversed(self._owned_stores)
+        ]
         if self._agent_service is not None:
-            candidates.append(getattr(self._agent_service, "session_service", None))
+            svc_store = getattr(self._agent_service, "session_service", None)
+            if svc_store is not None:
+                candidates.append((svc_store, []))
         if self._close_global_stores:
             candidates.extend(_collect_loaded_global_stores())
 
-        seen_ids: set[int] = set()
-        closed_owned_ids: set[int] = set()
-        for store in candidates:
-            if store is None or id(store) in seen_ids:
+        ordered_entries: list[tuple[object, list[tuple[object, str, object]]]] = []
+        entry_by_id: dict[int, tuple[object, list[tuple[object, str, object]]]] = {}
+        for store, bindings in candidates:
+            if store is None:
                 continue
             close_fn = getattr(store, "close", None)
             if not callable(close_fn):
                 continue
-            seen_ids.add(id(store))
+            store_id = id(store)
+            if store_id in self._closed_store_ids:
+                for module, attr_name, expected in bindings:
+                    if getattr(module, attr_name, None) is expected:
+                        setattr(module, attr_name, None)
+                continue
+            existing = entry_by_id.get(store_id)
+            if existing is None:
+                entry = (store, list(bindings))
+                entry_by_id[store_id] = entry
+                ordered_entries.append(entry)
+            else:
+                existing[1].extend(bindings)
+
+        closed_owned_ids: set[int] = set()
+        all_closed = True
+        for store, bindings in ordered_entries:
+            store_id = id(store)
             try:
-                close_fn()
-            except Exception as exc:  # noqa: BLE001 - collected and surfaced after all steps finish
+                store.close()  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001 - continue closing remaining stores
+                all_closed = False
                 errors.append(exc)
             else:
-                if id(store) in owned_ids:
-                    closed_owned_ids.add(id(store))
+                self._closed_store_ids.add(store_id)
+                if store_id in owned_ids:
+                    closed_owned_ids.add(store_id)
+                for module, attr_name, expected in bindings:
+                    if getattr(module, attr_name, None) is expected:
+                        setattr(module, attr_name, None)
 
         if closed_owned_ids:
             self._owned_stores = [
                 store for store in self._owned_stores if id(store) not in closed_owned_ids
             ]
+
+        return all_closed
 
     async def shutdown(self) -> None:
         """Gracefully drain runs, close checkpointer/MCP/stores, and release root lock."""
@@ -421,23 +456,24 @@ class AgentRuntime:
         else:
             self._checkpointer = None
 
-        # 3. Disconnect external MCP sessions (preserve manager if shutdown itself is cancelled)
+        # 3. Disconnect external MCP sessions; retain manager on failure for retry
+        mcp_disconnected = True
         if self._mcp_manager is not None:
             mcp_mgr = self._mcp_manager
             registry = self._tool_registry
             try:
                 await mcp_mgr.disconnect_all(registry)
-            except Exception as exc:  # noqa: BLE001 - collected and surfaced after cleanup
+            except Exception as exc:  # noqa: BLE001 - retain _mcp_manager for retry
+                mcp_disconnected = False
                 errors.append(exc)
-                self._mcp_manager = None
             else:
                 self._mcp_manager = None
 
-        # 4. Close owned & loaded persistent stores
-        self._close_stores(errors)
+        # 4. Close owned & loaded persistent stores; retain failing stores & globals for retry
+        stores_closed = self._close_stores(errors)
 
-        # 5. Detach runtime & release OS lock ONLY when active runs and checkpointer are closed
-        if checkpointer_closed:
+        # 5. Detach runtime & release OS lock ONLY when all resources closed cleanly
+        if checkpointer_closed and mcp_disconnected and stores_closed:
             self._agent_service = None
             self._active_tasks.clear()
             if self._register_as_active and get_active_runtime() is self:
@@ -454,9 +490,16 @@ class AgentRuntime:
                 self._state = RuntimeState.CLOSED
                 logger.info(f"AgentRuntime closed (instance_id={self.instance_id})")
         else:
+            incomplete_parts: list[str] = []
+            if not checkpointer_closed:
+                incomplete_parts.append("checkpointer")
+            if not mcp_disconnected:
+                incomplete_parts.append("mcp")
+            if not stores_closed:
+                incomplete_parts.append("stores")
             logger.error(
-                f"AgentRuntime shutdown incomplete (instance_id={self.instance_id}): "
-                "checkpointer did not close cleanly; retaining RuntimeInstanceLock"
+                f"AgentRuntime shutdown incomplete (instance_id={self.instance_id}, "
+                f"pending={incomplete_parts}); retaining SHUTTING_DOWN and RuntimeInstanceLock"
             )
 
         if len(errors) == 1:
