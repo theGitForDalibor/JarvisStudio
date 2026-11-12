@@ -1,5 +1,6 @@
 """High-level Agent Application Service decoupling API/UI from LangGraph."""
 
+import asyncio
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -54,10 +55,47 @@ class AgentExecutionResult:
 class AgentService:
     """Service orchestrating agent executions, checkpoints, and HITL resumptions."""
 
-    def __init__(self, graph=None):
-        self.graph = graph or build_agent_graph()
+    def __init__(
+        self,
+        graph=None,
+        *,
+        checkpointer=None,
+        bound_loop: asyncio.AbstractEventLoop | None = None,
+        strict_loop_binding: bool | None = None,
+    ):
+        self.graph = graph or build_agent_graph(checkpointer=checkpointer)
         self.session_service = get_session_service()
         self.hitl_manager = get_hitl_manager()
+        self._bound_loop: asyncio.AbstractEventLoop | None = bound_loop
+        self._explicit_strict_loop_binding: bool | None = strict_loop_binding
+
+    def _uses_async_sqlite_checkpointer(self) -> bool:
+        """Return True when the active graph checkpointer is AsyncSqliteSaver."""
+        cp = getattr(self.graph, "checkpointer", None)
+        return cp is not None and type(cp).__name__ == "AsyncSqliteSaver"
+
+    def _is_strict_loop_enforced(self) -> bool:
+        """Production and AsyncSqliteSaver services must stay bound to a single loop."""
+        if self._uses_async_sqlite_checkpointer():
+            return True
+        if self._explicit_strict_loop_binding is not None:
+            return self._explicit_strict_loop_binding
+        return self._bound_loop is not None
+
+    def _verify_event_loop(self) -> asyncio.AbstractEventLoop:
+        """Enforce single-loop execution when bound to AgentRuntime or AsyncSqliteSaver."""
+        running_loop = asyncio.get_running_loop()
+        strict = self._is_strict_loop_enforced()
+        if self._bound_loop is None:
+            if strict:
+                self._bound_loop = running_loop
+            return running_loop
+        if running_loop is not self._bound_loop and strict:
+            raise RuntimeError(
+                "AgentService invoked on mismatched event loop: "
+                f"bound_loop={id(self._bound_loop)}, current_loop={id(running_loop)}"
+            )
+        return running_loop
 
     def rebuild_graph(self, registry=None, model=None, checkpointer=None) -> None:
         """Rebuild and recompile the StateGraph with updated tools or configuration."""
@@ -74,6 +112,7 @@ class AgentService:
         run_id: str | None = None,
     ) -> AgentExecutionResult:
         """Execute the agent on a specific thread with user input."""
+        self._verify_event_loop()
         self.session_service.get_or_create_session(thread_id)
         effective_run_id = set_trace_context(thread_id, run_id)
         guard = get_route_guard()
@@ -210,6 +249,7 @@ class AgentService:
         run_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream token-by-token and tool execution steps from the StateGraph."""
+        self._verify_event_loop()
         self.session_service.get_or_create_session(thread_id)
         effective_run_id = set_trace_context(thread_id, run_id)
         guard = get_route_guard()
@@ -430,6 +470,7 @@ class AgentService:
 
     async def verify_approval_context(self, thread_id: str, approval_id: str) -> bool:
         """Verify server-side binding between thread_id, approval_id, and active interrupt."""
+        self._verify_event_loop()
         if (
             not isinstance(thread_id, str)
             or not thread_id.strip()
@@ -495,6 +536,7 @@ class AgentService:
         decision: ApprovalDecision,
     ) -> AgentExecutionResult:
         """Resume an interrupted agent run by submitting an approval decision."""
+        self._verify_event_loop()
         if not await self.verify_approval_context(thread_id, approval_id):
             logger.warning(
                 f"Blocked resume_approval due to invalid thread/approval binding: thread='{thread_id}', approval='{approval_id}'"
@@ -572,6 +614,7 @@ class AgentService:
         decision: ApprovalDecision,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Resume an interrupted agent run with real-time SSE event streaming."""
+        self._verify_event_loop()
         if not await self.verify_approval_context(thread_id, approval_id):
             logger.warning(
                 f"Blocked stream_resume_approval due to invalid thread/approval binding: thread='{thread_id}', approval='{approval_id}'"
