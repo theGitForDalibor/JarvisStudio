@@ -10,6 +10,14 @@ from jarvis_studio.core.persistence.migrations import (
     run_vec_migrations,
     verify_sqlite_backup,
 )
+from jarvis_studio.core.persistence.runtime_lock import (
+    RUNTIME_LOCK_FILENAME,
+    RuntimeInstanceLock,
+    RuntimeLockError,
+    RuntimeLockInfo,
+    resolve_runtime_lock_paths,
+    resolve_runtime_lock_paths_from_settings,
+)
 from jarvis_studio.core.persistence.sqlite import (
     DEFAULT_BUSY_TIMEOUT_MS,
     NestedTransactionError,
@@ -25,10 +33,14 @@ from jarvis_studio.core.persistence.sqlite import (
 __all__ = [
     "APP_SCHEMA_VERSION",
     "DEFAULT_BUSY_TIMEOUT_MS",
+    "RUNTIME_LOCK_FILENAME",
     "VEC_SCHEMA_VERSION",
     "BackupVerificationError",
     "MigrationError",
     "NestedTransactionError",
+    "RuntimeInstanceLock",
+    "RuntimeLockError",
+    "RuntimeLockInfo",
     "SyncSQLiteSession",
     "create_verified_backup",
     "initialize_sqlite_database",
@@ -36,6 +48,8 @@ __all__ = [
     "load_sqlite_vec",
     "normalize_db_path",
     "open_sync_connection",
+    "resolve_runtime_lock_paths",
+    "resolve_runtime_lock_paths_from_settings",
     "run_app_migrations",
     "run_vec_migrations",
     "sync_transaction",
