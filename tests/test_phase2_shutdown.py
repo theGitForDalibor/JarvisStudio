@@ -725,3 +725,78 @@ async def test_p2_shut_06_mcp_disconnect_failure_preserves_manager_handles_parti
     probe = RuntimeInstanceLock(rt.lock.lock_paths, instance_id="after-mcp-retry")
     probe.acquire()
     probe.release()
+
+
+@pytest.mark.asyncio
+async def test_p2_shut_07_nested_global_store_identity_guard_preserves_replaced_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: Indirect global bindings are cleared only if holder.<attr> still points to the closed store."""
+    from jarvis_studio.service import agent_service as agent_svc_mod
+
+    class _TrackedStore:
+        def __init__(self, name: str, on_close: Any = None) -> None:
+            self.name = name
+            self.close_calls = 0
+            self._on_close = on_close
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self._on_close is not None:
+                self._on_close()
+
+    class _Holder:
+        def __init__(self, store: _TrackedStore) -> None:
+            self.session_service = store
+
+    cfg = _make_sqlite_settings(tmp_path)
+
+    # Case 1: holder.session_service is replaced with Store B while Store A closes
+    store_b = _TrackedStore("store-B")
+    holder = _Holder(_TrackedStore("placeholder"))
+
+    def _swap_to_store_b() -> None:
+        holder.session_service = store_b
+
+    store_a = _TrackedStore("store-A", on_close=_swap_to_store_b)
+    holder.session_service = store_a
+    monkeypatch.setattr(agent_svc_mod, "_default_agent_service", holder)
+
+    rt = AgentRuntime(cfg, register_as_active=True, close_global_stores=True)
+    await rt.start()
+    await rt.shutdown()
+
+    assert store_a.close_calls == 1
+    assert agent_svc_mod._default_agent_service is holder
+    assert agent_svc_mod._default_agent_service.session_service is store_b
+    assert store_b.close_calls == 0
+
+    # Case 2: _closed_store_ids branch inside _close_stores enforces the same nested identity guard
+    rt2 = AgentRuntime(cfg, register_as_active=True, close_global_stores=True)
+    rt2._closed_store_ids.add(id(store_a))
+    holder2 = _Holder(store_b)
+    monkeypatch.setattr(agent_svc_mod, "_default_agent_service", holder2)
+
+    from jarvis_studio.core.runtime import agent_runtime as rt_mod
+
+    monkeypatch.setattr(
+        rt_mod,
+        "_collect_loaded_global_stores",
+        lambda: [(store_a, [(agent_svc_mod, "_default_agent_service", holder2, "session_service", store_a)])],
+    )
+    errors: list[Exception] = []
+    assert rt2._close_stores(errors) is True
+    assert errors == []
+    assert agent_svc_mod._default_agent_service is holder2
+    assert agent_svc_mod._default_agent_service.session_service is store_b
+    assert store_a.close_calls == 1
+
+    # When holder2.session_service still matches store_b, clearing succeeds normally
+    monkeypatch.undo()
+    monkeypatch.setattr(agent_svc_mod, "_default_agent_service", holder2)
+    errors2: list[Exception] = []
+    assert rt2._close_stores(errors2) is True
+    assert errors2 == []
+    assert store_b.close_calls == 1
+    assert agent_svc_mod._default_agent_service is None

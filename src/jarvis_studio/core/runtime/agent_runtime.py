@@ -65,6 +65,9 @@ def _run_cleanup_action(errors: list[Exception], action: Callable[[], object]) -
         errors.append(exc)
 
 
+_GlobalStoreBinding = tuple[object, str, object, str | None, object]
+
+
 def _get_loaded_attr(module_name: str, attr_name: str) -> tuple[object, object] | None:
     module = sys.modules.get(module_name)
     if module is None:
@@ -75,7 +78,18 @@ def _get_loaded_attr(module_name: str, attr_name: str) -> tuple[object, object] 
     return module, value
 
 
-def _collect_loaded_global_stores() -> list[tuple[object, list[tuple[object, str, object]]]]:
+def _clear_global_store_binding(binding: _GlobalStoreBinding) -> None:
+    """Clear a module global binding only if both holder and nested store still match."""
+    module, attr_name, holder, store_attr, expected_store = binding
+    current_holder = getattr(module, attr_name, None)
+    if current_holder is not holder:
+        return
+    if store_attr is not None and getattr(current_holder, store_attr, None) is not expected_store:
+        return
+    setattr(module, attr_name, None)
+
+
+def _collect_loaded_global_stores() -> list[tuple[object, list[_GlobalStoreBinding]]]:
     """Collect loaded global persistent stores paired with their module bindings.
 
     Module globals are NOT cleared upfront; callers clear bindings only after the
@@ -89,7 +103,7 @@ def _collect_loaded_global_stores() -> list[tuple[object, list[tuple[object, str
         ("jarvis_studio.rag.store", "_global_vec_store", None),
     )
 
-    stores_by_id: dict[int, tuple[object, list[tuple[object, str, object]]]] = {}
+    stores_by_id: dict[int, tuple[object, list[_GlobalStoreBinding]]] = {}
     for module_name, attr_name, store_attr in specs:
         loaded = _get_loaded_attr(module_name, attr_name)
         if loaded is None:
@@ -101,7 +115,7 @@ def _collect_loaded_global_stores() -> list[tuple[object, list[tuple[object, str
         store_id = id(candidate)
         if store_id not in stores_by_id:
             stores_by_id[store_id] = (candidate, [])
-        stores_by_id[store_id][1].append((module, attr_name, holder))
+        stores_by_id[store_id][1].append((module, attr_name, holder, store_attr, candidate))
 
     return list(stores_by_id.values())
 
@@ -361,7 +375,7 @@ class AgentRuntime:
     def _close_stores(self, errors: list[Exception]) -> bool:
         """Close owned, service, and loaded global stores; return True iff all succeeded."""
         owned_ids = {id(store) for store in self._owned_stores}
-        candidates: list[tuple[object, list[tuple[object, str, object]]]] = [
+        candidates: list[tuple[object, list[_GlobalStoreBinding]]] = [
             (store, []) for store in reversed(self._owned_stores)
         ]
         if self._agent_service is not None:
@@ -371,8 +385,8 @@ class AgentRuntime:
         if self._close_global_stores:
             candidates.extend(_collect_loaded_global_stores())
 
-        ordered_entries: list[tuple[object, list[tuple[object, str, object]]]] = []
-        entry_by_id: dict[int, tuple[object, list[tuple[object, str, object]]]] = {}
+        ordered_entries: list[tuple[object, list[_GlobalStoreBinding]]] = []
+        entry_by_id: dict[int, tuple[object, list[_GlobalStoreBinding]]] = {}
         for store, bindings in candidates:
             if store is None:
                 continue
@@ -381,9 +395,8 @@ class AgentRuntime:
                 continue
             store_id = id(store)
             if store_id in self._closed_store_ids:
-                for module, attr_name, expected in bindings:
-                    if getattr(module, attr_name, None) is expected:
-                        setattr(module, attr_name, None)
+                for binding in bindings:
+                    _clear_global_store_binding(binding)
                 continue
             existing = entry_by_id.get(store_id)
             if existing is None:
@@ -406,9 +419,8 @@ class AgentRuntime:
                 self._closed_store_ids.add(store_id)
                 if store_id in owned_ids:
                     closed_owned_ids.add(store_id)
-                for module, attr_name, expected in bindings:
-                    if getattr(module, attr_name, None) is expected:
-                        setattr(module, attr_name, None)
+                for binding in bindings:
+                    _clear_global_store_binding(binding)
 
         if closed_owned_ids:
             self._owned_stores = [
