@@ -1,4 +1,4 @@
-"""Core synchronous SQLite persistence and migration primitives (Phase 1)."""
+"""Core synchronous SQLite persistence, migration, and runtime lock primitives."""
 
 from jarvis_studio.core.persistence.migrations import (
     APP_SCHEMA_VERSION,
