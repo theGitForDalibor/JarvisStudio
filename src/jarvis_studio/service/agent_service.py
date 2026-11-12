@@ -3,7 +3,9 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
@@ -20,6 +22,73 @@ from jarvis_studio.core.observability.trace_logger import ConversationTrace, get
 from jarvis_studio.core.observability.tracer import set_trace_context, timed_step
 from jarvis_studio.core.thinking.engine import ThinkingEngine
 from jarvis_studio.service.session_service import get_session_service
+
+
+@dataclass
+class _ThreadLockEntry:
+    """Per-thread async lock paired with active waiter/holder reference count."""
+
+    lock: asyncio.Lock
+    waiters: int = 0
+
+
+class _ThreadLockGuard:
+    """Async context manager serializing execution per `(loop, thread_id)`.
+
+    Implemented directly via `__aenter__` / `__aexit__` rather than `@asynccontextmanager`
+    so early async-generator close (`GeneratorExit`) never hits `athrow()` impedance errors.
+    """
+
+    def __init__(
+        self,
+        buckets: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _ThreadLockEntry]],
+        loop: asyncio.AbstractEventLoop,
+        key: str,
+    ) -> None:
+        self._buckets = buckets
+        self._loop = loop
+        self._key = key
+        self._loop_locks: dict[str, _ThreadLockEntry] | None = None
+        self._entry: _ThreadLockEntry | None = None
+        self._acquired = False
+
+    async def __aenter__(self) -> _ThreadLockEntry:
+        loop_locks = self._buckets.setdefault(self._loop, {})
+        entry = loop_locks.get(self._key)
+        if entry is None:
+            entry = _ThreadLockEntry(lock=asyncio.Lock(), waiters=0)
+            loop_locks[self._key] = entry
+
+        # Increment waiters synchronously before awaiting acquire so concurrent releases
+        # never pop an active lock entry and split into two Lock instances.
+        entry.waiters += 1
+        self._loop_locks = loop_locks
+        self._entry = entry
+        try:
+            await entry.lock.acquire()
+            self._acquired = True
+            return entry
+        except BaseException:
+            self._release_entry()
+            raise
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        self._release_entry()
+        return False
+
+    def _release_entry(self) -> None:
+        entry = self._entry
+        loop_locks = self._loop_locks
+        if entry is None or loop_locks is None:
+            return
+        self._entry = None
+        self._loop_locks = None
+        if self._acquired:
+            self._acquired = False
+            entry.lock.release()
+        entry.waiters -= 1
+        if entry.waiters == 0 and loop_locks.get(self._key) is entry:
+            loop_locks.pop(self._key, None)
 
 
 class AgentExecutionResult:
@@ -68,6 +137,7 @@ class AgentService:
         self.hitl_manager = get_hitl_manager()
         self._bound_loop: asyncio.AbstractEventLoop | None = bound_loop
         self._explicit_strict_loop_binding: bool | None = strict_loop_binding
+        self._thread_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _ThreadLockEntry]] = WeakKeyDictionary()
 
     def _uses_async_sqlite_checkpointer(self) -> bool:
         """Return True when the active graph checkpointer is AsyncSqliteSaver."""
@@ -97,6 +167,20 @@ class AgentService:
             )
         return running_loop
 
+    @staticmethod
+    def _normalize_lock_key(thread_id: str) -> str:
+        if isinstance(thread_id, str):
+            stripped = thread_id.strip()
+            if stripped:
+                return stripped
+        return str(thread_id)
+
+    def _acquire_thread_lock(self, thread_id: str) -> "_ThreadLockGuard":
+        """Create a loop-verified, cancel-safe async lock guard for `thread_id`."""
+        loop = self._verify_event_loop()
+        key = self._normalize_lock_key(thread_id)
+        return _ThreadLockGuard(self._thread_locks, loop, key)
+
     def rebuild_graph(self, registry=None, model=None, checkpointer=None) -> None:
         """Rebuild and recompile the StateGraph with updated tools or configuration."""
         self.graph = build_agent_graph(
@@ -113,6 +197,16 @@ class AgentService:
     ) -> AgentExecutionResult:
         """Execute the agent on a specific thread with user input."""
         self._verify_event_loop()
+        async with self._acquire_thread_lock(thread_id):
+            return await self._invoke_agent_unlocked(thread_id, user_message, run_id=run_id)
+
+    async def _invoke_agent_unlocked(
+        self,
+        thread_id: str,
+        user_message: str,
+        run_id: str | None = None,
+    ) -> AgentExecutionResult:
+        """Internal invoke implementation executed under the per-thread lock."""
         self.session_service.get_or_create_session(thread_id)
         effective_run_id = set_trace_context(thread_id, run_id)
         guard = get_route_guard()
@@ -250,6 +344,21 @@ class AgentService:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream token-by-token and tool execution steps from the StateGraph."""
         self._verify_event_loop()
+        async with self._acquire_thread_lock(thread_id):
+            inner = self._stream_agent_unlocked(thread_id, user_message, run_id=run_id)
+            try:
+                async for event in inner:
+                    yield event
+            finally:
+                await inner.aclose()
+
+    async def _stream_agent_unlocked(
+        self,
+        thread_id: str,
+        user_message: str,
+        run_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Internal stream implementation executed under the per-thread lock."""
         self.session_service.get_or_create_session(thread_id)
         effective_run_id = set_trace_context(thread_id, run_id)
         guard = get_route_guard()
@@ -479,6 +588,19 @@ class AgentService:
             return False
 
         clean_tid = thread_id.strip()
+        async with self._acquire_thread_lock(clean_tid):
+            return await self._verify_approval_context_unlocked(clean_tid, approval_id)
+
+    async def _verify_approval_context_unlocked(self, thread_id: str, approval_id: str) -> bool:
+        """Internal approval context check assumed to hold the per-thread lock."""
+        if (
+            not isinstance(thread_id, str)
+            or not thread_id.strip()
+            or thread_id.strip().lower() == "default"
+        ):
+            return False
+
+        clean_tid = thread_id.strip()
         if self.session_service.get_session(clean_tid) is None:
             return False
 
@@ -537,7 +659,17 @@ class AgentService:
     ) -> AgentExecutionResult:
         """Resume an interrupted agent run by submitting an approval decision."""
         self._verify_event_loop()
-        if not await self.verify_approval_context(thread_id, approval_id):
+        async with self._acquire_thread_lock(thread_id):
+            return await self._resume_approval_unlocked(thread_id, approval_id, decision)
+
+    async def _resume_approval_unlocked(
+        self,
+        thread_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+    ) -> AgentExecutionResult:
+        """Internal approval resume executed under the per-thread lock."""
+        if not await self._verify_approval_context_unlocked(thread_id, approval_id):
             logger.warning(
                 f"Blocked resume_approval due to invalid thread/approval binding: thread='{thread_id}', approval='{approval_id}'"
             )
@@ -615,7 +747,22 @@ class AgentService:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Resume an interrupted agent run with real-time SSE event streaming."""
         self._verify_event_loop()
-        if not await self.verify_approval_context(thread_id, approval_id):
+        async with self._acquire_thread_lock(thread_id):
+            inner = self._stream_resume_approval_unlocked(thread_id, approval_id, decision)
+            try:
+                async for event in inner:
+                    yield event
+            finally:
+                await inner.aclose()
+
+    async def _stream_resume_approval_unlocked(
+        self,
+        thread_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Internal streaming approval resume executed under the per-thread lock."""
+        if not await self._verify_approval_context_unlocked(thread_id, approval_id):
             logger.warning(
                 f"Blocked stream_resume_approval due to invalid thread/approval binding: thread='{thread_id}', approval='{approval_id}'"
             )
