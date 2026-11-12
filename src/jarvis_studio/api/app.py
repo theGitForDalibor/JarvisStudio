@@ -16,9 +16,7 @@ from jarvis_studio.api.routes.sessions import router as sessions_router
 from jarvis_studio.api.routes.system import router as system_router
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
-from jarvis_studio.tools.builtin import register_builtin_tools
-from jarvis_studio.tools.mcp.client import get_mcp_manager
-from jarvis_studio.tools.registry import get_default_registry
+from jarvis_studio.core.runtime import AgentRuntime
 
 
 @asynccontextmanager
@@ -29,24 +27,20 @@ async def lifespan(app: FastAPI):
         f"Starting {settings.app.name} v{settings.app.version} ({settings.app.environment})"
     )
 
-    # Auto-register builtin tools
-    registry = get_default_registry()
-    register_builtin_tools(registry)
-
-    # Initialize enabled MCP servers
-    mcp_mgr = get_mcp_manager()
+    runtime = AgentRuntime(
+        settings,
+        register_as_active=True,
+        manage_mcp=True,
+        close_global_stores=True,
+    )
+    await runtime.start()
+    app.state.agent_runtime = runtime
     try:
-        await mcp_mgr.connect_and_register_all(registry)
-    except Exception as e:
-        logger.error(f"Error during MCP servers initialization: {e}")
-
-    yield
-
-    logger.info(f"Shutting down {settings.app.name}")
-    try:
-        await mcp_mgr.disconnect_all(registry)
-    except Exception as e:
-        logger.error(f"Error during MCP servers shutdown: {e}")
+        yield
+    finally:
+        logger.info(f"Shutting down {settings.app.name}")
+        app.state.agent_runtime = None
+        await runtime.shutdown()
 
 
 def create_app() -> FastAPI:

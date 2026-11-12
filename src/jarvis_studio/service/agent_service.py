@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -128,16 +128,30 @@ class AgentService:
         self,
         graph=None,
         *,
+        registry=None,
         checkpointer=None,
         bound_loop: asyncio.AbstractEventLoop | None = None,
         strict_loop_binding: bool | None = None,
+        run_begin_hook: Callable[[], asyncio.Task[Any] | None] | None = None,
+        run_end_hook: Callable[[asyncio.Task[Any] | None], None] | None = None,
     ):
-        self.graph = graph or build_agent_graph(checkpointer=checkpointer)
+        self.graph = graph or build_agent_graph(registry=registry, checkpointer=checkpointer)
         self.session_service = get_session_service()
         self.hitl_manager = get_hitl_manager()
         self._bound_loop: asyncio.AbstractEventLoop | None = bound_loop
         self._explicit_strict_loop_binding: bool | None = strict_loop_binding
+        self._run_begin_hook = run_begin_hook
+        self._run_end_hook = run_end_hook
         self._thread_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _ThreadLockEntry]] = WeakKeyDictionary()
+
+    def _begin_runtime_run(self) -> asyncio.Task[Any] | None:
+        if self._run_begin_hook is not None:
+            return self._run_begin_hook()
+        return None
+
+    def _end_runtime_run(self, task_token: asyncio.Task[Any] | None) -> None:
+        if self._run_end_hook is not None:
+            self._run_end_hook(task_token)
 
     def _uses_async_sqlite_checkpointer(self) -> bool:
         """Return True when the active graph checkpointer is AsyncSqliteSaver."""
@@ -197,8 +211,12 @@ class AgentService:
     ) -> AgentExecutionResult:
         """Execute the agent on a specific thread with user input."""
         self._verify_event_loop()
-        async with self._acquire_thread_lock(thread_id):
-            return await self._invoke_agent_unlocked(thread_id, user_message, run_id=run_id)
+        task_token = self._begin_runtime_run()
+        try:
+            async with self._acquire_thread_lock(thread_id):
+                return await self._invoke_agent_unlocked(thread_id, user_message, run_id=run_id)
+        finally:
+            self._end_runtime_run(task_token)
 
     async def _invoke_agent_unlocked(
         self,
@@ -344,13 +362,17 @@ class AgentService:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream token-by-token and tool execution steps from the StateGraph."""
         self._verify_event_loop()
-        async with self._acquire_thread_lock(thread_id):
-            inner = self._stream_agent_unlocked(thread_id, user_message, run_id=run_id)
-            try:
-                async for event in inner:
-                    yield event
-            finally:
-                await inner.aclose()
+        task_token = self._begin_runtime_run()
+        try:
+            async with self._acquire_thread_lock(thread_id):
+                inner = self._stream_agent_unlocked(thread_id, user_message, run_id=run_id)
+                try:
+                    async for event in inner:
+                        yield event
+                finally:
+                    await inner.aclose()
+        finally:
+            self._end_runtime_run(task_token)
 
     async def _stream_agent_unlocked(
         self,
@@ -580,16 +602,20 @@ class AgentService:
     async def verify_approval_context(self, thread_id: str, approval_id: str) -> bool:
         """Verify server-side binding between thread_id, approval_id, and active interrupt."""
         self._verify_event_loop()
-        if (
-            not isinstance(thread_id, str)
-            or not thread_id.strip()
-            or thread_id.strip().lower() == "default"
-        ):
-            return False
+        task_token = self._begin_runtime_run()
+        try:
+            if (
+                not isinstance(thread_id, str)
+                or not thread_id.strip()
+                or thread_id.strip().lower() == "default"
+            ):
+                return False
 
-        clean_tid = thread_id.strip()
-        async with self._acquire_thread_lock(clean_tid):
-            return await self._verify_approval_context_unlocked(clean_tid, approval_id)
+            clean_tid = thread_id.strip()
+            async with self._acquire_thread_lock(clean_tid):
+                return await self._verify_approval_context_unlocked(clean_tid, approval_id)
+        finally:
+            self._end_runtime_run(task_token)
 
     async def _verify_approval_context_unlocked(self, thread_id: str, approval_id: str) -> bool:
         """Internal approval context check assumed to hold the per-thread lock."""
@@ -659,8 +685,12 @@ class AgentService:
     ) -> AgentExecutionResult:
         """Resume an interrupted agent run by submitting an approval decision."""
         self._verify_event_loop()
-        async with self._acquire_thread_lock(thread_id):
-            return await self._resume_approval_unlocked(thread_id, approval_id, decision)
+        task_token = self._begin_runtime_run()
+        try:
+            async with self._acquire_thread_lock(thread_id):
+                return await self._resume_approval_unlocked(thread_id, approval_id, decision)
+        finally:
+            self._end_runtime_run(task_token)
 
     async def _resume_approval_unlocked(
         self,
@@ -747,13 +777,17 @@ class AgentService:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Resume an interrupted agent run with real-time SSE event streaming."""
         self._verify_event_loop()
-        async with self._acquire_thread_lock(thread_id):
-            inner = self._stream_resume_approval_unlocked(thread_id, approval_id, decision)
-            try:
-                async for event in inner:
-                    yield event
-            finally:
-                await inner.aclose()
+        task_token = self._begin_runtime_run()
+        try:
+            async with self._acquire_thread_lock(thread_id):
+                inner = self._stream_resume_approval_unlocked(thread_id, approval_id, decision)
+                try:
+                    async for event in inner:
+                        yield event
+                finally:
+                    await inner.aclose()
+        finally:
+            self._end_runtime_run(task_token)
 
     async def _stream_resume_approval_unlocked(
         self,
@@ -844,8 +878,16 @@ _global_agent_service: AgentService | None = None
 
 
 def get_agent_service() -> AgentService:
-    """Retrieve the singleton AgentService instance."""
+    """Retrieve the active AgentRuntime service, test override, or fallback singleton."""
     global _global_agent_service
-    if _global_agent_service is None:
-        _global_agent_service = AgentService()
+    if _global_agent_service is not None:
+        return _global_agent_service
+
+    from jarvis_studio.core.runtime.agent_runtime import get_active_runtime
+
+    active_runtime = get_active_runtime()
+    if active_runtime is not None:
+        return active_runtime.agent_service
+
+    _global_agent_service = AgentService()
     return _global_agent_service

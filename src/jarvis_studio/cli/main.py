@@ -11,7 +11,6 @@ from rich.table import Table
 
 from jarvis_studio.agent.hitl.manager import ApprovalDecision
 from jarvis_studio.config.settings import get_settings
-from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.tools.base import get_tool_metadata
 from jarvis_studio.tools.builtin import register_builtin_tools
 from jarvis_studio.tools.mcp.client import get_mcp_manager
@@ -374,19 +373,10 @@ def serve(host: str, port: int, reload: bool):
 )
 def chat(session: str, connect_mcp: bool):
     """Launch an interactive terminal chat session with Jarvis."""
-    from jarvis_studio.service.agent_service import get_agent_service
-    from jarvis_studio.service.session_service import get_session_service
+    from jarvis_studio.core.runtime import AgentRuntime
 
-    # 1. Wire tools and MCP infrastructure
     registry = get_default_registry()
     register_builtin_tools(registry)
-    mcp_mgr = get_mcp_manager()
-
-    session_service = get_session_service()
-    agent_service = get_agent_service()
-    active_session = session_service.get_or_create_session(session)
-    thread_id = active_session.session_id
-
     settings = get_settings()
 
     async def _handle_approval_decision(pending_appr: dict) -> ApprovalDecision:
@@ -466,30 +456,30 @@ def chat(session: str, connect_mcp: bool):
             )
 
     async def _chat_loop():
-        if connect_mcp:
-            with console.status("[dim]Connecting enabled MCP servers...[/dim]"):
-                try:
-                    await mcp_mgr.connect_and_register_all(registry)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"Error initializing MCP servers: {e}")
+        async with AgentRuntime.open(
+            settings,
+            register_as_active=True,
+            manage_mcp=connect_mcp,
+            tool_registry=registry,
+            close_global_stores=True,
+        ) as runtime:
+            agent_service = runtime.agent_service
+            session_service = agent_service.session_service
+            active_session = session_service.get_or_create_session(session)
+            thread_id = active_session.session_id
 
-        # Recompile graph with populated tools
-        agent_service.rebuild_graph(registry=registry)
-
-        tool_count = len(registry.list_tools())
-        console.print(
-            Panel(
-                f"[bold cyan]Jarvis Studio Terminal Assistant[/bold cyan]\n"
-                f"[dim]Session ID:[/dim] [yellow]{thread_id}[/yellow]\n"
-                f"[dim]LLM Model :[/dim] {settings.llm.default_provider.value} ({settings.llm.default_model})\n"
-                f"[dim]Active Tools:[/dim] {tool_count} registered (Builtin & MCP)\n"
-                f"[dim]Commands:[/dim] Type '[bold green]/tools[/bold green]' to inspect, '[bold red]exit[/bold red]' to quit.",
-                title="Interactive Console",
-                border_style="cyan",
+            tool_count = len(registry.list_tools())
+            console.print(
+                Panel(
+                    f"[bold cyan]Jarvis Studio Terminal Assistant[/bold cyan]\n"
+                    f"[dim]Session ID:[/dim] [yellow]{thread_id}[/yellow]\n"
+                    f"[dim]LLM Model :[/dim] {settings.llm.default_provider.value} ({settings.llm.default_model})\n"
+                    f"[dim]Active Tools:[/dim] {tool_count} registered (Builtin & MCP)\n"
+                    f"[dim]Commands:[/dim] Type '[bold green]/tools[/bold green]' to inspect, '[bold red]exit[/bold red]' to quit.",
+                    title="Interactive Console",
+                    border_style="cyan",
+                )
             )
-        )
-
-        try:
             while True:
                 try:
                     user_input = console.input(
@@ -555,10 +545,6 @@ def chat(session: str, connect_mcp: bool):
                     console.print(
                         f"\n[bold cyan]Jarvis > [/bold cyan]{result.output_text}"
                     )
-
-        finally:
-            if connect_mcp:
-                await mcp_mgr.disconnect_all(registry)
 
     asyncio.run(_chat_loop())
 

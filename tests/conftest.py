@@ -69,6 +69,7 @@ def _reset_runtime_singletons(*, close_stores: bool) -> None:
     registry = _pop_module_attr("jarvis_studio.tools.registry", "_global_registry")
     _pop_module_attr("jarvis_studio.agent.checkpoints.saver", "_cached_checkpointer")
     _pop_module_attr("jarvis_studio.core.guard.route_guard", "_global_guard")
+    _pop_module_attr("jarvis_studio.core.runtime.agent_runtime", "_active_runtime")
 
     try:
         if close_stores:
