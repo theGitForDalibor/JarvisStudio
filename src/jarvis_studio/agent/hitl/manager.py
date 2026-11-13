@@ -12,6 +12,9 @@ from jarvis_studio.agent.hitl.models import (
     ApprovalStatus,
     ExecutionOutcome,
     ExecutionOutcomeStatus,
+    ToolPartialExecutionError,
+    ToolPreExecutionError,
+    ToolUncertainExecutionError,
     compute_arguments_hash,
 )
 from jarvis_studio.agent.hitl.store import DuplicateToolCallError, HITLStore
@@ -26,6 +29,9 @@ __all__ = [
     "ExecutionOutcome",
     "ExecutionOutcomeStatus",
     "HITLManager",
+    "ToolPartialExecutionError",
+    "ToolPreExecutionError",
+    "ToolUncertainExecutionError",
     "compute_arguments_hash",
     "get_hitl_manager",
 ]
@@ -187,12 +193,14 @@ class HITLManager:
         approval_id: str,
         success: bool,
         error: str | None = None,
+        *,
+        outcome_status: ExecutionOutcomeStatus | None = None,
     ) -> ApprovalRequest | None:
         """Finalize execution status of a leased approval request.
 
         Transitions:
         - If success: `EXECUTING -> CONSUMED` (`Outcome -> SUCCEEDED`)
-        - If failure: `EXECUTING -> FAILED` (`Outcome -> FAILED`)
+        - If failure: `EXECUTING -> FAILED` (`Outcome -> FAILED`, `UNKNOWN`, or `PARTIAL`)
         """
         with self._lock:
             existing = self._store.get_request(approval_id)
@@ -207,6 +215,7 @@ class HITLManager:
                 approval_id=approval_id,
                 success=success,
                 error=error,
+                outcome_status=outcome_status,
             )
             synced = self._sync_cached(updated)
 

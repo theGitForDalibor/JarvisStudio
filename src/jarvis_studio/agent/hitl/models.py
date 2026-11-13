@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from jarvis_studio.core.errors import JarvisError
 from jarvis_studio.tools.base import RiskLevel
 
 
@@ -110,3 +111,21 @@ class ExecutionOutcome(BaseModel):
     started_at: float = Field(default_factory=time.time)
     finished_at: float | None = None
     updated_at: float = Field(default_factory=time.time)
+
+
+class ToolPreExecutionError(JarvisError):
+    """Raised when a tool fails before performing any external side effect (Outcome=FAILED)."""
+
+    outcome_status: ExecutionOutcomeStatus = ExecutionOutcomeStatus.FAILED
+
+
+class ToolPartialExecutionError(JarvisError):
+    """Raised when a tool partially completed external side effects before failing (Outcome=PARTIAL)."""
+
+    outcome_status: ExecutionOutcomeStatus = ExecutionOutcomeStatus.PARTIAL
+
+
+class ToolUncertainExecutionError(JarvisError):
+    """Raised when a tool fails and it is uncertain whether external side effects occurred (Outcome=UNKNOWN)."""
+
+    outcome_status: ExecutionOutcomeStatus = ExecutionOutcomeStatus.UNKNOWN

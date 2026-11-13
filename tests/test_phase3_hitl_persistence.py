@@ -16,8 +16,11 @@ from jarvis_studio.agent.graph import build_agent_graph
 from jarvis_studio.agent.hitl.manager import (
     ApprovalDecision,
     ApprovalStatus,
+    DuplicateToolCallError,
     ExecutionOutcomeStatus,
     HITLManager,
+    ToolPartialExecutionError,
+    ToolPreExecutionError,
 )
 from jarvis_studio.agent.nodes.executor import create_tool_executor_node
 from jarvis_studio.api.app import create_app
@@ -676,3 +679,438 @@ async def test_p3_fi_07_orphan_pending_and_lock_gated_recovery(tmp_path: Path) -
         assert cleaned is not None
         assert cleaned.status == ApprovalStatus.FAILED
         assert cleaned.execution_error == "missing_active_checkpoint_interrupt"
+
+
+@pytest.mark.asyncio
+async def test_p3_rem_01_tool_exception_outcome_classification_and_replay_block(
+    tmp_path: Path,
+) -> None:
+    """P1-01: Distinguish proven pre-execution failure vs post-side-effect exception for HIGH and SAFE tools."""
+    cfg = _make_sqlite_settings(tmp_path)
+    reg = ToolRegistry()
+
+    marker_file = tmp_path / "marker.txt"
+
+    # 1. High-risk tool failing BEFORE execution (Outcome=FAILED)
+    @tool
+    def high_pre_fail(val: str) -> str:
+        """High risk tool failing pre-check."""
+        raise ToolPreExecutionError(f"Pre-check rejected for {val}")
+
+    tag_tool_safety(high_pre_fail, risk_level=RiskLevel.HIGH, requires_approval=True)
+    reg.register(high_pre_fail)
+
+    # 2. High-risk tool producing side effect then failing (Outcome=UNKNOWN)
+    @tool
+    def high_post_fail(val: str) -> str:
+        """High risk tool writing file then raising."""
+        marker_file.write_text(f"side_effect_{val}")
+        raise RuntimeError(f"Post-mutation formatting error for {val}")
+
+    tag_tool_safety(high_post_fail, risk_level=RiskLevel.HIGH, requires_approval=True)
+    reg.register(high_post_fail)
+
+    # 3. High-risk tool with partial execution (Outcome=PARTIAL)
+    @tool
+    def high_partial_fail(val: str) -> str:
+        """High risk tool with partial completion."""
+        marker_file.write_text(f"partial_{val}")
+        raise ToolPartialExecutionError(f"Partial upload completed for {val}")
+
+    tag_tool_safety(high_partial_fail, risk_level=RiskLevel.HIGH, requires_approval=True)
+    reg.register(high_partial_fail)
+
+    # 4. SAFE tool failing pre-check (Outcome=FAILED)
+    @tool
+    def safe_pre_fail(key: str) -> str:
+        """Safe tool failing pre-check."""
+        raise ToolPreExecutionError(f"Pre-validation failed for {key}")
+
+    tag_tool_safety(safe_pre_fail, risk_level=RiskLevel.SAFE, requires_approval=False)
+    reg.register(safe_pre_fail)
+
+    # 5. SAFE tool producing side effect then failing (Outcome=UNKNOWN)
+    @tool
+    def safe_post_fail(key: str) -> str:
+        """Safe tool with side effect then failure."""
+        marker_file.write_text(f"safe_side_effect_{key}")
+        raise RuntimeError(f"Unexpected failure during safe tool {key}")
+
+    tag_tool_safety(safe_post_fail, risk_level=RiskLevel.SAFE, requires_approval=False)
+    reg.register(safe_post_fail)
+
+    hitl = HITLManager(db_path=cfg.storage.sqlite_path)
+    executor = create_tool_executor_node(reg, hitl_mgr=hitl)
+    thread_id = "sess-rem01"
+
+    try:
+        # A. High-risk pre-execution failure -> Approval=FAILED, Outcome=FAILED
+        req_pre = hitl.create_request(
+            thread_id=thread_id,
+            run_id="r1",
+            tool_name="high_pre_fail",
+            arguments={"val": "x"},
+            tool_call_id="call_pre",
+        )
+        hitl.resolve_request(req_pre.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        res_pre = await executor({
+            "messages": [AIMessage(content="run", tool_calls=[{"id": "call_pre", "name": "high_pre_fail", "args": {"val": "x"}}])],
+            "run_context": {"session_id": thread_id, "run_id": "r1"},
+            "approval_decision": {"decisions_by_call_id": {"call_pre": {"approval_id": req_pre.id, "tool_call_id": "call_pre", "decision": "approve", "arguments_hash": req_pre.arguments_hash}}},
+        })
+        assert "Pre-check rejected for x" in res_pre["messages"][0].content
+        up_pre = hitl.get_request(req_pre.id, thread_id=thread_id)
+        out_pre = hitl.get_outcome_by_approval(req_pre.id, thread_id=thread_id)
+        assert up_pre is not None and up_pre.status == ApprovalStatus.FAILED
+        assert out_pre is not None and out_pre.outcome_status == ExecutionOutcomeStatus.FAILED
+
+        # B. High-risk post-side-effect exception -> Approval=FAILED, Outcome=UNKNOWN (NOT falsely FAILED)
+        req_post = hitl.create_request(
+            thread_id=thread_id,
+            run_id="r2",
+            tool_name="high_post_fail",
+            arguments={"val": "y"},
+            tool_call_id="call_post",
+        )
+        hitl.resolve_request(req_post.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        res_post = await executor({
+            "messages": [AIMessage(content="run", tool_calls=[{"id": "call_post", "name": "high_post_fail", "args": {"val": "y"}}])],
+            "run_context": {"session_id": thread_id, "run_id": "r2"},
+            "approval_decision": {"decisions_by_call_id": {"call_post": {"approval_id": req_post.id, "tool_call_id": "call_post", "decision": "approve", "arguments_hash": req_post.arguments_hash}}},
+        })
+        assert "Post-mutation formatting error for y" in res_post["messages"][0].content
+        assert marker_file.read_text() == "side_effect_y"
+        up_post = hitl.get_request(req_post.id, thread_id=thread_id)
+        out_post = hitl.get_outcome_by_approval(req_post.id, thread_id=thread_id)
+        assert up_post is not None and up_post.status == ApprovalStatus.FAILED
+        assert out_post is not None and out_post.outcome_status == ExecutionOutcomeStatus.UNKNOWN
+
+        # Replay blocked for UNKNOWN approval
+        ok_replay, _, replay_err = hitl.acquire_execution_lease(
+            approval_id=req_post.id,
+            thread_id=thread_id,
+            tool_call_id="call_post",
+            arguments_hash=req_post.arguments_hash,
+        )
+        assert ok_replay is False
+        assert "replay blocked" in (replay_err or "")
+
+        # C. High-risk partial completion -> Approval=FAILED, Outcome=PARTIAL
+        req_part = hitl.create_request(
+            thread_id=thread_id,
+            run_id="r3",
+            tool_name="high_partial_fail",
+            arguments={"val": "z"},
+            tool_call_id="call_part",
+        )
+        hitl.resolve_request(req_part.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        await executor({
+            "messages": [AIMessage(content="run", tool_calls=[{"id": "call_part", "name": "high_partial_fail", "args": {"val": "z"}}])],
+            "run_context": {"session_id": thread_id, "run_id": "r3"},
+            "approval_decision": {"decisions_by_call_id": {"call_part": {"approval_id": req_part.id, "tool_call_id": "call_part", "decision": "approve", "arguments_hash": req_part.arguments_hash}}},
+        })
+        out_part = hitl.get_outcome_by_approval(req_part.id, thread_id=thread_id)
+        assert out_part is not None and out_part.outcome_status == ExecutionOutcomeStatus.PARTIAL
+
+        # D. SAFE tool pre-execution failure -> Outcome=FAILED
+        await executor({
+            "messages": [AIMessage(content="run", tool_calls=[{"id": "call_safe_pre", "name": "safe_pre_fail", "args": {"key": "k1"}}])],
+            "run_context": {"session_id": thread_id, "run_id": "r4"},
+        })
+        out_safe_pre = hitl.get_outcome(thread_id, "call_safe_pre")
+        assert out_safe_pre is not None and out_safe_pre.outcome_status == ExecutionOutcomeStatus.FAILED
+
+        # E. SAFE tool post-side-effect failure -> Outcome=UNKNOWN (NOT falsely FAILED)
+        await executor({
+            "messages": [AIMessage(content="run", tool_calls=[{"id": "call_safe_post", "name": "safe_post_fail", "args": {"key": "k2"}}])],
+            "run_context": {"session_id": thread_id, "run_id": "r5"},
+        })
+        assert marker_file.read_text() == "safe_side_effect_k2"
+        out_safe_post = hitl.get_outcome(thread_id, "call_safe_post")
+        assert out_safe_post is not None and out_safe_post.outcome_status == ExecutionOutcomeStatus.UNKNOWN
+
+        # Replay blocked for SAFE UNKNOWN outcome
+        with pytest.raises(DuplicateToolCallError, match="replay blocked"):
+            hitl.register_safe_outcome_start(
+                thread_id=thread_id,
+                run_id="r6",
+                tool_call_id="call_safe_post",
+                tool_name="safe_post_fail",
+            )
+    finally:
+        hitl.close()
+
+
+@pytest.mark.asyncio
+async def test_p3_rem_02_startup_recovery_lock_fail_closed_validation(tmp_path: Path) -> None:
+    """P1-02: Recovery lock validation strictly enforces acquired state, in-memory matching, and DB path coverage."""
+    cfg_a = _make_sqlite_settings(tmp_path / "db_a")
+    cfg_b = _make_sqlite_settings(tmp_path / "db_b")
+
+    hitl_a = HITLManager(db_path=cfg_a.storage.sqlite_path)
+    hitl_mem = HITLManager(db_path=":memory:")
+
+    try:
+        # 1. Missing runtime_lock -> refuses
+        with pytest.raises(RuntimeError, match="RuntimeInstanceLock is required"):
+            await reconcile_on_startup(
+                hitl_store=hitl_a.store,
+                current_runtime_id="rt-test",
+                runtime_lock=None,
+            )
+
+        # 2. Unacquired lock -> refuses
+        unacquired_lock = RuntimeInstanceLock.from_settings(cfg_a, instance_id="rt-unacquired")
+        with pytest.raises(RuntimeError, match="RuntimeInstanceLock must be acquired"):
+            await reconcile_on_startup(
+                hitl_store=hitl_a.store,
+                current_runtime_id="rt-test",
+                runtime_lock=unacquired_lock,
+            )
+
+        # 3. Acquired lock for correct DB -> succeeds
+        acquired_lock_a = RuntimeInstanceLock.from_settings(cfg_a, instance_id="rt-a")
+        acquired_lock_a.acquire()
+        report = await reconcile_on_startup(
+            hitl_store=hitl_a.store,
+            current_runtime_id="rt-a",
+            runtime_lock=acquired_lock_a,
+        )
+        assert report.runtime_instance_id == "rt-a"
+        acquired_lock_a.release()
+
+        # 4. In-memory DB with Noop lock -> succeeds; file DB with Noop lock -> refuses
+        noop_lock = RuntimeInstanceLock([], instance_id="rt-noop")
+        assert noop_lock.is_noop is True
+        mem_report = await reconcile_on_startup(
+            hitl_store=hitl_mem.store,
+            current_runtime_id="rt-noop",
+            runtime_lock=noop_lock,
+        )
+        assert mem_report.runtime_instance_id == "rt-noop"
+
+        with pytest.raises(RuntimeError, match="Noop RuntimeInstanceLock is only permitted for in-memory databases"):
+            await reconcile_on_startup(
+                hitl_store=hitl_a.store,
+                current_runtime_id="rt-noop",
+                runtime_lock=noop_lock,
+            )
+
+        # 5. Lock for DB B passed to recovery for DB A -> refuses
+        acquired_lock_b = RuntimeInstanceLock.from_settings(cfg_b, instance_id="rt-b")
+        acquired_lock_b.acquire()
+        with pytest.raises(RuntimeError, match="does not cover HITLStore database"):
+            await reconcile_on_startup(
+                hitl_store=hitl_a.store,
+                current_runtime_id="rt-b",
+                runtime_lock=acquired_lock_b,
+            )
+        acquired_lock_b.release()
+    finally:
+        hitl_a.close()
+        hitl_mem.close()
+
+
+@pytest.mark.asyncio
+async def test_p3_rem_03_human_audit_outcome_restrictions_and_no_reactivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2-01: audit_uncertain_outcome only allows UNKNOWN -> SUCCEEDED/FAILED/PARTIAL, rejects repeated audits and non-UNKNOWN."""
+    cfg = _make_sqlite_settings(tmp_path)
+    monkeypatch.setattr(settings_mod, "_global_settings", cfg)
+    session_svc = SessionService(db_path=cfg.storage.sqlite_path)
+    session_svc.create_session(session_id="sess-audit-test", title="Audit Test")
+    session_svc.close()
+
+    hitl = HITLManager(db_path=cfg.storage.sqlite_path)
+    thread_id = "sess-audit-test"
+
+    try:
+        # A. Create a SUCCEEDED outcome and a FAILED outcome
+        req_succ = hitl.create_request(thread_id=thread_id, run_id="r1", tool_name="t1", arguments={}, tool_call_id="c_succ")
+        hitl.resolve_request(req_succ.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        hitl.acquire_execution_lease(req_succ.id, thread_id=thread_id, tool_call_id="c_succ", arguments_hash=req_succ.arguments_hash)
+        hitl.finalize_execution(req_succ.id, success=True)
+
+        req_fail = hitl.create_request(thread_id=thread_id, run_id="r2", tool_name="t2", arguments={}, tool_call_id="c_fail")
+        hitl.resolve_request(req_fail.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        hitl.acquire_execution_lease(req_fail.id, thread_id=thread_id, tool_call_id="c_fail", arguments_hash=req_fail.arguments_hash)
+        hitl.finalize_execution(req_fail.id, success=False, error="failed")
+
+        # B. Create an UNKNOWN outcome
+        req_unk = hitl.create_request(thread_id=thread_id, run_id="r3", tool_name="t3", arguments={}, tool_call_id="c_unk")
+        hitl.resolve_request(req_unk.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        hitl.acquire_execution_lease(req_unk.id, thread_id=thread_id, tool_call_id="c_unk", arguments_hash=req_unk.arguments_hash)
+        hitl.finalize_execution(req_unk.id, success=False, error="crashed", outcome_status=ExecutionOutcomeStatus.UNKNOWN)
+
+        # 1. Non-UNKNOWN audit rejected (SUCCEEDED outcome)
+        with pytest.raises(ValueError, match="only UNKNOWN outcomes can be audited"):
+            hitl.audit_uncertain_outcome(
+                thread_id=thread_id,
+                approval_id=req_succ.id,
+                verified_status=ExecutionOutcomeStatus.FAILED,
+                actor="admin",
+                note="invalid overwrite",
+            )
+
+        # 2. Non-UNKNOWN audit rejected (FAILED outcome)
+        with pytest.raises(ValueError, match="only UNKNOWN outcomes can be audited"):
+            hitl.audit_uncertain_outcome(
+                thread_id=thread_id,
+                approval_id=req_fail.id,
+                verified_status=ExecutionOutcomeStatus.SUCCEEDED,
+                actor="admin",
+                note="invalid overwrite",
+            )
+
+        # 3. Valid audit on UNKNOWN outcome -> SUCCEEDED / FAILED / PARTIAL
+        audited = hitl.audit_uncertain_outcome(
+            thread_id=thread_id,
+            approval_id=req_unk.id,
+            verified_status=ExecutionOutcomeStatus.SUCCEEDED,
+            actor="security_lead",
+            note="Verified external service recorded transaction",
+        )
+        assert audited is not None
+        assert audited.outcome_status == ExecutionOutcomeStatus.SUCCEEDED
+        assert audited.reconciled_by == "security_lead"
+        assert audited.reconciled_note == "Verified external service recorded transaction"
+
+        # Approval request status remains FAILED (Option B) - never altered by audit
+        up_req = hitl.get_request(req_unk.id, thread_id=thread_id)
+        assert up_req is not None and up_req.status == ApprovalStatus.FAILED
+        assert up_req.audit_actor == "security_lead"
+
+        # 4. Repeated audit rejected
+        with pytest.raises(ValueError, match="repeated audit rejected"):
+            hitl.audit_uncertain_outcome(
+                thread_id=thread_id,
+                approval_id=req_unk.id,
+                verified_status=ExecutionOutcomeStatus.FAILED,
+                actor="admin2",
+                note="second audit try",
+            )
+
+        # 5. Lease reactivation remains blocked
+        ok_reacq, _, err_reacq = hitl.acquire_execution_lease(
+            approval_id=req_unk.id,
+            thread_id=thread_id,
+            tool_call_id="c_unk",
+            arguments_hash=req_unk.arguments_hash,
+        )
+        assert ok_reacq is False
+        assert "replay blocked" in (err_reacq or "")
+    finally:
+        hitl.close()
+
+    # 6. Verify HTTP API returns 400 Bad Request on invalid / repeated audits
+    app = create_app()
+    with TestClient(app) as client:
+        r_repeat = client.post(
+            f"/api/v1/approvals/{req_unk.id}/audit",
+            json={"thread_id": thread_id, "verified_status": "FAILED", "actor": "admin3", "note": "repeat via api"},
+        )
+        assert r_repeat.status_code == 400
+        assert "repeated audit rejected" in r_repeat.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_p3_rem_04_cancellation_offload_repeated_cancel_and_sqlite_error(
+    tmp_path: Path,
+) -> None:
+    """P2-02: CancelledError cleanup is offloaded from event loop, shielded from secondary cancels, and resilient to SQLite errors."""
+    cfg = _make_sqlite_settings(tmp_path)
+    reg = ToolRegistry()
+
+    tool_started = asyncio.Event()
+
+    @tool
+    async def blocking_tool(val: str) -> str:
+        """Tool that waits indefinitely until cancelled."""
+        tool_started.set()
+        await asyncio.sleep(60)
+        return "done"
+
+    tag_tool_safety(blocking_tool, risk_level=RiskLevel.HIGH, requires_approval=True)
+    reg.register(blocking_tool)
+
+    hitl = HITLManager(db_path=cfg.storage.sqlite_path)
+    executor = create_tool_executor_node(reg, hitl_mgr=hitl)
+    thread_id = "sess-cancel-test"
+
+    try:
+        # 1. Normal cancellation: offloaded to worker thread, updates Approval=FAILED + Outcome=UNKNOWN
+        req1 = hitl.create_request(
+            thread_id=thread_id,
+            run_id="r1",
+            tool_name="blocking_tool",
+            arguments={"val": "1"},
+            tool_call_id="call_c1",
+        )
+        hitl.resolve_request(req1.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        task1 = asyncio.create_task(executor({
+            "messages": [AIMessage(content="run", tool_calls=[{"id": "call_c1", "name": "blocking_tool", "args": {"val": "1"}}])],
+            "run_context": {"session_id": thread_id, "run_id": "r1"},
+            "approval_decision": {"decisions_by_call_id": {"call_c1": {"approval_id": req1.id, "tool_call_id": "call_c1", "decision": "approve", "arguments_hash": req1.arguments_hash}}},
+        }))
+        await tool_started.wait()
+        task1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task1
+
+        up_req1 = hitl.get_request(req1.id, thread_id=thread_id)
+        out1 = hitl.get_outcome_by_approval(req1.id, thread_id=thread_id)
+        assert up_req1 is not None and up_req1.status == ApprovalStatus.FAILED
+        assert out1 is not None and out1.outcome_status == ExecutionOutcomeStatus.UNKNOWN
+
+        # 2. Repeated cancellation during cleanup: double cancel does not interrupt worker thread write
+        tool_started.clear()
+        req2 = hitl.create_request(
+            thread_id=thread_id,
+            run_id="r2",
+            tool_name="blocking_tool",
+            arguments={"val": "2"},
+            tool_call_id="call_c2",
+        )
+        hitl.resolve_request(req2.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        task2 = asyncio.create_task(executor({
+            "messages": [AIMessage(content="run", tool_calls=[{"id": "call_c2", "name": "blocking_tool", "args": {"val": "2"}}])],
+            "run_context": {"session_id": thread_id, "run_id": "r2"},
+            "approval_decision": {"decisions_by_call_id": {"call_c2": {"approval_id": req2.id, "tool_call_id": "call_c2", "decision": "approve", "arguments_hash": req2.arguments_hash}}},
+        }))
+        await tool_started.wait()
+        # Cancel once, then cancel a second time in immediate succession
+        task2.cancel()
+        task2.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task2
+
+        up_req2 = hitl.get_request(req2.id, thread_id=thread_id)
+        out2 = hitl.get_outcome_by_approval(req2.id, thread_id=thread_id)
+        assert up_req2 is not None and up_req2.status == ApprovalStatus.FAILED
+        assert out2 is not None and out2.outcome_status == ExecutionOutcomeStatus.UNKNOWN
+
+        # 3. SQLite error during cleanup is logged and does not prevent propagation of CancelledError
+        tool_started.clear()
+        req3 = hitl.create_request(
+            thread_id=thread_id,
+            run_id="r3",
+            tool_name="blocking_tool",
+            arguments={"val": "3"},
+            tool_call_id="call_c3",
+        )
+        hitl.resolve_request(req3.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        task3 = asyncio.create_task(executor({
+            "messages": [AIMessage(content="run", tool_calls=[{"id": "call_c3", "name": "blocking_tool", "args": {"val": "3"}}])],
+            "run_context": {"session_id": thread_id, "run_id": "r3"},
+            "approval_decision": {"decisions_by_call_id": {"call_c3": {"approval_id": req3.id, "tool_call_id": "call_c3", "decision": "approve", "arguments_hash": req3.arguments_hash}}},
+        }))
+        await tool_started.wait()
+
+        from unittest.mock import patch
+        with patch.object(hitl, "finalize_execution", side_effect=sqlite3.OperationalError("simulated database failure")):
+            task3.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task3
+    finally:
+        hitl.close()

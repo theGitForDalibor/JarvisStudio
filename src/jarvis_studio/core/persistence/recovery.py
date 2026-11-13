@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from jarvis_studio.agent.hitl.models import ApprovalStatus
+from jarvis_studio.core.persistence.runtime_lock import RUNTIME_LOCK_FILENAME
+from jarvis_studio.core.persistence.sqlite import is_memory_db_path, normalize_db_path
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple
@@ -82,10 +85,32 @@ async def reconcile_on_startup(
     runtime_lock: RuntimeInstanceLock | None = None,
 ) -> StartupRecoveryReport:
     """Reconcile stale HITL leases and outcomes safely under `RuntimeInstanceLock`."""
-    if runtime_lock is not None and not runtime_lock.is_noop and not runtime_lock.is_acquired:
+    if runtime_lock is None:
         raise RuntimeError(
-            "Startup recovery refused: RuntimeInstanceLock must be acquired before reconciling DB state"
+            "Startup recovery refused: RuntimeInstanceLock is required before reconciling DB state"
         )
+
+    is_memory = is_memory_db_path(hitl_store.db_path)
+    if runtime_lock.is_noop:
+        if not is_memory:
+            raise RuntimeError(
+                "Startup recovery refused: Noop RuntimeInstanceLock is only permitted for in-memory databases"
+            )
+    else:
+        if is_memory:
+            raise RuntimeError(
+                "Startup recovery refused: file-backed RuntimeInstanceLock cannot be used for in-memory databases"
+            )
+        if not runtime_lock.is_acquired:
+            raise RuntimeError(
+                "Startup recovery refused: RuntimeInstanceLock must be acquired before reconciling DB state"
+            )
+        db_canonical_parent = Path(normalize_db_path(hitl_store.db_path)).resolve().parent
+        expected_lock = (db_canonical_parent / RUNTIME_LOCK_FILENAME).resolve()
+        if not any(lp.resolve() == expected_lock for lp in runtime_lock.lock_paths):
+            raise RuntimeError(
+                f"Startup recovery refused: RuntimeInstanceLock does not cover HITLStore database at '{hitl_store.db_path}'"
+            )
 
     stale_exec = hitl_store.mark_stale_executing_unknown(current_runtime_id)
     stale_safe = hitl_store.mark_stale_safe_outcomes_unknown()

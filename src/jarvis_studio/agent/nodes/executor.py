@@ -1,6 +1,7 @@
 """Tool execution node handling normal and HITL-resolved tool calls."""
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -21,6 +22,66 @@ from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.core.observability.tracer import timed_step
 from jarvis_studio.tools.registry import ToolRegistry, get_default_registry
 
+
+def classify_tool_execution_exception(exc: BaseException) -> ExecutionOutcomeStatus:
+    """Classify tool execution outcome status based on exception semantics.
+
+    Returns:
+        - ExecutionOutcomeStatus.FAILED if it is definitively proven that NO side effect occurred.
+        - ExecutionOutcomeStatus.PARTIAL if the tool execution contract indicates partial completion.
+        - ExecutionOutcomeStatus.UNKNOWN if it is uncertain whether side effects occurred.
+    """
+    explicit_status = getattr(exc, "outcome_status", None)
+    if isinstance(explicit_status, ExecutionOutcomeStatus):
+        return explicit_status
+    if getattr(exc, "is_partial", False) or getattr(exc, "has_partial_side_effects", False):
+        return ExecutionOutcomeStatus.PARTIAL
+    if getattr(exc, "has_side_effects", None) is True or getattr(exc, "side_effects_occurred", None) is True:
+        return ExecutionOutcomeStatus.UNKNOWN
+    if getattr(exc, "has_side_effects", None) is False or getattr(exc, "side_effects_occurred", None) is False:
+        return ExecutionOutcomeStatus.FAILED
+
+    from jarvis_studio.agent.hitl.models import (
+        ToolPartialExecutionError,
+        ToolPreExecutionError,
+        ToolUncertainExecutionError,
+    )
+    from jarvis_studio.core.process.models import (
+        ProcessIsolationError,
+        ProcessLaunchError,
+    )
+
+    if isinstance(exc, ToolPreExecutionError):
+        return ExecutionOutcomeStatus.FAILED
+    if isinstance(exc, ToolPartialExecutionError):
+        return ExecutionOutcomeStatus.PARTIAL
+    if isinstance(exc, ToolUncertainExecutionError):
+        return ExecutionOutcomeStatus.UNKNOWN
+    if isinstance(exc, (ProcessLaunchError, ProcessIsolationError)):
+        return ExecutionOutcomeStatus.FAILED
+
+    # Uncertain: arbitrary exception during/after invocation may have caused side effects
+    return ExecutionOutcomeStatus.UNKNOWN
+
+
+async def _execute_cancellation_cleanup_shielded(
+    cleanup_fn: Callable[[], None],
+) -> None:
+    """Execute cleanup off the event loop thread, immune to secondary task cancellations.
+
+    If a secondary CancelledError is raised while waiting for the thread pool future,
+    we ensure the worker thread completes before re-raising CancelledError.
+    """
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(None, cleanup_fn)
+    try:
+        await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        # A secondary cancellation occurred while the cleanup thread was executing.
+        # Await the underlying future so worker thread SQLite writes finish cleanly
+        # and connections are returned before propagating cancellation.
+        await fut
+        raise
 
 def create_tool_executor_node(
     registry: ToolRegistry = None,
@@ -110,7 +171,7 @@ def create_tool_executor_node(
                         )
                     )
                     continue
-                except Exception as reg_exc:
+                except Exception as reg_exc:  # noqa: BLE001
                     logger.error(
                         f"Fail-Closed: could not persist pre-execution outcome for SAFE tool '{tool_name}' "
                         f"(call_id={call_id}): {reg_exc}"
@@ -171,42 +232,54 @@ def create_tool_executor_node(
                         f"Tool execution cancelled via CancelledError: '{tool_name}' "
                         f"(call_id={call_id}, approval_id={auth.approval_id})"
                     )
-                    if auth.approval_id:
-                        try:
-                            active_hitl.finalize_execution(
-                                auth.approval_id,
-                                success=False,
-                                error="Task execution cancelled (asyncio.CancelledError)",
-                            )
-                        except Exception as fin_exc:
-                            logger.error(
-                                f"Failed to finalize cancelled execution for approval '{auth.approval_id}': {fin_exc}"
-                            )
-                        try:
-                            active_hitl.mark_outcome_uncertain(
-                                approval_id=auth.approval_id,
-                                error="Task execution cancelled in flight (asyncio.CancelledError)",
-                            )
-                        except Exception as unk_exc:
-                            logger.error(
-                                f"Failed to mark uncertain outcome for approval '{auth.approval_id}': {unk_exc}"
-                            )
-                    elif tracked_safe:
-                        try:
-                            active_hitl.finalize_safe_outcome(
-                                thread_id=thread_id,  # type: ignore[arg-type]
-                                tool_call_id=call_id,
-                                outcome_status=ExecutionOutcomeStatus.UNKNOWN,
-                                error_message="Task execution cancelled in flight (asyncio.CancelledError)",
-                            )
-                        except Exception as unk_exc:
-                            logger.error(
-                                f"Failed to mark uncertain outcome for SAFE call '{call_id}': {unk_exc}"
-                            )
+
+                    def _perform_cancellation_cleanup(
+                        target_auth=auth,
+                        target_call_id=call_id,
+                        target_thread_id=thread_id,
+                        target_tracked_safe=tracked_safe,
+                        target_hitl=active_hitl,
+                    ) -> None:
+                        if target_auth.approval_id:
+                            try:
+                                target_hitl.finalize_execution(
+                                    target_auth.approval_id,
+                                    success=False,
+                                    error="Task execution cancelled in flight (asyncio.CancelledError)",
+                                    outcome_status=ExecutionOutcomeStatus.UNKNOWN,
+                                )
+                            except Exception as fin_exc:  # noqa: BLE001  # noqa: BLE001
+                                logger.error(
+                                    f"Failed to finalize cancelled execution for approval '{target_auth.approval_id}': {fin_exc}"
+                                )
+                                try:
+                                    target_hitl.mark_outcome_uncertain(
+                                        approval_id=target_auth.approval_id,
+                                        error="Task execution cancelled in flight (asyncio.CancelledError)",
+                                    )
+                                except Exception as unk_exc:  # noqa: BLE001
+                                    logger.error(
+                                        f"Failed to mark uncertain outcome for approval '{target_auth.approval_id}': {unk_exc}"
+                                    )
+                        elif target_tracked_safe:
+                            try:
+                                target_hitl.finalize_safe_outcome(
+                                    thread_id=target_thread_id,  # type: ignore[arg-type]
+                                    tool_call_id=target_call_id,
+                                    outcome_status=ExecutionOutcomeStatus.UNKNOWN,
+                                    error_message="Task execution cancelled in flight (asyncio.CancelledError)",
+                                )
+                            except Exception as unk_exc:  # noqa: BLE001
+                                logger.error(
+                                    f"Failed to mark uncertain outcome for SAFE call '{target_call_id}': {unk_exc}"
+                                )
+
+                    await _execute_cancellation_cleanup_shielded(_perform_cancellation_cleanup)
                     raise
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.error(f"Error executing tool '{tool_name}': {exc}")
                     execution_output = f"Error executing '{tool_name}': {exc}"
+                    outcome_status = classify_tool_execution_exception(exc)
                     if auth.approval_id:
                         try:
                             await asyncio.to_thread(
@@ -214,8 +287,9 @@ def create_tool_executor_node(
                                 auth.approval_id,
                                 success=False,
                                 error=str(exc),
+                                outcome_status=outcome_status,
                             )
-                        except Exception as fin_exc:
+                        except Exception as fin_exc:  # noqa: BLE001
                             logger.error(
                                 f"Failed to finalize failed execution for approval '{auth.approval_id}': {fin_exc}"
                             )
@@ -225,10 +299,10 @@ def create_tool_executor_node(
                                 active_hitl.finalize_safe_outcome,
                                 thread_id=thread_id,  # type: ignore[arg-type]
                                 tool_call_id=call_id,
-                                outcome_status=ExecutionOutcomeStatus.FAILED,
+                                outcome_status=outcome_status,
                                 error_message=str(exc),
                             )
-                        except Exception as fin_exc:
+                        except Exception as fin_exc:  # noqa: BLE001
                             logger.error(
                                 f"Failed to finalize failed SAFE outcome for '{call_id}': {fin_exc}"
                             )
@@ -255,7 +329,7 @@ def create_tool_executor_node(
                             raise RuntimeError(
                                 f"Approval '{auth.approval_id}' did not transition to CONSUMED (status={actual_status})"
                             )
-                    except Exception as fin_exc:
+                    except Exception as fin_exc:  # noqa: BLE001
                         logger.error(
                             f"CRITICAL: Tool '{tool_name}' (call_id={call_id}, approval_id={auth.approval_id}) "
                             f"executed successfully, but authorization finalization failed: {fin_exc}"
@@ -280,7 +354,7 @@ def create_tool_executor_node(
                             outcome_status=ExecutionOutcomeStatus.SUCCEEDED,
                             result_summary=execution_output[:500],
                         )
-                    except Exception as out_exc:
+                    except Exception as out_exc:  # noqa: BLE001
                         logger.error(
                             f"CRITICAL: SAFE tool '{tool_name}' (call_id={call_id}) succeeded, "
                             f"but outcome finalization failed: {out_exc}"

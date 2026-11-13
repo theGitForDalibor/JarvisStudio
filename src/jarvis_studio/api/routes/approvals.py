@@ -277,13 +277,16 @@ async def audit_approval_outcome(
             detail="Invalid verified_status; expected 'SUCCEEDED', 'FAILED', or 'PARTIAL'",
         )
     hitl_mgr = get_hitl_manager()
-    outcome = hitl_mgr.audit_uncertain_outcome(
-        thread_id=trusted_tid,
-        approval_id=approval_id,
-        verified_status=target_status,
-        actor=payload.actor,
-        note=payload.note,
-    )
+    try:
+        outcome = hitl_mgr.audit_uncertain_outcome(
+            thread_id=trusted_tid,
+            approval_id=approval_id,
+            verified_status=target_status,
+            actor=payload.actor,
+            note=payload.note,
+        )
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err)) from val_err
     if outcome is None:
         _raise_not_found()
     return outcome.model_dump()

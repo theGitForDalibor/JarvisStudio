@@ -511,17 +511,22 @@ class HITLStore:
         approval_id: str,
         success: bool,
         error: str | None = None,
+        *,
+        outcome_status: ExecutionOutcomeStatus | None = None,
     ) -> ApprovalRequest | None:
-        """Atomically transition `EXECUTING` -> `CONSUMED` (`SUCCEEDED`) or `FAILED` (`FAILED`)."""
+        """Atomically transition `EXECUTING` -> `CONSUMED` (`SUCCEEDED`) or `FAILED` (`FAILED`/`UNKNOWN`/`PARTIAL`)."""
         now = time.time()
         new_status = (
             ApprovalStatus.CONSUMED.value if success else ApprovalStatus.FAILED.value
         )
-        new_outcome = (
-            ExecutionOutcomeStatus.SUCCEEDED.value
-            if success
-            else ExecutionOutcomeStatus.FAILED.value
-        )
+        if outcome_status is not None:
+            new_outcome = outcome_status.value
+        else:
+            new_outcome = (
+                ExecutionOutcomeStatus.SUCCEEDED.value
+                if success
+                else ExecutionOutcomeStatus.FAILED.value
+            )
         with self._tx() as conn:
             row = conn.execute(
                 "SELECT * FROM hitl_approval_requests WHERE id = ?",
@@ -797,6 +802,21 @@ class HITLStore:
 
             if row is None:
                 return None
+
+            curr_status = row["outcome_status"]
+            # Reject repeated audit
+            if row["reconciled_at"] is not None or row["reconciled_by"] is not None:
+                raise ValueError(
+                    f"Outcome '{row['outcome_id']}' has already been audited by "
+                    f"'{row['reconciled_by']}' (repeated audit rejected)"
+                )
+
+            # Only UNKNOWN outcome status can be audited
+            if curr_status != ExecutionOutcomeStatus.UNKNOWN.value:
+                raise ValueError(
+                    f"Cannot audit outcome '{row['outcome_id']}': current status is '{curr_status}', "
+                    "only UNKNOWN outcomes can be audited"
+                )
 
             conn.execute(
                 """
