@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 
 from jarvis_studio.agent.graph import build_agent_graph
+from jarvis_studio.agent.hitl.authorization import verify_tool_execution_authorization
 from jarvis_studio.agent.hitl.manager import (
     ApprovalDecision,
     ApprovalStatus,
@@ -65,6 +66,7 @@ def _isolate_phase3_singletons():
             if callable(close_fn):
                 close_fn()
 from jarvis_studio.tools.base import RiskLevel, tag_tool_safety
+from jarvis_studio.tools.builtin.shell_tools import execute_shell_command
 from jarvis_studio.tools.registry import ToolRegistry
 
 
@@ -1112,5 +1114,294 @@ async def test_p3_rem_04_cancellation_offload_repeated_cancel_and_sqlite_error(
             task3.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task3
+    finally:
+        hitl.close()
+
+
+@pytest.mark.asyncio
+async def test_p3_audit_reused_instance_id_crashed_executing_converges_to_unknown(tmp_path: Path):
+    """If a runtime crashes while EXECUTING and restarts with the same instance_id,
+    reconcile_on_startup must converge all EXECUTING requests to UNKNOWN and block replay.
+    """
+    cfg = _make_sqlite_settings(tmp_path / "reused")
+    static_instance_id = "rt-static-worker-01"
+
+    # 1. Run 1 starts, acquires lease under static_instance_id
+    lock1 = RuntimeInstanceLock.from_settings(cfg, instance_id=static_instance_id)
+    lock1.acquire()
+    assert lock1.is_acquired is True
+    hitl1 = HITLManager(db_path=cfg.storage.sqlite_path)
+    thread_id = "thread_audit_reused"
+    call_id = "call_audit_reused"
+    req = hitl1.create_request(
+        thread_id=thread_id,
+        run_id="run_crash",
+        tool_name="execute_shell_command",
+        arguments={"command": "drop_tables"},
+        tool_call_id=call_id,
+    )
+    hitl1.resolve_request(req.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+    leased, leased_req, _err = hitl1.acquire_execution_lease(
+        approval_id=req.id,
+        thread_id=thread_id,
+        tool_call_id=call_id,
+        arguments_hash=req.arguments_hash,
+        lease_owner_instance_id=static_instance_id,
+        lease_acquired_run_id="run_crash",
+    )
+    assert leased is True
+    assert leased_req is not None and leased_req.status == ApprovalStatus.EXECUTING
+
+    # Simulate abrupt crash of Run 1: process dies without cleanup, lock released
+    hitl1.close()
+    lock1.release()
+
+    # 2. Run 2 starts with the exact SAME static_instance_id
+    lock2 = RuntimeInstanceLock.from_settings(cfg, instance_id=static_instance_id)
+    lock2.acquire()
+    assert lock2.is_acquired is True
+    hitl2 = HITLManager(db_path=cfg.storage.sqlite_path)
+    try:
+        report = await reconcile_on_startup(
+            hitl_store=hitl2.store,
+            current_runtime_id=static_instance_id,
+            runtime_lock=lock2,
+        )
+        assert report.stale_executing_marked_unknown == 1
+
+        recovered_req = hitl2.get_request(req.id, thread_id=thread_id)
+        assert recovered_req is not None
+        assert recovered_req.status == ApprovalStatus.UNKNOWN
+
+        recovered_out = hitl2.get_outcome_by_approval(req.id, thread_id=thread_id)
+        assert recovered_out is not None
+        assert recovered_out.outcome_status == ExecutionOutcomeStatus.UNKNOWN
+
+        # Verify replay is strictly blocked
+        reg = ToolRegistry()
+        reg.register(execute_shell_command)
+        auth = verify_tool_execution_authorization(
+            tool_name="execute_shell_command",
+            tool_call_id=call_id,
+            raw_args={"command": "drop_tables"},
+            state={
+                "run_context": {"session_id": thread_id},
+                "approval_decision": {
+                    "decisions_by_call_id": {
+                        call_id: {
+                            "approval_id": req.id,
+                            "tool_call_id": call_id,
+                            "decision": "approve",
+                            "arguments_hash": req.arguments_hash,
+                        }
+                    }
+                },
+            },
+            registry=reg,
+            hitl_mgr=hitl2,
+            acquire_lease=True,
+        )
+        assert auth.is_authorized is False
+        assert auth.status == "unauthorized_already_consumed"
+        assert "UNKNOWN" in (auth.rejection_reason or "")
+    finally:
+        hitl2.close()
+        lock2.release()
+
+
+@pytest.mark.asyncio
+async def test_p3_audit_stale_high_risk_not_started_outcome_converges_to_unknown(tmp_path: Path):
+    """Any outcome left in NOT_STARTED (whether high-risk or safe) must converge to UNKNOWN on startup."""
+    cfg = _make_sqlite_settings(tmp_path / "ns")
+    lock = RuntimeInstanceLock.from_settings(cfg, instance_id="rt-audit-ns")
+    lock.acquire()
+    assert lock.is_acquired is True
+    hitl = HITLManager(db_path=cfg.storage.sqlite_path)
+    try:
+        thread_id = "thread_audit_ns"
+        call_id = "call_audit_ns"
+        req = hitl.create_request(
+            thread_id=thread_id,
+            run_id="run_ns",
+            tool_name="execute_shell_command",
+            arguments={"command": "deploy"},
+            tool_call_id=call_id,
+        )
+        hitl.resolve_request(req.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        leased, _, _ = hitl.acquire_execution_lease(
+            approval_id=req.id,
+            thread_id=thread_id,
+            tool_call_id=call_id,
+            arguments_hash=req.arguments_hash,
+            lease_owner_instance_id="rt-audit-ns",
+        )
+        assert leased is True
+
+        # Outcome is now NOT_STARTED with approval_id = req.id
+        init_out = hitl.get_outcome_by_approval(req.id, thread_id=thread_id)
+        assert init_out is not None and init_out.outcome_status == ExecutionOutcomeStatus.NOT_STARTED
+        assert init_out.approval_id == req.id
+
+        # Run startup recovery
+        conv_safe = hitl.store.mark_stale_safe_outcomes_unknown()
+        assert conv_safe >= 1
+
+        updated_out = hitl.get_outcome_by_approval(req.id, thread_id=thread_id)
+        assert updated_out is not None
+        assert updated_out.outcome_status == ExecutionOutcomeStatus.UNKNOWN
+    finally:
+        hitl.close()
+        lock.release()
+
+
+def test_p3_audit_authorization_acquire_lease_false_blocks_consumed_failed_unknown_executing(tmp_path: Path):
+    """Pre-flight check (acquire_lease=False) must Fail-Closed and NEVER authorize CONSUMED, FAILED,
+    UNKNOWN, EXECUTING, REJECTED, or PENDING requests (Core Invariant 1: Approval cannot be revived).
+    """
+    db_path = tmp_path / "audit_dryrun.db"
+    hitl = HITLManager(db_path=db_path)
+    try:
+        reg = ToolRegistry()
+        reg.register(execute_shell_command)
+        thread_id = "thread_audit_dryrun"
+
+        # Check each blocked status
+        blocked_statuses = [
+            ApprovalStatus.CONSUMED,
+            ApprovalStatus.FAILED,
+            ApprovalStatus.UNKNOWN,
+            ApprovalStatus.EXECUTING,
+            ApprovalStatus.REJECTED,
+            ApprovalStatus.PENDING,
+        ]
+
+        for idx, status in enumerate(blocked_statuses):
+            call_id = f"call_block_{idx}"
+            req = hitl.create_request(
+                thread_id=thread_id,
+                run_id="run_block",
+                tool_name="execute_shell_command",
+                arguments={"command": f"echo {status.value}"},
+                tool_call_id=call_id,
+            )
+            # Force target status in DB
+            with hitl.store._tx() as conn:
+                conn.execute(
+                    "UPDATE hitl_approval_requests SET status = ? WHERE id = ?",
+                    (status.value, req.id),
+                )
+
+            auth = verify_tool_execution_authorization(
+                tool_name="execute_shell_command",
+                tool_call_id=call_id,
+                raw_args={"command": f"echo {status.value}"},
+                state={
+                    "run_context": {"session_id": thread_id},
+                    "approval_decision": {
+                        "decisions_by_call_id": {
+                            call_id: {
+                                "approval_id": req.id,
+                                "tool_call_id": call_id,
+                                "decision": "approve",
+                                "arguments_hash": req.arguments_hash,
+                            }
+                        }
+                    },
+                },
+                registry=reg,
+                hitl_mgr=hitl,
+                acquire_lease=False,
+            )
+            assert auth.is_authorized is False, f"Expected is_authorized=False for status {status.value}"
+            if status in (ApprovalStatus.CONSUMED, ApprovalStatus.FAILED, ApprovalStatus.UNKNOWN):
+                assert auth.status == "unauthorized_already_consumed"
+            elif status == ApprovalStatus.EXECUTING:
+                assert auth.status == "unauthorized_lease_failed"
+            elif status == ApprovalStatus.REJECTED:
+                assert auth.status == "unauthorized_rejected"
+            elif status == ApprovalStatus.PENDING:
+                assert auth.status == "unauthorized_unapproved"
+
+        # Verify a valid APPROVED request with acquire_lease=False DOES authorize dry-run
+        valid_call = "call_valid_approved"
+        valid_req = hitl.create_request(
+            thread_id=thread_id,
+            run_id="run_valid",
+            tool_name="execute_shell_command",
+            arguments={"command": "echo valid"},
+            tool_call_id=valid_call,
+        )
+        hitl.resolve_request(valid_req.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+        auth_valid = verify_tool_execution_authorization(
+            tool_name="execute_shell_command",
+            tool_call_id=valid_call,
+            raw_args={"command": "echo valid"},
+            state={
+                "run_context": {"session_id": thread_id},
+                "approval_decision": {
+                    "decisions_by_call_id": {
+                        valid_call: {
+                            "approval_id": valid_req.id,
+                            "tool_call_id": valid_call,
+                            "decision": "approve",
+                            "arguments_hash": valid_req.arguments_hash,
+                        }
+                    }
+                },
+            },
+            registry=reg,
+            hitl_mgr=hitl,
+            acquire_lease=False,
+        )
+        assert auth_valid.is_authorized is True
+        assert auth_valid.status == "authorized_approved"
+        # Confirm request in store was NOT consumed by dry-run
+        fresh_req = hitl.get_request(valid_req.id, thread_id=thread_id)
+        assert fresh_req is not None and fresh_req.status == ApprovalStatus.APPROVED
+    finally:
+        hitl.close()
+
+
+def test_p3_audit_lease_acquisition_duplicate_outcome_returns_clean_error(tmp_path: Path):
+    """acquire_execution_lease handles sqlite3.IntegrityError gracefully and does not leave request in EXECUTING."""
+    db_path = tmp_path / "audit_dup_outcome.db"
+    hitl = HITLManager(db_path=db_path)
+    try:
+        thread_id = "thread_dup"
+        call_id = "call_dup"
+        req = hitl.create_request(
+            thread_id=thread_id,
+            run_id="r1",
+            tool_name="execute_shell_command",
+            arguments={"command": "echo dup"},
+            tool_call_id=call_id,
+        )
+        hitl.resolve_request(req.id, ApprovalDecision(decision="approve"), thread_id=thread_id)
+
+        # Pre-seed an outcome for this (thread_id, tool_call_id) to trigger UNIQUE conflict
+        hitl.register_safe_outcome_start(
+            thread_id=thread_id,
+            run_id="prior_run",
+            tool_call_id=call_id,
+            tool_name="execute_shell_command",
+        )
+
+        # Attempt to acquire lease for the same (thread_id, tool_call_id)
+        success, leased_req, err = hitl.acquire_execution_lease(
+            approval_id=req.id,
+            thread_id=thread_id,
+            tool_call_id=call_id,
+            arguments_hash=req.arguments_hash,
+        )
+        assert success is False
+        assert leased_req is None
+        assert err is not None
+        assert "already has execution outcome" in err
+        assert "replay blocked" in err
+
+        # Confirm the approval request was NOT transitioned to EXECUTING due to transaction rollback
+        current_req = hitl.get_request(req.id, thread_id=thread_id)
+        assert current_req is not None
+        assert current_req.status == ApprovalStatus.APPROVED
     finally:
         hitl.close()

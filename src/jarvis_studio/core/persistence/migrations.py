@@ -283,7 +283,7 @@ def _run_cleanup_step(
     """Execute one backup cleanup step while keeping subsequent steps independent."""
     try:
         action()
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001
         _logger.warning("%s: %s", description, exc)
         cleanup_errors.append(exc)
 
@@ -316,7 +316,7 @@ def create_verified_backup(
                 f"SQLite Backup API failed for {src_path} -> {bak_path}: {exc}"
             )
             primary_exc.__cause__ = exc
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001
             primary_exc = exc
     finally:
         cleanup_errors: list[BaseException] = []

@@ -403,70 +403,77 @@ class HITLStore:
     ) -> tuple[bool, ApprovalRequest | None, str | None]:
         """Atomically transition `APPROVED`/`MODIFIED` -> `EXECUTING` and seed `NOT_STARTED` Outcome."""
         now = time.time()
-        with self._tx() as conn:
-            cur = conn.execute(
-                """
-                UPDATE hitl_approval_requests
-                SET status = 'EXECUTING',
-                    executed_at = ?,
-                    lease_owner_instance_id = ?,
-                    lease_acquired_run_id = ?
-                WHERE id = ?
-                  AND thread_id = ?
-                  AND tool_call_id = ?
-                  AND arguments_hash = ?
-                  AND status IN ('APPROVED', 'MODIFIED')
-                """,
-                (
-                    now,
-                    lease_owner_instance_id,
-                    lease_acquired_run_id,
-                    approval_id,
-                    thread_id,
-                    tool_call_id,
-                    arguments_hash,
-                ),
-            )
-            if cur.rowcount == 1:
-                row = conn.execute(
+        try:
+            with self._tx() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE hitl_approval_requests
+                    SET status = 'EXECUTING',
+                        executed_at = ?,
+                        lease_owner_instance_id = ?,
+                        lease_acquired_run_id = ?
+                    WHERE id = ?
+                      AND thread_id = ?
+                      AND tool_call_id = ?
+                      AND arguments_hash = ?
+                      AND status IN ('APPROVED', 'MODIFIED')
+                    """,
+                    (
+                        now,
+                        lease_owner_instance_id,
+                        lease_acquired_run_id,
+                        approval_id,
+                        thread_id,
+                        tool_call_id,
+                        arguments_hash,
+                    ),
+                )
+                if cur.rowcount == 1:
+                    row = conn.execute(
+                        "SELECT * FROM hitl_approval_requests WHERE id = ?",
+                        (approval_id,),
+                    ).fetchone()
+                    assert row is not None
+                    req = _row_to_approval(row)
+                    outcome_id = f"out_{uuid.uuid4().hex[:12]}"
+                    effective_run_id = (
+                        lease_acquired_run_id.strip()
+                        if isinstance(lease_acquired_run_id, str)
+                        and lease_acquired_run_id.strip()
+                        else req.run_id
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO tool_execution_outcomes (
+                            outcome_id, thread_id, task_id, run_id, tool_call_id,
+                            approval_id, tool_name, is_high_risk, outcome_status,
+                            started_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'NOT_STARTED', ?, ?)
+                        """,
+                        (
+                            outcome_id,
+                            req.thread_id,
+                            req.task_id,
+                            effective_run_id,
+                            req.tool_call_id,
+                            req.id,
+                            req.tool_name,
+                            now,
+                            now,
+                        ),
+                    )
+                    return True, req, None
+
+                existing = conn.execute(
                     "SELECT * FROM hitl_approval_requests WHERE id = ?",
                     (approval_id,),
                 ).fetchone()
-                assert row is not None
-                req = _row_to_approval(row)
-                outcome_id = f"out_{uuid.uuid4().hex[:12]}"
-                effective_run_id = (
-                    lease_acquired_run_id.strip()
-                    if isinstance(lease_acquired_run_id, str)
-                    and lease_acquired_run_id.strip()
-                    else req.run_id
-                )
-                conn.execute(
-                    """
-                    INSERT INTO tool_execution_outcomes (
-                        outcome_id, thread_id, task_id, run_id, tool_call_id,
-                        approval_id, tool_name, is_high_risk, outcome_status,
-                        started_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'NOT_STARTED', ?, ?)
-                    """,
-                    (
-                        outcome_id,
-                        req.thread_id,
-                        req.task_id,
-                        effective_run_id,
-                        req.tool_call_id,
-                        req.id,
-                        req.tool_name,
-                        now,
-                        now,
-                    ),
-                )
-                return True, req, None
-
-            existing = conn.execute(
-                "SELECT * FROM hitl_approval_requests WHERE id = ?",
-                (approval_id,),
-            ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            return (
+                False,
+                None,
+                f"Tool call '{tool_call_id}' on thread '{thread_id}' already has execution outcome (replay blocked): {exc}",
+            )
 
         if existing is None:
             return False, None, f"Approval request '{approval_id}' not found"
@@ -857,7 +864,9 @@ class HITLStore:
             ).fetchone()
         return _row_to_outcome(updated) if updated is not None else None
 
-    def mark_stale_executing_unknown(self, current_runtime_id: str) -> int:
+    def mark_stale_executing_unknown(
+        self, current_runtime_id: str | None = None
+    ) -> int:
         """Converge stale `EXECUTING` leases from dead runtimes to `Approval=UNKNOWN, Outcome=UNKNOWN`."""
         now = time.time()
         with self._tx() as conn:
@@ -865,9 +874,7 @@ class HITLStore:
                 """
                 SELECT id FROM hitl_approval_requests
                 WHERE status = 'EXECUTING'
-                  AND (lease_owner_instance_id IS NULL OR lease_owner_instance_id != ?)
-                """,
-                (current_runtime_id,),
+                """
             ).fetchall()
             if not stale_rows:
                 return 0
@@ -897,7 +904,7 @@ class HITLStore:
             return len(stale_ids)
 
     def mark_stale_safe_outcomes_unknown(self) -> int:
-        """Converge pre-existing SAFE `NOT_STARTED` outcomes from dead runtimes to `UNKNOWN`."""
+        """Converge pre-existing `NOT_STARTED` outcomes from dead runtimes to `UNKNOWN`."""
         now = time.time()
         with self._tx() as conn:
             cur = conn.execute(
@@ -907,7 +914,7 @@ class HITLStore:
                     error_message = COALESCE(error_message, 'runtime_restarted_while_not_started'),
                     finished_at = COALESCE(finished_at, ?),
                     updated_at = ?
-                WHERE approval_id IS NULL AND outcome_status = 'NOT_STARTED'
+                WHERE outcome_status = 'NOT_STARTED'
                 """,
                 (now, now),
             )

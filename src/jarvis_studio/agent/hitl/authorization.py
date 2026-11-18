@@ -177,6 +177,55 @@ def verify_tool_execution_authorization(
         else None
     )
     bound_req = hitl.get_request(appr_id, thread_id=thread_id) if appr_id else None
+
+    if bound_req is not None:
+        if bound_req.status in (
+            ApprovalStatus.CONSUMED,
+            ApprovalStatus.FAILED,
+            ApprovalStatus.UNKNOWN,
+        ):
+            return AuthorizationResult(
+                is_authorized=False,
+                effective_args=raw_args,
+                status="unauthorized_already_consumed",
+                rejection_reason=(
+                    f"Execution blocked: Approval request '{bound_req.id}' is already "
+                    f"{bound_req.status.value} (replay blocked)."
+                ),
+                approval_id=bound_req.id,
+            )
+        if bound_req.status == ApprovalStatus.EXECUTING:
+            return AuthorizationResult(
+                is_authorized=False,
+                effective_args=raw_args,
+                status="unauthorized_lease_failed",
+                rejection_reason=(
+                    f"Execution blocked: Approval request '{bound_req.id}' is already "
+                    f"EXECUTING (concurrent execution blocked)."
+                ),
+                approval_id=bound_req.id,
+            )
+        if bound_req.status == ApprovalStatus.REJECTED:
+            user_reason = (
+                decision_data.get("reason")
+                or bound_req.resolution_reason
+                or "rejected by user"
+            )
+            return AuthorizationResult(
+                is_authorized=False,
+                effective_args=raw_args,
+                status="unauthorized_rejected",
+                rejection_reason=f"Execution rejected by user: {user_reason}",
+                approval_id=bound_req.id,
+            )
+        if bound_req.status == ApprovalStatus.PENDING:
+            return AuthorizationResult(
+                is_authorized=False,
+                effective_args=raw_args,
+                status="unauthorized_unapproved",
+                rejection_reason=f"Execution blocked: Approval request '{bound_req.id}' is still PENDING.",
+                approval_id=bound_req.id,
+            )
     if not expected_hash:
         if bound_req:
             expected_hash = bound_req.arguments_hash
@@ -267,7 +316,7 @@ def verify_tool_execution_authorization(
         if tool and hasattr(tool, "args_schema") and tool.args_schema:
             try:
                 tool.args_schema.model_validate(modified_args)
-            except Exception as val_err:
+            except Exception as val_err:  # noqa: BLE001
                 logger.error(
                     f"Modified arguments validation failed for '{tool_name}': {val_err}"
                 )
@@ -306,21 +355,21 @@ def verify_tool_execution_authorization(
         )
 
     # 7. Atomic Execution Lease Acquisition (One-Time Execution Protection)
-    if acquire_lease:
-        if not appr_id:
-            logger.warning(
-                f"Execution blocked: Missing required approval_id for tool '{tool_name}' (call_id: {tool_call_id})"
-            )
-            return AuthorizationResult(
-                is_authorized=False,
-                effective_args=raw_args,
-                status="unauthorized_unapproved",
-                rejection_reason=(
-                    f"Execution blocked: Missing required approval_id to acquire execution lease "
-                    f"for tool '{tool_name}' (call_id: {tool_call_id})."
-                ),
-            )
+    if not appr_id:
+        logger.warning(
+            f"Execution blocked: Missing required approval_id for tool '{tool_name}' (call_id: {tool_call_id})"
+        )
+        return AuthorizationResult(
+            is_authorized=False,
+            effective_args=raw_args,
+            status="unauthorized_unapproved",
+            rejection_reason=(
+                f"Execution blocked: Missing required approval_id to acquire execution lease "
+                f"for tool '{tool_name}' (call_id: {tool_call_id})."
+            ),
+        )
 
+    if acquire_lease:
         run_ctx = state.get("run_context") or {}
         raw_run_id = run_ctx.get("run_id") if isinstance(run_ctx, dict) else None
         lease_run_id = (
@@ -349,7 +398,7 @@ def verify_tool_execution_authorization(
                 rejection_reason=f"Execution lease acquisition failed: {err}",
                 approval_id=appr_id,
             )
-    elif appr_id and not bound_req:
+    elif not bound_req:
         return AuthorizationResult(
             is_authorized=False,
             effective_args=raw_args,
