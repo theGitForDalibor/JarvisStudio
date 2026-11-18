@@ -163,7 +163,7 @@ async def reconcile_on_startup(
         try:
             from jarvis_studio.core.tasks.coordinator import get_task_coordinator
             task_coordinator = get_task_coordinator(hitl_store.db_path)
-        except Exception:
+        except Exception:  # noqa: BLE001
             task_coordinator = None
 
     stale_tasks = 0

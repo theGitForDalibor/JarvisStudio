@@ -1,5 +1,6 @@
 """Session and Thread lifecycle management with SQLite persistence."""
 
+import contextlib
 import json
 import sqlite3
 import time
@@ -199,10 +200,8 @@ class SessionService:
 
             meta = {}
             if row["metadata"]:
-                try:
+                with contextlib.suppress(Exception):
                     meta = json.loads(row["metadata"])
-                except Exception:
-                    pass
 
             return SessionMetadata(
                 session_id=row["session_id"],
@@ -232,10 +231,8 @@ class SessionService:
             for row in cursor.fetchall():
                 meta = {}
                 if row["metadata"]:
-                    try:
+                    with contextlib.suppress(Exception):
                         meta = json.loads(row["metadata"])
-                    except Exception:
-                        pass
                 results.append(
                     SessionMetadata(
                         session_id=row["session_id"],
@@ -428,7 +425,7 @@ class SessionService:
         try:
             from jarvis_studio.core.guard.route_guard import get_route_guard
             get_route_guard().clear_sticky_context(session_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(f"Failed clearing sticky context for session {session_id}: {exc}")
 
         return cursor.rowcount > 0
@@ -541,19 +538,20 @@ class SessionService:
                 if row["tool_calls"]:
                     try:
                         tc = json.loads(row["tool_calls"])
-                    except Exception:
-                        pass
+                    except (json.JSONDecodeError, TypeError):
+                        tc = None
+                keys = set(row.keys())
                 messages.append(
                     ChatMessageRecord(
                         id=row["id"],
                         session_id=row["session_id"],
-                        task_id=row["task_id"] if "task_id" in row.keys() else None,
-                        run_id=row["run_id"] if "run_id" in row.keys() else None,
+                        task_id=row["task_id"] if "task_id" in keys else None,
+                        run_id=row["run_id"] if "run_id" in keys else None,
                         role=row["role"],
                         content=row["content"],
                         tool_calls=tc,
-                        msg_type=row["msg_type"] if "msg_type" in row.keys() else None,
-                        tool_call_id=row["tool_call_id"] if "tool_call_id" in row.keys() else None,
+                        msg_type=row["msg_type"] if "msg_type" in keys else None,
+                        tool_call_id=row["tool_call_id"] if "tool_call_id" in keys else None,
                         created_at=row["created_at"],
                     )
                 )

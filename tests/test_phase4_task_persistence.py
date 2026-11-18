@@ -4,6 +4,7 @@ Session Busy Guard & Cascade Deletion, Sticky Context, and Trace Pruning.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import time
 from pathlib import Path
@@ -57,10 +58,8 @@ def _isolate_phase4_singletons():
     ):
         inst = getattr(mod, attr, None)
         if inst is not None and hasattr(inst, "close"):
-            try:
+            with contextlib.suppress(Exception):
                 inst.close()
-            except Exception:
-                pass
         setattr(mod, attr, None)
     yield
     for mod, attr in (
@@ -69,10 +68,8 @@ def _isolate_phase4_singletons():
     ):
         inst = getattr(mod, attr, None)
         if inst is not None and hasattr(inst, "close"):
-            try:
+            with contextlib.suppress(Exception):
                 inst.close()
-            except Exception:
-                pass
         setattr(mod, attr, None)
 
 

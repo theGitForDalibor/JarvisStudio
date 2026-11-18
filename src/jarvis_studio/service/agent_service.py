@@ -26,7 +26,7 @@ from jarvis_studio.core.observability.trace_logger import (
 )
 from jarvis_studio.core.observability.tracer import set_trace_context, timed_step
 from jarvis_studio.core.tasks.coordinator import TaskCoordinator, get_task_coordinator
-from jarvis_studio.core.tasks.models import RunStatus, RunTriggerType, TaskStatus
+from jarvis_studio.core.tasks.models import RunTriggerType, TaskStatus
 from jarvis_studio.core.thinking.engine import ThinkingEngine
 from jarvis_studio.service.session_service import SessionService, get_session_service
 
@@ -431,7 +431,7 @@ class AgentService:
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Error during agent invocation on thread {thread_id}: {e}")
             self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
             trace.finish(output="", error=str(e), status="error")
@@ -733,7 +733,7 @@ class AgentService:
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             thinking_engine.close()
             logger.error(f"Error during streaming execution on thread {thread_id}: {e}")
             self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
@@ -795,7 +795,7 @@ class AgentService:
             state_snapshot = await self.graph.aget_state(
                 {"configurable": {"thread_id": clean_tid}}
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 f"Checkpoint lookup failed during approval verification for '{clean_tid}': {exc}"
             )
@@ -1007,7 +1007,7 @@ class AgentService:
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to resume thread {thread_id}: {e}")
             self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
             trace.finish(output="", error=str(e), status="error")
@@ -1207,7 +1207,7 @@ class AgentService:
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Error during streaming resume on thread {thread_id}: {e}")
             self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
             trace.finish(output="", error=str(e), status="error")

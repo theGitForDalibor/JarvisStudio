@@ -64,7 +64,7 @@ def set_active_runtime(runtime: AgentRuntime | None) -> None:
 def _run_cleanup_action(errors: list[Exception], action: Callable[[], object]) -> None:
     try:
         action()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         errors.append(exc)
 
 
@@ -332,7 +332,7 @@ class AgentRuntime:
                 self._mcp_manager = mcp_mgr
                 try:
                     await mcp_mgr.connect_and_register_all(registry)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.error(f"Error during MCP servers initialization: {exc}")
 
             from jarvis_studio.agent.hitl.manager import HITLManager
@@ -396,7 +396,7 @@ class AgentRuntime:
         except BaseException as exc:
             try:
                 await self.shutdown()
-            except BaseException as shutdown_exc:
+            except BaseException as shutdown_exc:  # noqa: BLE001
                 exc.add_note(
                     f"Startup rollback shutdown failed "
                     f"({type(shutdown_exc).__name__}: {shutdown_exc})"
@@ -491,7 +491,7 @@ class AgentRuntime:
             store_id = id(store)
             try:
                 store.close()  # type: ignore[attr-defined]
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 all_closed = False
                 errors.append(exc)
             else:
@@ -538,7 +538,7 @@ class AgentRuntime:
             managed = self._managed_sqlite
             try:
                 await managed.aclose()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 checkpointer_closed = False
                 errors.append(exc)
             else:
@@ -554,7 +554,7 @@ class AgentRuntime:
             registry = self._tool_registry
             try:
                 await mcp_mgr.disconnect_all(registry)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 mcp_disconnected = False
                 errors.append(exc)
             else:
@@ -575,7 +575,7 @@ class AgentRuntime:
             lock_released = True
             try:
                 self._lock.release()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 lock_released = False
                 errors.append(exc)
 
