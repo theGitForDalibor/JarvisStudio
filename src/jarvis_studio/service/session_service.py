@@ -17,14 +17,22 @@ from jarvis_studio.core.persistence.sqlite import (
 )
 
 
+class SessionBusyError(Exception):
+    """Raised when a session operation cannot proceed because active tasks or executions are running."""
+
+
 class ChatMessageRecord(BaseModel):
     """Stored chat message in a session."""
 
     id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4().hex[:12]}")
     session_id: str
+    task_id: str | None = None
+    run_id: str | None = None
     role: str  # "user" | "assistant" | "system" | "tool"
     content: str
     tool_calls: list[dict[str, Any]] | None = None
+    msg_type: str | None = None
+    tool_call_id: str | None = None
     created_at: float = Field(default_factory=time.time)
 
 
@@ -52,6 +60,8 @@ class SessionService:
                 self.db_path, enable_wal=True, enable_foreign_keys=True
             )
             run_app_migrations(self.db_path)
+        else:
+            run_app_migrations(self.db_path, in_memory_conn=self._in_memory_conn)
         self._init_db()
 
     @property
@@ -93,17 +103,25 @@ class SessionService:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_messages (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    tool_calls TEXT,
-                    created_at REAL NOT NULL
+                    id           TEXT PRIMARY KEY,
+                    session_id   TEXT NOT NULL,
+                    task_id      TEXT,
+                    run_id       TEXT,
+                    role         TEXT NOT NULL,
+                    content      TEXT NOT NULL,
+                    tool_calls   TEXT,
+                    msg_type     TEXT,
+                    tool_call_id TEXT,
+                    created_at   REAL NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
                 )
                 """
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_chat_msg_session ON chat_messages(session_id, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chat_msg_task ON chat_messages(task_id)"
             )
 
     def create_session(
@@ -116,8 +134,11 @@ class SessionService:
         with self._db.transaction() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO chat_sessions (session_id, title, created_at, updated_at, metadata)
+                INSERT INTO chat_sessions (session_id, title, created_at, updated_at, metadata)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    title = excluded.title,
+                    updated_at = excluded.updated_at
                 """,
                 (sid, sess_title, now, now, json.dumps({})),
             )
@@ -247,14 +268,170 @@ class SessionService:
 
         return self.get_session(session_id)
 
-    def delete_session(self, session_id: str) -> bool:
-        """Remove a session and all its messages."""
+    def is_session_busy(
+        self, session_id: str, conn: sqlite3.Connection | None = None
+    ) -> bool:
+        """Check whether the session has any active tasks or in-flight executions."""
+        def _check(c: sqlite3.Connection) -> bool:
+            # Check agent_tasks
+            tbl_tasks = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_tasks'"
+            ).fetchone()
+            if tbl_tasks:
+                row = c.execute(
+                    """
+                    SELECT 1 FROM agent_tasks
+                    WHERE session_id = ? AND status IN ('RUNNING', 'EXECUTING_TOOL')
+                    LIMIT 1
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if row:
+                    return True
+
+            # Check hitl_approval_requests
+            tbl_hitl = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hitl_approval_requests'"
+            ).fetchone()
+            if tbl_hitl:
+                row = c.execute(
+                    """
+                    SELECT 1 FROM hitl_approval_requests
+                    WHERE (thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?))
+                      AND status = 'EXECUTING'
+                    LIMIT 1
+                    """,
+                    (session_id, session_id),
+                ).fetchone()
+                if row:
+                    return True
+
+            # Check tool_execution_outcomes
+            tbl_outcomes = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_execution_outcomes'"
+            ).fetchone()
+            if tbl_outcomes:
+                row = c.execute(
+                    """
+                    SELECT 1 FROM tool_execution_outcomes
+                    WHERE (thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?))
+                      AND outcome_status = 'NOT_STARTED'
+                    LIMIT 1
+                    """,
+                    (session_id, session_id),
+                ).fetchone()
+                if row:
+                    return True
+
+            return False
+
+        if conn is not None:
+            return _check(conn)
+        with self._db.read_connection() as c:
+            return _check(c)
+
+    def delete_session(self, session_id: str, *, checkpointer: Any | None = None) -> bool:
+        """Remove a session and cascade delete all related records across 8 tables.
+
+        Raises SessionBusyError if any active task or execution is in progress.
+        """
         with self._db.transaction() as conn:
+            if self.is_session_busy(session_id, conn):
+                raise SessionBusyError(
+                    f"Session '{session_id}' cannot be deleted while active tasks or executions are running."
+                )
+
+            exists = conn.execute(
+                "SELECT 1 FROM chat_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if not exists:
+                return False
+
+            # Cascade deletion across 8 tables in exact FK dependency order:
+            # 1. agent_conversation_traces
+            tbl_traces = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
+            ).fetchone()
+            if tbl_traces:
+                conn.execute(
+                    """
+                    DELETE FROM agent_conversation_traces
+                    WHERE session_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                    """,
+                    (session_id, session_id),
+                )
+
+            # 2. tool_execution_outcomes
+            tbl_outcomes = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_execution_outcomes'"
+            ).fetchone()
+            if tbl_outcomes:
+                conn.execute(
+                    """
+                    DELETE FROM tool_execution_outcomes
+                    WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                    """,
+                    (session_id, session_id),
+                )
+
+            # 3. hitl_approval_requests
+            tbl_hitl = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hitl_approval_requests'"
+            ).fetchone()
+            if tbl_hitl:
+                conn.execute(
+                    """
+                    DELETE FROM hitl_approval_requests
+                    WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                    """,
+                    (session_id, session_id),
+                )
+
+            # 4. agent_runs
+            tbl_runs = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'"
+            ).fetchone()
+            if tbl_runs:
+                conn.execute(
+                    "DELETE FROM agent_runs WHERE task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)",
+                    (session_id,),
+                )
+
+            # 5. agent_tasks
+            tbl_tasks = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_tasks'"
+            ).fetchone()
+            if tbl_tasks:
+                conn.execute("DELETE FROM agent_tasks WHERE session_id = ?", (session_id,))
+
+            # 6. chat_messages
             conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
-            cursor = conn.execute(
-                "DELETE FROM chat_sessions WHERE session_id = ?", (session_id,)
-            )
-            return cursor.rowcount > 0
+
+            # 7. ltm_memories (nullify source session/task pointers)
+            tbl_ltm = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ltm_memories'"
+            ).fetchone()
+            if tbl_ltm:
+                conn.execute(
+                    """
+                    UPDATE ltm_memories
+                    SET source_session_id = NULL, source_task_id = NULL
+                    WHERE source_session_id = ?
+                    """,
+                    (session_id,),
+                )
+
+            # 8. chat_sessions
+            cursor = conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
+
+        # Post-transaction: clean sticky context
+        try:
+            from jarvis_studio.core.guard.route_guard import get_route_guard
+            get_route_guard().clear_sticky_context(session_id)
+        except Exception as exc:
+            logger.warning(f"Failed clearing sticky context for session {session_id}: {exc}")
+
+        return cursor.rowcount > 0
 
     def add_message(
         self,
@@ -262,20 +439,47 @@ class SessionService:
         role: str,
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
+        *,
+        task_id: str | None = None,
+        run_id: str | None = None,
+        msg_type: str | None = None,
+        tool_call_id: str | None = None,
     ) -> ChatMessageRecord:
-        """Append a message to the session history, auto-updating title if first message."""
-        self.get_or_create_session(session_id)
+        """Append a message to session history in a single atomic transaction."""
         msg_id = f"msg_{uuid.uuid4().hex[:12]}"
         now = time.time()
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
         with self._db.transaction() as conn:
+            # Single-transaction ensure session exists
             conn.execute(
                 """
-                INSERT INTO chat_messages (id, session_id, role, content, tool_calls, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO chat_sessions (session_id, title, created_at, updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (msg_id, session_id, role, content, tool_calls_json, now),
+                (session_id, "新会话", now, now, json.dumps({})),
+            )
+
+            conn.execute(
+                """
+                INSERT INTO chat_messages (
+                    id, session_id, task_id, run_id, role, content,
+                    tool_calls, msg_type, tool_call_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    msg_id,
+                    session_id,
+                    task_id,
+                    run_id,
+                    role,
+                    content,
+                    tool_calls_json,
+                    msg_type,
+                    tool_call_id,
+                    now,
+                ),
             )
 
             # Auto-title session if currently default
@@ -305,9 +509,13 @@ class SessionService:
         return ChatMessageRecord(
             id=msg_id,
             session_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
             role=role,
             content=content,
             tool_calls=tool_calls,
+            msg_type=msg_type,
+            tool_call_id=tool_call_id,
             created_at=now,
         )
 
@@ -318,7 +526,8 @@ class SessionService:
         with self._db.read_connection() as conn:
             cursor = conn.execute(
                 """
-                SELECT id, session_id, role, content, tool_calls, created_at
+                SELECT id, session_id, task_id, run_id, role, content,
+                       tool_calls, msg_type, tool_call_id, created_at
                 FROM chat_messages
                 WHERE session_id = ?
                 ORDER BY created_at ASC
@@ -338,20 +547,87 @@ class SessionService:
                     ChatMessageRecord(
                         id=row["id"],
                         session_id=row["session_id"],
+                        task_id=row["task_id"] if "task_id" in row.keys() else None,
+                        run_id=row["run_id"] if "run_id" in row.keys() else None,
                         role=row["role"],
                         content=row["content"],
                         tool_calls=tc,
+                        msg_type=row["msg_type"] if "msg_type" in row.keys() else None,
+                        tool_call_id=row["tool_call_id"] if "tool_call_id" in row.keys() else None,
                         created_at=row["created_at"],
                     )
                 )
             return messages
 
     def clear_session_messages(self, session_id: str) -> bool:
-        """Remove all messages for a session while retaining session metadata."""
+        """Remove all messages and execution artifacts for a session while retaining session metadata.
+
+        Raises SessionBusyError if any active task or execution is in progress.
+        """
         with self._db.transaction() as conn:
-            cursor = conn.execute(
-                "DELETE FROM chat_messages WHERE session_id = ?", (session_id,)
-            )
+            if self.is_session_busy(session_id, conn):
+                raise SessionBusyError(
+                    f"Session '{session_id}' messages cannot be cleared while active tasks or executions are running."
+                )
+
+            # Clean traces
+            tbl_traces = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
+            ).fetchone()
+            if tbl_traces:
+                conn.execute(
+                    """
+                    DELETE FROM agent_conversation_traces
+                    WHERE session_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                    """,
+                    (session_id, session_id),
+                )
+
+            # Clean outcomes
+            tbl_outcomes = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_execution_outcomes'"
+            ).fetchone()
+            if tbl_outcomes:
+                conn.execute(
+                    """
+                    DELETE FROM tool_execution_outcomes
+                    WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                    """,
+                    (session_id, session_id),
+                )
+
+            # Clean approvals
+            tbl_hitl = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hitl_approval_requests'"
+            ).fetchone()
+            if tbl_hitl:
+                conn.execute(
+                    """
+                    DELETE FROM hitl_approval_requests
+                    WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                    """,
+                    (session_id, session_id),
+                )
+
+            # Clean runs
+            tbl_runs = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'"
+            ).fetchone()
+            if tbl_runs:
+                conn.execute(
+                    "DELETE FROM agent_runs WHERE task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)",
+                    (session_id,),
+                )
+
+            # Clean tasks
+            tbl_tasks = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_tasks'"
+            ).fetchone()
+            if tbl_tasks:
+                conn.execute("DELETE FROM agent_tasks WHERE session_id = ?", (session_id,))
+
+            # Clean messages
+            cursor = conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
             return cursor.rowcount > 0
 
 

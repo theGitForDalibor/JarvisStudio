@@ -15,6 +15,21 @@ from jarvis_studio.core.persistence.sqlite import (
 from jarvis_studio.memory.models import MemoryCategory, MemoryItem
 
 
+def _row_to_memory_item(r: sqlite3.Row) -> MemoryItem:
+    keys = r.keys()
+    return MemoryItem(
+        id=r["id"],
+        category=MemoryCategory(r["category"]),
+        content=r["content"],
+        source=r["source"],
+        source_session_id=r["source_session_id"] if "source_session_id" in keys else None,
+        source_task_id=r["source_task_id"] if "source_task_id" in keys else None,
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+        importance=r["importance"],
+    )
+
+
 class MemoryStore:
     """Persistent storage engine for Long-Term Memory records using SQLite."""
 
@@ -31,6 +46,8 @@ class MemoryStore:
                 self.db_path, enable_wal=True, enable_foreign_keys=True
             )
             run_app_migrations(self.db_path)
+        else:
+            run_app_migrations(self.db_path, in_memory_conn=self._in_memory_conn)
 
         self._init_db()
 
@@ -71,12 +88,17 @@ class MemoryStore:
                     source TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
-                    importance REAL DEFAULT 1.0
+                    importance REAL DEFAULT 1.0,
+                    source_session_id TEXT,
+                    source_task_id TEXT
                 )
                 """
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ltm_category ON ltm_memories(category)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ltm_source_session ON ltm_memories(source_session_id)"
             )
 
     def add(self, memory: MemoryItem) -> MemoryItem:
@@ -87,8 +109,11 @@ class MemoryStore:
         with self._db.transaction() as conn:
             conn.execute(
                 """
-                INSERT INTO ltm_memories (id, category, content, source, created_at, updated_at, importance)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ltm_memories (
+                    id, category, content, source, created_at, updated_at,
+                    importance, source_session_id, source_task_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory.id,
@@ -100,6 +125,8 @@ class MemoryStore:
                     memory.created_at,
                     memory.updated_at,
                     memory.importance,
+                    memory.source_session_id,
+                    memory.source_task_id,
                 ),
             )
 
@@ -115,15 +142,7 @@ class MemoryStore:
             row = cursor.fetchone()
             if not row:
                 return None
-            return MemoryItem(
-                id=row["id"],
-                category=MemoryCategory(row["category"]),
-                content=row["content"],
-                source=row["source"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-                importance=row["importance"],
-            )
+            return _row_to_memory_item(row)
 
     def update(self, memory: MemoryItem) -> MemoryItem | None:
         """Update an existing memory record."""
@@ -132,7 +151,8 @@ class MemoryStore:
             cursor = conn.execute(
                 """
                 UPDATE ltm_memories
-                SET category = ?, content = ?, source = ?, updated_at = ?, importance = ?
+                SET category = ?, content = ?, source = ?, updated_at = ?,
+                    importance = ?, source_session_id = ?, source_task_id = ?
                 WHERE id = ?
                 """,
                 (
@@ -143,6 +163,8 @@ class MemoryStore:
                     memory.source,
                     memory.updated_at,
                     memory.importance,
+                    memory.source_session_id,
+                    memory.source_task_id,
                     memory.id,
                 ),
             )
@@ -178,18 +200,7 @@ class MemoryStore:
                     (limit,),
                 )
             rows = cursor.fetchall()
-            return [
-                MemoryItem(
-                    id=r["id"],
-                    category=MemoryCategory(r["category"]),
-                    content=r["content"],
-                    source=r["source"],
-                    created_at=r["created_at"],
-                    updated_at=r["updated_at"],
-                    importance=r["importance"],
-                )
-                for r in rows
-            ]
+            return [_row_to_memory_item(r) for r in rows]
 
     def search(
         self,
@@ -224,18 +235,7 @@ class MemoryStore:
                     (pattern, limit),
                 )
             rows = cursor.fetchall()
-            return [
-                MemoryItem(
-                    id=r["id"],
-                    category=MemoryCategory(r["category"]),
-                    content=r["content"],
-                    source=r["source"],
-                    created_at=r["created_at"],
-                    updated_at=r["updated_at"],
-                    importance=r["importance"],
-                )
-                for r in rows
-            ]
+            return [_row_to_memory_item(r) for r in rows]
 
     def clear(self) -> None:
         """Clear all memories (primarily used for test cleanup)."""

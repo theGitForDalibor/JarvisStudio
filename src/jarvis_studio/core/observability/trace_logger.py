@@ -11,6 +11,7 @@ Implements the agent-lifecycle-observability specification from the AI Engineeri
 """
 
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -23,6 +24,8 @@ from jarvis_studio.core.persistence.sqlite import (
     SyncSQLiteSession,
     initialize_sqlite_database,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,8 +50,10 @@ class ConversationTrace:
     trace_id: str = field(default_factory=lambda: f"tr_{uuid.uuid4().hex[:12]}")
     session_id: str = ""
     run_id: str = ""
+    task_id: str | None = None
     query: str = ""
     start_time: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
 
     # 1. input stage
     input_stage: dict[str, Any] = field(default_factory=dict)
@@ -89,6 +94,7 @@ class ConversationTrace:
         self.output_text = output
         self.error = error
         self.status = status if not error else "error"
+        self.updated_at = now
 
     def add_step(
         self,
@@ -120,8 +126,10 @@ class ConversationTrace:
             "trace_id": self.trace_id,
             "session_id": self.session_id,
             "run_id": self.run_id,
+            "task_id": self.task_id,
             "query": self.query,
             "start_time": self.start_time,
+            "updated_at": self.updated_at,
             "status": self.status,
             "input_stage": self.input_stage,
             "guard_stage": self.guard_stage,
@@ -148,6 +156,8 @@ class TraceStore:
                 self.db_path, enable_wal=True, enable_foreign_keys=True
             )
             run_app_migrations(self.db_path)
+        else:
+            run_app_migrations(self.db_path, in_memory_conn=self._in_memory_conn)
         self._init_db()
 
     @property
@@ -184,9 +194,11 @@ class TraceStore:
                     trace_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
                     run_id TEXT,
+                    task_id TEXT,
                     query TEXT NOT NULL,
                     status TEXT NOT NULL,
                     start_time REAL NOT NULL,
+                    updated_at REAL,
                     total_duration_ms INTEGER,
                     ttft_ms INTEGER,
                     ttfa_ms INTEGER,
@@ -199,18 +211,23 @@ class TraceStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_traces_session ON agent_conversation_traces(session_id, start_time DESC)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_traces_task_id ON agent_conversation_traces(task_id)"
+            )
 
     def save_trace(self, trace: ConversationTrace) -> None:
         """Persist completed trace into SQLite."""
         payload = json.dumps(trace.to_dict(), ensure_ascii=False)
+        now = time.time()
+        updated_at = trace.updated_at or now
         with self._db.transaction() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO agent_conversation_traces (
                     trace_id, session_id, run_id, query, status,
                     start_time, total_duration_ms, ttft_ms, ttfa_ms, ttlt_ms,
-                    steps_count, payload
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    steps_count, payload, task_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace.trace_id,
@@ -225,8 +242,54 @@ class TraceStore:
                     trace.ttlt_ms,
                     len(trace.thinking_steps),
                     payload,
+                    trace.task_id,
+                    updated_at,
                 ),
             )
+
+    def prune_old_traces(
+        self,
+        max_age_days: int = 30,
+        max_rows_per_session: int = 200,
+    ) -> int:
+        """Prune traces older than max_age_days and keep at most max_rows_per_session per session.
+
+        Safe and non-blocking: catches exceptions, logs warnings, and returns count of pruned rows.
+        """
+        try:
+            now = time.time()
+            cutoff_time = now - (max_age_days * 86400)
+            total_deleted = 0
+            with self._db.transaction() as conn:
+                # 1. Prune traces older than max_age_days
+                cur1 = conn.execute(
+                    "DELETE FROM agent_conversation_traces WHERE start_time < ?",
+                    (cutoff_time,),
+                )
+                total_deleted += max(0, cur1.rowcount)
+
+                # 2. Prune traces exceeding max_rows_per_session per session using window function
+                cur2 = conn.execute(
+                    """
+                    DELETE FROM agent_conversation_traces
+                    WHERE trace_id IN (
+                        SELECT trace_id FROM (
+                            SELECT trace_id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY session_id
+                                       ORDER BY start_time DESC
+                                   ) as rn
+                            FROM agent_conversation_traces
+                        ) WHERE rn > ?
+                    )
+                    """,
+                    (max_rows_per_session,),
+                )
+                total_deleted += max(0, cur2.rowcount)
+            return total_deleted
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Error pruning conversation traces: %s", exc)
+            return 0
 
     def list_traces(self, limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
         """List summary of traces sorted by most recent."""
@@ -234,8 +297,8 @@ class TraceStore:
             if session_id:
                 cursor = conn.execute(
                     """
-                    SELECT trace_id, session_id, run_id, query, status, start_time,
-                           total_duration_ms, ttft_ms, ttfa_ms, ttlt_ms, steps_count
+                    SELECT trace_id, session_id, run_id, task_id, query, status, start_time,
+                           updated_at, total_duration_ms, ttft_ms, ttfa_ms, ttlt_ms, steps_count
                     FROM agent_conversation_traces
                     WHERE session_id = ?
                     ORDER BY start_time DESC LIMIT ?
@@ -245,8 +308,8 @@ class TraceStore:
             else:
                 cursor = conn.execute(
                     """
-                    SELECT trace_id, session_id, run_id, query, status, start_time,
-                           total_duration_ms, ttft_ms, ttfa_ms, ttlt_ms, steps_count
+                    SELECT trace_id, session_id, run_id, task_id, query, status, start_time,
+                           updated_at, total_duration_ms, ttft_ms, ttfa_ms, ttlt_ms, steps_count
                     FROM agent_conversation_traces
                     ORDER BY start_time DESC LIMIT ?
                     """,

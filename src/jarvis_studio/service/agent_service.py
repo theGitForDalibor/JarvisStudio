@@ -25,8 +25,10 @@ from jarvis_studio.core.observability.trace_logger import (
     get_trace_store,
 )
 from jarvis_studio.core.observability.tracer import set_trace_context, timed_step
+from jarvis_studio.core.tasks.coordinator import TaskCoordinator, get_task_coordinator
+from jarvis_studio.core.tasks.models import RunStatus, RunTriggerType, TaskStatus
 from jarvis_studio.core.thinking.engine import ThinkingEngine
-from jarvis_studio.service.session_service import get_session_service
+from jarvis_studio.service.session_service import SessionService, get_session_service
 
 
 @dataclass
@@ -96,6 +98,19 @@ class _ThreadLockGuard:
             loop_locks.pop(self._key, None)
 
 
+def _extract_checkpoint_id(state_snapshot: Any) -> str | None:
+    if state_snapshot is None:
+        return None
+    cfg = getattr(state_snapshot, "config", None)
+    if isinstance(cfg, dict):
+        configurable = cfg.get("configurable", {})
+        if isinstance(configurable, dict):
+            cp_id = configurable.get("checkpoint_id")
+            if cp_id:
+                return str(cp_id)
+    return None
+
+
 class AgentExecutionResult:
     """Encapsulates the outcome of an agent invocation."""
 
@@ -135,14 +150,24 @@ class AgentService:
         *,
         registry=None,
         checkpointer=None,
+        session_service: SessionService | None = None,
         hitl_manager: HITLManager | None = None,
+        task_coordinator: TaskCoordinator | None = None,
+        trace_store: Any | None = None,
         bound_loop: asyncio.AbstractEventLoop | None = None,
         strict_loop_binding: bool | None = None,
         run_begin_hook: Callable[[], asyncio.Task[Any] | None] | None = None,
         run_end_hook: Callable[[asyncio.Task[Any] | None], None] | None = None,
     ):
-        self.session_service = get_session_service()
+        self.session_service = session_service or get_session_service()
         self.hitl_manager = hitl_manager or get_hitl_manager()
+        if task_coordinator is not None:
+            self._task_coordinator = task_coordinator
+        elif self.session_service is not None:
+            self._task_coordinator = TaskCoordinator(db_path=self.session_service.db_path)
+        else:
+            self._task_coordinator = get_task_coordinator()
+        self.trace_store = trace_store
         self.graph = graph or build_agent_graph(
             registry=registry, checkpointer=checkpointer, hitl_mgr=self.hitl_manager
         )
@@ -151,6 +176,23 @@ class AgentService:
         self._run_begin_hook = run_begin_hook
         self._run_end_hook = run_end_hook
         self._thread_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _ThreadLockEntry]] = WeakKeyDictionary()
+
+    @property
+    def task_coordinator(self) -> TaskCoordinator:
+        if (
+            self._task_coordinator is None
+            or (
+                self.session_service is not None
+                and self._task_coordinator.db_path != self.session_service.db_path
+            )
+        ):
+            db_path = self.session_service.db_path if self.session_service else None
+            self._task_coordinator = TaskCoordinator(db_path=db_path)
+        return self._task_coordinator
+
+    @task_coordinator.setter
+    def task_coordinator(self, value: TaskCoordinator) -> None:
+        self._task_coordinator = value
 
     def _begin_runtime_run(self) -> asyncio.Task[Any] | None:
         if self._run_begin_hook is not None:
@@ -237,14 +279,29 @@ class AgentService:
         self.session_service.get_or_create_session(thread_id)
         effective_run_id = set_trace_context(thread_id, run_id)
         guard = get_route_guard()
-        trace_store = get_trace_store()
+        trace_store = self.trace_store or get_trace_store()
+
+        runtime_id = self.hitl_manager.runtime_instance_id or "standalone"
+        task = self.task_coordinator.create_task(
+            session_id=thread_id,
+            thread_id=thread_id,
+            query=user_message,
+            runtime_id=runtime_id,
+        )
+        run = self.task_coordinator.start_run(
+            task_id=task.task_id,
+            runtime_id=runtime_id,
+            trigger_type=RunTriggerType.INITIAL,
+            run_id=effective_run_id,
+        )
 
         trace = ConversationTrace(
             session_id=thread_id,
             run_id=effective_run_id,
+            task_id=task.task_id,
             query=user_message,
         )
-        trace.input_stage = {"query": user_message, "thread_id": thread_id}
+        trace.input_stage = {"query": user_message, "thread_id": thread_id, "task_id": task.task_id}
 
         # 1. Front-line Guard Evaluation (<50ms fast-path rule check)
         guard_start = time.time()
@@ -259,12 +316,18 @@ class AgentService:
         # Handle Fast-Path Direct Reply or Emergency Halt
         if decision.action in (GuardAction.DIRECT_REPLY, GuardAction.HALT_TASK):
             reply_text = decision.reply_text or "已处理。"
-            self.session_service.add_message(thread_id, role="user", content=user_message)
-            self.session_service.add_message(thread_id, role="assistant", content=reply_text)
+            self.session_service.add_message(
+                thread_id, role="user", content=user_message, task_id=task.task_id, run_id=run.run_id
+            )
+            self.session_service.add_message(
+                thread_id, role="assistant", content=reply_text, task_id=task.task_id, run_id=run.run_id
+            )
+            self.task_coordinator.complete_task_and_run(task.task_id, run.run_id)
             trace.mark_ttft()
             trace.mark_ttfa()
             trace.finish(output=reply_text, status="rule_direct")
             trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
 
             return AgentExecutionResult(
                 thread_id=thread_id,
@@ -275,7 +338,9 @@ class AgentService:
 
         # Record user message and handle enriched intent
         actual_input_message = decision.enriched_message or user_message
-        self.session_service.add_message(thread_id, role="user", content=user_message)
+        self.session_service.add_message(
+            thread_id, role="user", content=user_message, task_id=task.task_id, run_id=run.run_id
+        )
 
         config = {"configurable": {"thread_id": thread_id}}
         
@@ -303,6 +368,7 @@ class AgentService:
             "run_context": {
                 "session_id": thread_id,
                 "run_id": effective_run_id,
+                "task_id": task.task_id,
             },
         }
 
@@ -312,17 +378,20 @@ class AgentService:
 
             # Check if execution paused on an interrupt
             state_snapshot = await self.graph.aget_state(config)
+            checkpoint_id = _extract_checkpoint_id(state_snapshot)
             if state_snapshot.next:
                 # Graph was interrupted (e.g. approval_gate)
                 tasks = state_snapshot.tasks
                 interrupt_val = None
-                for task in tasks:
-                    if task.interrupts:
-                        interrupt_val = task.interrupts[0].value
+                for t in tasks:
+                    if t.interrupts:
+                        interrupt_val = t.interrupts[0].value
                         break
 
+                self.task_coordinator.pause_for_approval(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
+                trace_store.prune_old_traces()
 
                 return AgentExecutionResult(
                     thread_id=thread_id,
@@ -340,10 +409,14 @@ class AgentService:
                     break
 
             if output:
-                self.session_service.add_message(thread_id, role="assistant", content=output)
+                self.session_service.add_message(
+                    thread_id, role="assistant", content=output, task_id=task.task_id, run_id=run.run_id
+                )
 
+            self.task_coordinator.complete_task_and_run(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
             trace.finish(output=output, status="completed")
             trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
 
             return AgentExecutionResult(
                 thread_id=thread_id,
@@ -352,10 +425,18 @@ class AgentService:
                 output_text=output,
             )
 
+        except asyncio.CancelledError:
+            self.task_coordinator.cancel_task_and_run(task.task_id, run.run_id, is_unknown=False, error_message="Cancelled")
+            trace.finish(output="", error="Cancelled", status="cancelled")
+            trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
+            raise
         except Exception as e:
             logger.error(f"Error during agent invocation on thread {thread_id}: {e}")
+            self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
             return AgentExecutionResult(
                 thread_id=thread_id,
                 run_id=effective_run_id,
@@ -393,14 +474,29 @@ class AgentService:
         self.session_service.get_or_create_session(thread_id)
         effective_run_id = set_trace_context(thread_id, run_id)
         guard = get_route_guard()
-        trace_store = get_trace_store()
+        trace_store = self.trace_store or get_trace_store()
+
+        runtime_id = self.hitl_manager.runtime_instance_id or "standalone"
+        task = self.task_coordinator.create_task(
+            session_id=thread_id,
+            thread_id=thread_id,
+            query=user_message,
+            runtime_id=runtime_id,
+        )
+        run = self.task_coordinator.start_run(
+            task_id=task.task_id,
+            runtime_id=runtime_id,
+            trigger_type=RunTriggerType.INITIAL,
+            run_id=effective_run_id,
+        )
 
         trace = ConversationTrace(
             session_id=thread_id,
             run_id=effective_run_id,
+            task_id=task.task_id,
             query=user_message,
         )
-        trace.input_stage = {"query": user_message, "thread_id": thread_id}
+        trace.input_stage = {"query": user_message, "thread_id": thread_id, "task_id": task.task_id}
 
         # 1. Front-line Guard Evaluation (<50ms fast-path rule check)
         guard_start = time.time()
@@ -415,12 +511,18 @@ class AgentService:
         # Fast-Path Rule Direct Reply (0 tokens, <50ms return)
         if decision.action in (GuardAction.DIRECT_REPLY, GuardAction.HALT_TASK):
             reply_text = decision.reply_text or "已处理。"
-            self.session_service.add_message(thread_id, role="user", content=user_message)
-            self.session_service.add_message(thread_id, role="assistant", content=reply_text)
+            self.session_service.add_message(
+                thread_id, role="user", content=user_message, task_id=task.task_id, run_id=run.run_id
+            )
+            self.session_service.add_message(
+                thread_id, role="assistant", content=reply_text, task_id=task.task_id, run_id=run.run_id
+            )
+            self.task_coordinator.complete_task_and_run(task.task_id, run.run_id)
             trace.mark_ttft()
             trace.mark_ttfa()
             trace.finish(output=reply_text, status="rule_direct")
             trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
 
             yield {
                 "event": "thinking",
@@ -446,7 +548,9 @@ class AgentService:
 
         # Regular StateGraph execution
         actual_input_message = decision.enriched_message or user_message
-        self.session_service.add_message(thread_id, role="user", content=user_message)
+        self.session_service.add_message(
+            thread_id, role="user", content=user_message, task_id=task.task_id, run_id=run.run_id
+        )
         config = {"configurable": {"thread_id": thread_id}}
 
         # Check if state needs historical context from SQLite
@@ -473,6 +577,7 @@ class AgentService:
             "run_context": {
                 "session_id": thread_id,
                 "run_id": effective_run_id,
+                "task_id": task.task_id,
             },
         }
 
@@ -513,6 +618,7 @@ class AgentService:
                     t_name = str(event.get("name") or "tool")
                     t_input = event.get("data", {}).get("input")
                     active_tools[t_name] = (time.time(), t_input)
+                    self.task_coordinator.set_task_status(task.task_id, TaskStatus.EXECUTING_TOOL)
                     await thinking_engine.emit_tool_start(t_name, t_input)
                     for ev in await thinking_engine.get_queued_events():
                         yield ev
@@ -530,6 +636,8 @@ class AgentService:
                     out_str = str(raw_out)[:2000] if raw_out is not None else ""
                     start_t, t_args = active_tools.pop(t_name, (time.time(), None))
                     t_duration_ms = int((time.time() - start_t) * 1000)
+                    if not active_tools:
+                        self.task_coordinator.set_task_status(task.task_id, TaskStatus.RUNNING)
 
                     trace.add_step(
                         step_type="tool",
@@ -562,15 +670,18 @@ class AgentService:
             thinking_engine.close()
 
             state_snapshot = await self.graph.aget_state(config)
+            checkpoint_id = _extract_checkpoint_id(state_snapshot)
             if state_snapshot.next:
                 tasks = state_snapshot.tasks
                 interrupt_val = None
-                for task in tasks:
-                    if task.interrupts:
-                        interrupt_val = task.interrupts[0].value
+                for t in tasks:
+                    if t.interrupts:
+                        interrupt_val = t.interrupts[0].value
                         break
+                self.task_coordinator.pause_for_approval(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
+                trace_store.prune_old_traces()
                 yield {
                     "event": "approval_required",
                     "data": interrupt_val or {"status": "pending_approval"},
@@ -583,10 +694,14 @@ class AgentService:
                         output = str(m.content)
                         break
                 if output:
-                    self.session_service.add_message(thread_id, role="assistant", content=output)
+                    self.session_service.add_message(
+                        thread_id, role="assistant", content=output, task_id=task.task_id, run_id=run.run_id
+                    )
 
+                self.task_coordinator.complete_task_and_run(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
                 trace.finish(output=output, status="completed")
                 trace_store.save_trace(trace)
+                trace_store.prune_old_traces()
 
                 yield {
                     "event": "completed",
@@ -601,11 +716,30 @@ class AgentService:
                     },
                 }
 
+        except (asyncio.CancelledError, GeneratorExit):
+            thinking_engine.close()
+            is_unknown = len(active_tools) > 0
+            self.task_coordinator.cancel_task_and_run(
+                task.task_id,
+                run.run_id,
+                is_unknown=is_unknown,
+                error_message="Client disconnected during streaming execution",
+            )
+            trace.finish(
+                output="",
+                error="Client disconnected during streaming execution",
+                status="unknown" if is_unknown else "cancelled",
+            )
+            trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
+            raise
         except Exception as e:
             thinking_engine.close()
             logger.error(f"Error during streaming execution on thread {thread_id}: {e}")
+            self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
             yield {"event": "error", "data": {"error": str(e), "trace_id": trace.trace_id}}
 
     async def verify_approval_context(self, thread_id: str, approval_id: str) -> bool:
@@ -772,9 +906,42 @@ class AgentService:
 
         effective_run_id = set_trace_context(thread_id)
         config = {"configurable": {"thread_id": thread_id}}
+        trace_store = self.trace_store or get_trace_store()
+        runtime_id = self.hitl_manager.runtime_instance_id or "standalone"
+
+        task = self.task_coordinator.get_task_by_approval(approval_id)
+        if task is None:
+            task = self.task_coordinator.get_active_task_for_thread(thread_id)
+        if task is None:
+            task = self.task_coordinator.create_task(
+                session_id=thread_id,
+                thread_id=thread_id,
+                query=f"Resume approval {approval_id}",
+                runtime_id=runtime_id,
+            )
+        run = self.task_coordinator.start_run(
+            task_id=task.task_id,
+            runtime_id=runtime_id,
+            trigger_type=RunTriggerType.HITL_RESUME,
+            run_id=effective_run_id,
+        )
+
+        trace = ConversationTrace(
+            session_id=thread_id,
+            run_id=effective_run_id,
+            task_id=task.task_id,
+            query=f"[Resume Approval: {approval_id}]",
+        )
+        trace.input_stage = {
+            "query": f"[Resume Approval: {approval_id}]",
+            "thread_id": thread_id,
+            "task_id": task.task_id,
+            "decision": decision.decision,
+        }
 
         logger.info(
-            f"Resuming interrupted execution on thread '{thread_id}' with decision '{decision.decision}'"
+            f"Resuming interrupted execution on thread '{thread_id}' with decision '{decision.decision}' "
+            f"(task_id={task.task_id}, run_id={run.run_id})"
         )
 
         try:
@@ -790,13 +957,18 @@ class AgentService:
             )
 
             state_snapshot = await self.graph.aget_state(config)
+            checkpoint_id = _extract_checkpoint_id(state_snapshot)
             if state_snapshot.next:
                 tasks = state_snapshot.tasks
                 interrupt_val = None
-                for task in tasks:
-                    if task.interrupts:
-                        interrupt_val = task.interrupts[0].value
+                for t in tasks:
+                    if t.interrupts:
+                        interrupt_val = t.interrupts[0].value
                         break
+                self.task_coordinator.pause_for_approval(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                trace.finish(output="[Pending Approval]", status="interrupted")
+                trace_store.save_trace(trace)
+                trace_store.prune_old_traces()
                 return AgentExecutionResult(
                     thread_id=thread_id,
                     run_id=effective_run_id,
@@ -812,7 +984,14 @@ class AgentService:
                     break
 
             if output:
-                self.session_service.add_message(thread_id, role="assistant", content=output)
+                self.session_service.add_message(
+                    thread_id, role="assistant", content=output, task_id=task.task_id, run_id=run.run_id
+                )
+
+            self.task_coordinator.complete_task_and_run(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+            trace.finish(output=output, status="completed")
+            trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
 
             return AgentExecutionResult(
                 thread_id=thread_id,
@@ -820,8 +999,20 @@ class AgentService:
                 status="completed",
                 output_text=output,
             )
+        except asyncio.CancelledError:
+            self.task_coordinator.cancel_task_and_run(
+                task.task_id, run.run_id, is_unknown=False, error_message="Cancelled"
+            )
+            trace.finish(output="", error="Cancelled", status="cancelled")
+            trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
+            raise
         except Exception as e:
             logger.error(f"Failed to resume thread {thread_id}: {e}")
+            self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
+            trace.finish(output="", error=str(e), status="error")
+            trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
             return AgentExecutionResult(
                 thread_id=thread_id,
                 run_id=effective_run_id,
@@ -870,6 +1061,39 @@ class AgentService:
 
         effective_run_id = set_trace_context(thread_id)
         config = {"configurable": {"thread_id": thread_id}}
+        trace_store = self.trace_store or get_trace_store()
+        runtime_id = self.hitl_manager.runtime_instance_id or "standalone"
+
+        task = self.task_coordinator.get_task_by_approval(approval_id)
+        if task is None:
+            task = self.task_coordinator.get_active_task_for_thread(thread_id)
+        if task is None:
+            task = self.task_coordinator.create_task(
+                session_id=thread_id,
+                thread_id=thread_id,
+                query=f"Resume approval {approval_id}",
+                runtime_id=runtime_id,
+            )
+        run = self.task_coordinator.start_run(
+            task_id=task.task_id,
+            runtime_id=runtime_id,
+            trigger_type=RunTriggerType.HITL_RESUME,
+            run_id=effective_run_id,
+        )
+
+        trace = ConversationTrace(
+            session_id=thread_id,
+            run_id=effective_run_id,
+            task_id=task.task_id,
+            query=f"[Resume Approval: {approval_id}]",
+        )
+        trace.input_stage = {
+            "query": f"[Resume Approval: {approval_id}]",
+            "thread_id": thread_id,
+            "task_id": task.task_id,
+            "decision": decision.decision,
+        }
+
         resume_payload = {
             "approval_id": approval_id,
             "decision": decision.decision,
@@ -877,6 +1101,7 @@ class AgentService:
             "modified_arguments": decision.modified_arguments,
         }
 
+        active_tools: dict[str, tuple[float, Any]] = {}
         try:
             async for event in self.graph.astream_events(
                 Command(resume=resume_payload), config=config, version="v2"
@@ -885,34 +1110,58 @@ class AgentService:
                 if kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
+                        trace.mark_ttfa()
                         yield {"event": "token", "data": {"token": str(chunk.content)}}
                 elif kind == "on_tool_start":
+                    t_name = str(event.get("name") or "tool")
+                    t_input = event.get("data", {}).get("input")
+                    active_tools[t_name] = (time.time(), t_input)
+                    self.task_coordinator.set_task_status(task.task_id, TaskStatus.EXECUTING_TOOL)
                     yield {
                         "event": "tool_start",
                         "data": {
-                            "tool": event.get("name"),
-                            "input": event.get("data", {}).get("input"),
+                            "tool": t_name,
+                            "input": t_input,
                         },
                     }
                 elif kind == "on_tool_end":
+                    t_name = str(event.get("name") or "tool")
                     raw_out = event.get("data", {}).get("output")
                     out_str = str(raw_out)[:2000] if raw_out is not None else ""
+                    start_t, t_args = active_tools.pop(t_name, (time.time(), None))
+                    t_duration_ms = int((time.time() - start_t) * 1000)
+                    if not active_tools:
+                        self.task_coordinator.set_task_status(task.task_id, TaskStatus.RUNNING)
+
+                    trace.add_step(
+                        step_type="tool",
+                        name=t_name,
+                        arguments=t_args,
+                        result=out_str[:500],
+                        duration_ms=t_duration_ms,
+                    )
                     yield {
                         "event": "tool_end",
                         "data": {
-                            "tool": event.get("name"),
+                            "tool": t_name,
                             "output": out_str,
+                            "duration_ms": t_duration_ms,
                         },
                     }
 
             state_snapshot = await self.graph.aget_state(config)
+            checkpoint_id = _extract_checkpoint_id(state_snapshot)
             if state_snapshot.next:
                 tasks = state_snapshot.tasks
                 interrupt_val = None
-                for task in tasks:
-                    if task.interrupts:
-                        interrupt_val = task.interrupts[0].value
+                for t in tasks:
+                    if t.interrupts:
+                        interrupt_val = t.interrupts[0].value
                         break
+                self.task_coordinator.pause_for_approval(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                trace.finish(output="[Pending Approval]", status="interrupted")
+                trace_store.save_trace(trace)
+                trace_store.prune_old_traces()
                 yield {
                     "event": "approval_required",
                     "data": interrupt_val or {"status": "pending_approval"},
@@ -925,18 +1174,46 @@ class AgentService:
                         output = str(m.content)
                         break
                 if output:
-                    self.session_service.add_message(thread_id, role="assistant", content=output)
+                    self.session_service.add_message(
+                        thread_id, role="assistant", content=output, task_id=task.task_id, run_id=run.run_id
+                    )
+
+                self.task_coordinator.complete_task_and_run(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                trace.finish(output=output, status="completed")
+                trace_store.save_trace(trace)
+                trace_store.prune_old_traces()
                 yield {
                     "event": "completed",
                     "data": {
                         "thread_id": thread_id,
                         "run_id": effective_run_id,
                         "output_text": output,
+                        "trace_id": trace.trace_id,
                     },
                 }
+        except (asyncio.CancelledError, GeneratorExit):
+            is_unknown = len(active_tools) > 0
+            self.task_coordinator.cancel_task_and_run(
+                task.task_id,
+                run.run_id,
+                is_unknown=is_unknown,
+                error_message="Client disconnected during streaming resume",
+            )
+            trace.finish(
+                output="",
+                error="Client disconnected during streaming resume",
+                status="unknown" if is_unknown else "cancelled",
+            )
+            trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
+            raise
         except Exception as e:
             logger.error(f"Error during streaming resume on thread {thread_id}: {e}")
-            yield {"event": "error", "data": {"error": str(e)}}
+            self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
+            trace.finish(output="", error=str(e), status="error")
+            trace_store.save_trace(trace)
+            trace_store.prune_old_traces()
+            yield {"event": "error", "data": {"error": str(e), "trace_id": trace.trace_id}}
 
 
 _global_agent_service: AgentService | None = None

@@ -113,12 +113,12 @@ def test_p3_mig_01_v1_to_v2_migration_and_sqlite_constraints(tmp_path: Path) -> 
         conn.close()
 
     assert run_app_migrations(db_path) == APP_SCHEMA_VERSION
-    assert APP_SCHEMA_VERSION == 2
-    assert len(list(tmp_path.glob("upgrade_v1_to_v2.bak.v1_to_v2.*.db"))) == 1
+    assert APP_SCHEMA_VERSION >= 2
+    assert len(list(tmp_path.glob(f"upgrade_v1_to_v2.bak.v1_to_v{APP_SCHEMA_VERSION}.*.db"))) == 1
 
     check_conn = open_sync_connection(db_path)
     try:
-        assert check_conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert check_conn.execute("PRAGMA user_version").fetchone()[0] == APP_SCHEMA_VERSION
         sess = check_conn.execute("SELECT title FROM chat_sessions WHERE session_id='s-v1'").fetchone()
         assert sess is not None and sess[0] == "Legacy Session"
 

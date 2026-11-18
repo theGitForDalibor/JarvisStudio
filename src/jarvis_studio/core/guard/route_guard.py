@@ -7,11 +7,15 @@ Implements the conversation-state-guard specification from the AI Engineering Sk
 3. Emergency safety brake: Detects halt/stop commands immediately.
 """
 
+import json
+import logging
 import re
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+_logger = logging.getLogger(__name__)
 
 
 class GuardAction(str, Enum):
@@ -94,14 +98,87 @@ class IntentRouteGuard:
         self._sticky_cache: dict[str, dict[str, Any]] = {}
 
     def get_sticky_context(self, session_id: str) -> dict[str, Any]:
-        """Retrieve sticky context for the session."""
-        return self._sticky_cache.get(session_id, {})
+        """Retrieve sticky context for the session, lazy-loading from DB if needed."""
+        if session_id in self._sticky_cache:
+            return self._sticky_cache[session_id]
+
+        # Lazy-load from DB metadata
+        try:
+            from jarvis_studio.service.session_service import get_session_service
+
+            sess_svc = get_session_service()
+            with sess_svc._db.read_connection() as conn:
+                row = conn.execute(
+                    "SELECT metadata FROM chat_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is not None and row["metadata"]:
+                    meta = json.loads(row["metadata"])
+                    loaded = meta.get("sticky_context", {})
+                    if isinstance(loaded, dict):
+                        self._sticky_cache[session_id] = loaded
+                        return loaded
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("Could not lazy-load sticky context for session %s: %s", session_id, exc)
+
+        self._sticky_cache[session_id] = {}
+        return self._sticky_cache[session_id]
 
     def update_sticky_context(self, session_id: str, updates: dict[str, Any]) -> None:
-        """Update sticky context for the session."""
+        """Update sticky context for the session and write through to DB metadata."""
         if session_id not in self._sticky_cache:
-            self._sticky_cache[session_id] = {}
+            self.get_sticky_context(session_id)
         self._sticky_cache[session_id].update(updates)
+        self._write_through(session_id)
+
+    def clear_sticky_context(self, session_id: str) -> None:
+        """Clear sticky context from memory and DB metadata."""
+        self._sticky_cache.pop(session_id, None)
+        try:
+            from jarvis_studio.service.session_service import get_session_service
+
+            sess_svc = get_session_service()
+            with sess_svc._db.transaction() as conn:
+                row = conn.execute(
+                    "SELECT metadata FROM chat_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is not None and row["metadata"]:
+                    meta = json.loads(row["metadata"])
+                    if "sticky_context" in meta:
+                        del meta["sticky_context"]
+                        conn.execute(
+                            "UPDATE chat_sessions SET metadata = ? WHERE session_id = ?",
+                            (json.dumps(meta), session_id),
+                        )
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("Could not clear sticky context in DB for session %s: %s", session_id, exc)
+
+    def _write_through(self, session_id: str) -> None:
+        """Write current sticky context back to session metadata in DB."""
+        try:
+            from jarvis_studio.service.session_service import get_session_service
+
+            sess_svc = get_session_service()
+            with sess_svc._db.transaction() as conn:
+                row = conn.execute(
+                    "SELECT metadata FROM chat_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is not None:
+                    meta = {}
+                    if row["metadata"]:
+                        try:
+                            meta = json.loads(row["metadata"])
+                        except (json.JSONDecodeError, TypeError):
+                            meta = {}
+                    meta["sticky_context"] = self._sticky_cache.get(session_id, {})
+                    conn.execute(
+                        "UPDATE chat_sessions SET metadata = ? WHERE session_id = ?",
+                        (json.dumps(meta), session_id),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("Could not write-through sticky context for session %s: %s", session_id, exc)
 
     def evaluate(self, message: str, session_id: str) -> GuardDecision:
         """Execute the 4-branch intent guarding decision."""

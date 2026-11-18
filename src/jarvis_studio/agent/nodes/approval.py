@@ -156,6 +156,11 @@ def create_approval_node(
             if isinstance(run_context, dict)
             else "run_unknown"
         )
+        task_id = (
+            run_context.get("task_id")
+            if isinstance(run_context, dict)
+            else None
+        )
 
         # Record approval requests for all dangerous calls
         all_requests: list[ApprovalRequest] = []
@@ -171,6 +176,7 @@ def create_approval_node(
                 req = active_hitl.create_request(
                     thread_id=thread_id,
                     run_id=run_id,
+                    task_id=task_id,
                     tool_name=tool_name,
                     arguments=args,
                     tool_call_id=tool_call_id,

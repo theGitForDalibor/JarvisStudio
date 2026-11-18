@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from jarvis_studio.service.session_service import (
     ChatMessageRecord,
+    SessionBusyError,
     SessionMetadata,
     get_session_service,
 )
@@ -77,7 +78,11 @@ async def update_session_title(
 async def delete_session(session_id: str) -> dict[str, Any]:
     """Delete a session thread and its conversation history."""
     session_service = get_session_service()
-    success = session_service.delete_session(session_id)
+    try:
+        success = session_service.delete_session(session_id)
+    except SessionBusyError as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
+
     if not success:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     return {"status": "deleted", "session_id": session_id}
@@ -90,5 +95,9 @@ async def clear_session_messages(session_id: str) -> dict[str, Any]:
     sess = session_service.get_session(session_id)
     if not sess:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
-    session_service.clear_session_messages(session_id)
+    try:
+        session_service.clear_session_messages(session_id)
+    except SessionBusyError as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
+
     return {"status": "cleared", "session_id": session_id}

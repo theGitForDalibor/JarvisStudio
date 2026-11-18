@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from jarvis_studio.agent.hitl.manager import HITLManager
     from jarvis_studio.config.settings import Settings
     from jarvis_studio.core.persistence.recovery import StartupRecoveryReport
+    from jarvis_studio.core.tasks.coordinator import TaskCoordinator
     from jarvis_studio.service.agent_service import AgentService
     from jarvis_studio.tools.registry import ToolRegistry
 
@@ -104,6 +105,7 @@ def _collect_loaded_global_stores() -> list[tuple[object, list[_GlobalStoreBindi
         ("jarvis_studio.core.observability.trace_logger", "_global_trace_store", None),
         ("jarvis_studio.service.session_service", "_global_session_service", None),
         ("jarvis_studio.rag.store", "_global_vec_store", None),
+        ("jarvis_studio.core.tasks.coordinator", "_default_task_coordinator", None),
     )
 
     stores_by_id: dict[int, tuple[object, list[_GlobalStoreBinding]]] = {}
@@ -137,6 +139,7 @@ class AgentRuntime:
         manage_mcp: bool = False,
         tool_registry: ToolRegistry | None = None,
         hitl_manager: HITLManager | None = None,
+        task_coordinator: TaskCoordinator | None = None,
         stores: Sequence[object] = (),
         close_global_stores: bool | None = None,
         drain_timeout: float = 5.0,
@@ -154,6 +157,7 @@ class AgentRuntime:
         self._manage_mcp = manage_mcp
         self._tool_registry = tool_registry
         self._injected_hitl_manager = hitl_manager
+        self._injected_task_coordinator = task_coordinator
         self._owned_stores: list[object] = list(stores)
         self._close_global_stores = (
             register_as_active if close_global_stores is None else close_global_stores
@@ -165,6 +169,9 @@ class AgentRuntime:
         self._managed_sqlite: ManagedSqliteCheckpointer | None = None
         self._checkpointer: BaseCheckpointSaver | None = None
         self._hitl_manager: HITLManager | None = None
+        self._task_coordinator: TaskCoordinator | None = None
+        self._session_service: Any | None = None
+        self._trace_store: Any | None = None
         self._recovery_report: StartupRecoveryReport | None = None
         self._agent_service: AgentService | None = None
         self._mcp_manager: Any | None = None
@@ -226,6 +233,13 @@ class AgentRuntime:
         if self._hitl_manager is None:
             raise RuntimeError("AgentRuntime HITLManager is not initialized")
         return self._hitl_manager
+
+    @property
+    def task_coordinator(self) -> TaskCoordinator:
+        """Task and run coordinator owned by this runtime."""
+        if self._task_coordinator is None:
+            raise RuntimeError("AgentRuntime TaskCoordinator is not initialized")
+        return self._task_coordinator
 
     @property
     def startup_recovery(self) -> StartupRecoveryReport | None:
@@ -323,6 +337,7 @@ class AgentRuntime:
 
             from jarvis_studio.agent.hitl.manager import HITLManager
             from jarvis_studio.core.persistence.recovery import reconcile_on_startup
+            from jarvis_studio.core.tasks.coordinator import TaskCoordinator
             from jarvis_studio.service.agent_service import AgentService
 
             if self._injected_hitl_manager is not None:
@@ -334,19 +349,38 @@ class AgentRuntime:
                     runtime_instance_id=self.instance_id,
                 )
             self._hitl_manager = hitl_mgr
+
+            if self._injected_task_coordinator is not None:
+                task_coord = self._injected_task_coordinator
+            else:
+                task_coord = TaskCoordinator(db_path=self._settings.storage.sqlite_path)
+            self._task_coordinator = task_coord
+
+            from jarvis_studio.core.observability.trace_logger import TraceStore
+            from jarvis_studio.service.session_service import SessionService
+
+            sess_svc = SessionService(db_path=self._settings.storage.sqlite_path)
+            trace_store = TraceStore(db_path=self._settings.storage.sqlite_path)
+            self._session_service = sess_svc
+            self._trace_store = trace_store
+
             self._recovery_report = await reconcile_on_startup(
                 hitl_store=hitl_mgr.store,
                 current_runtime_id=self.instance_id,
                 checkpointer=saver,
                 check_checkpoints=(backend == "sqlite"),
                 runtime_lock=self._lock,
+                task_coordinator=task_coord,
             )
 
             self._checkpointer = saver
             self._agent_service = AgentService(
                 registry=registry,
                 checkpointer=saver,
+                session_service=sess_svc,
                 hitl_manager=hitl_mgr,
+                task_coordinator=task_coord,
+                trace_store=trace_store,
                 bound_loop=loop,
                 strict_loop_binding=self._strict_loop_binding,
                 run_begin_hook=self._begin_run,
@@ -423,6 +457,10 @@ class AgentRuntime:
                 candidates.append((svc_store, []))
         if self._hitl_manager is not None:
             candidates.append((self._hitl_manager, []))
+        if self._task_coordinator is not None:
+            candidates.append((self._task_coordinator, []))
+        if self._trace_store is not None:
+            candidates.append((self._trace_store, []))
         if self._close_global_stores:
             candidates.extend(_collect_loaded_global_stores())
 
@@ -529,6 +567,7 @@ class AgentRuntime:
         if checkpointer_closed and mcp_disconnected and stores_closed:
             self._agent_service = None
             self._hitl_manager = None
+            self._task_coordinator = None
             self._active_tasks.clear()
             if self._register_as_active and get_active_runtime() is self:
                 _run_cleanup_action(errors, lambda: set_active_runtime(None))
@@ -577,6 +616,7 @@ class AgentRuntime:
         manage_mcp: bool = False,
         tool_registry: ToolRegistry | None = None,
         hitl_manager: HITLManager | None = None,
+        task_coordinator: TaskCoordinator | None = None,
         stores: Sequence[object] = (),
         close_global_stores: bool | None = None,
         drain_timeout: float = 5.0,
@@ -591,6 +631,7 @@ class AgentRuntime:
             manage_mcp=manage_mcp,
             tool_registry=tool_registry,
             hitl_manager=hitl_manager,
+            task_coordinator=task_coordinator,
             stores=stores,
             close_global_stores=close_global_stores,
             drain_timeout=drain_timeout,

@@ -258,6 +258,8 @@ class SyncSQLiteSession:
     @property
     def in_memory_conn(self) -> sqlite3.Connection | None:
         """Return the private `:memory:` connection, or None for disk/closed stores."""
+        if self.is_memory and not self._closed:
+            return self._ensure_in_memory_conn()
         return self._in_memory_conn
 
     def _ensure_in_memory_conn(self) -> sqlite3.Connection:

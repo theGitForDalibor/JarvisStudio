@@ -24,7 +24,7 @@ from jarvis_studio.core.persistence.sqlite import (
     sync_transaction,
 )
 
-APP_SCHEMA_VERSION = 2
+APP_SCHEMA_VERSION = 3
 VEC_SCHEMA_VERSION = 1
 
 _logger = logging.getLogger(__name__)
@@ -159,6 +159,127 @@ _APP_V2_STATEMENTS: tuple[str, ...] = (
         WHERE approval_id IS NOT NULL
     """,
     "CREATE INDEX IF NOT EXISTS idx_outcome_task_status ON tool_execution_outcomes(task_id, outcome_status)",
+)
+
+_APP_V3_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS agent_tasks (
+        task_id         TEXT PRIMARY KEY,
+        session_id      TEXT NOT NULL,
+        thread_id       TEXT NOT NULL,
+        status          TEXT NOT NULL CHECK (status IN (
+                            'CREATED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL',
+                            'COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'UNKNOWN', 'INTERRUPTED'
+                        )),
+        query           TEXT NOT NULL,
+        initiator       TEXT NOT NULL DEFAULT 'user',
+        current_run_id  TEXT,
+        created_at      REAL NOT NULL,
+        updated_at      REAL NOT NULL,
+        completed_at    REAL,
+        runtime_id      TEXT,
+        error_message   TEXT,
+        FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tasks_session_created ON agent_tasks(session_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_status_runtime ON agent_tasks(status, runtime_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_thread_status ON agent_tasks(thread_id, status)",
+    """
+    CREATE TABLE IF NOT EXISTS agent_runs (
+        run_id          TEXT PRIMARY KEY,
+        task_id         TEXT NOT NULL,
+        run_seq         INTEGER NOT NULL,
+        trigger_type    TEXT NOT NULL CHECK (trigger_type IN ('initial', 'hitl_resume', 'recovery_resume')),
+        status          TEXT NOT NULL CHECK (status IN (
+                            'RUNNING', 'INTERRUPTED', 'COMPLETED', 'FAILED',
+                            'CANCELLED', 'TIMEOUT', 'UNKNOWN'
+                        )),
+        runtime_id      TEXT NOT NULL,
+        started_at      REAL NOT NULL,
+        finished_at     REAL,
+        duration_ms     INTEGER,
+        checkpoint_id   TEXT,
+        error_message   TEXT,
+        FOREIGN KEY (task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+        UNIQUE (task_id, run_seq)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_runs_task_seq ON agent_runs(task_id, run_seq)",
+    "CREATE INDEX IF NOT EXISTS idx_runs_runtime_status ON agent_runs(runtime_id, status)",
+    """
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        tool_calls TEXT,
+        created_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS agent_conversation_traces (
+        trace_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        run_id TEXT,
+        query TEXT NOT NULL,
+        status TEXT NOT NULL,
+        start_time REAL NOT NULL,
+        total_duration_ms INTEGER,
+        ttft_ms INTEGER,
+        ttfa_ms INTEGER,
+        ttlt_ms INTEGER,
+        steps_count INTEGER,
+        payload TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ltm_memories (
+        id TEXT PRIMARY KEY,
+        category TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        importance REAL DEFAULT 1.0
+    )
+    """,
+    """
+    INSERT OR IGNORE INTO chat_sessions (session_id, title, created_at, updated_at)
+    SELECT session_id, 'Restored Session', min(created_at), max(created_at)
+    FROM chat_messages
+    WHERE session_id NOT IN (SELECT session_id FROM chat_sessions)
+    GROUP BY session_id
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS chat_messages_v3 (
+        id           TEXT PRIMARY KEY,
+        session_id   TEXT NOT NULL,
+        task_id      TEXT,
+        run_id       TEXT,
+        role         TEXT NOT NULL,
+        content      TEXT NOT NULL,
+        tool_calls   TEXT,
+        msg_type     TEXT,
+        tool_call_id TEXT,
+        created_at   REAL NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    INSERT INTO chat_messages_v3 (id, session_id, role, content, tool_calls, created_at)
+    SELECT id, session_id, role, content, tool_calls, created_at FROM chat_messages
+    """,
+    "DROP TABLE chat_messages",
+    "ALTER TABLE chat_messages_v3 RENAME TO chat_messages",
+    "CREATE INDEX IF NOT EXISTS idx_chat_msg_session ON chat_messages(session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_chat_msg_task ON chat_messages(task_id)",
+    "ALTER TABLE agent_conversation_traces ADD COLUMN task_id TEXT",
+    "ALTER TABLE agent_conversation_traces ADD COLUMN updated_at REAL",
+    "CREATE INDEX IF NOT EXISTS idx_traces_task_id ON agent_conversation_traces(task_id)",
+    "ALTER TABLE ltm_memories ADD COLUMN source_session_id TEXT",
+    "ALTER TABLE ltm_memories ADD COLUMN source_task_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_ltm_source_session ON ltm_memories(source_session_id)",
 )
 
 # `vec_chunks` virtual table depends on per-instance embedding dimension (e.g. 32 in tests,
@@ -449,7 +570,11 @@ def run_app_migrations(
     return _run_migrations(
         db_path,
         target_version=APP_SCHEMA_VERSION,
-        steps={1: _APP_V1_STATEMENTS, 2: _APP_V2_STATEMENTS},
+        steps={
+            1: _APP_V1_STATEMENTS,
+            2: _APP_V2_STATEMENTS,
+            3: _APP_V3_STATEMENTS,
+        },
         enable_foreign_keys=True,
         enable_sqlite_vec=False,
         in_memory_conn=in_memory_conn,

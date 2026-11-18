@@ -112,6 +112,7 @@ def create_tool_executor_node(
             if isinstance(raw_run_id, str) and raw_run_id.strip()
             else "run_unknown"
         )
+        task_id = run_ctx.get("task_id") if isinstance(run_ctx, dict) else None
 
         for call in last_message.tool_calls:
             tool_name = call.get("name", "")
@@ -158,6 +159,7 @@ def create_tool_executor_node(
                         run_id=run_id,
                         tool_call_id=call_id,
                         tool_name=tool_name,
+                        task_id=task_id,
                     )
                 except DuplicateToolCallError as dup_exc:
                     logger.warning(

@@ -30,6 +30,8 @@ class StartupRecoveryReport:
     orphan_pending_marked_failed: int = 0
     kept_pending: int = 0
     kept_approved_for_explicit_resume: int = 0
+    stale_tasks_reconciled: int = 0
+    stale_runs_reconciled: int = 0
 
 
 def _extract_active_interrupt_approval_ids(
@@ -83,8 +85,9 @@ async def reconcile_on_startup(
     checkpointer: BaseCheckpointSaver | None = None,
     check_checkpoints: bool = False,
     runtime_lock: RuntimeInstanceLock | None = None,
+    task_coordinator: Any | None = None,
 ) -> StartupRecoveryReport:
-    """Reconcile stale HITL leases and outcomes safely under `RuntimeInstanceLock`."""
+    """Reconcile stale HITL leases, outcomes, tasks, and runs safely under `RuntimeInstanceLock`."""
     if runtime_lock is None:
         raise RuntimeError(
             "Startup recovery refused: RuntimeInstanceLock is required before reconciling DB state"
@@ -155,6 +158,22 @@ async def reconcile_on_startup(
                     ):
                         orphan_failed += 1
 
+    # Reconcile stale tasks and runs from prior crashes or ungraceful termination
+    if task_coordinator is None:
+        try:
+            from jarvis_studio.core.tasks.coordinator import get_task_coordinator
+            task_coordinator = get_task_coordinator(hitl_store.db_path)
+        except Exception:
+            task_coordinator = None
+
+    stale_tasks = 0
+    stale_runs = 0
+    if task_coordinator is not None:
+        try:
+            stale_tasks, stale_runs = task_coordinator.reconcile_stale_tasks_and_runs(current_runtime_id)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Failed to reconcile stale tasks and runs on startup: %s", exc)
+
     report = StartupRecoveryReport(
         runtime_instance_id=current_runtime_id,
         stale_executing_marked_unknown=stale_exec,
@@ -162,6 +181,8 @@ async def reconcile_on_startup(
         orphan_pending_marked_failed=orphan_failed,
         kept_pending=kept_pending,
         kept_approved_for_explicit_resume=kept_approved,
+        stale_tasks_reconciled=stale_tasks,
+        stale_runs_reconciled=stale_runs,
     )
     if (
         stale_exec
@@ -169,6 +190,8 @@ async def reconcile_on_startup(
         or orphan_failed
         or kept_pending
         or kept_approved
+        or stale_tasks
+        or stale_runs
     ):
-        _logger.info("Startup HITL recovery completed: %s", report)
+        _logger.info("Startup HITL & Task recovery completed: %s", report)
     return report

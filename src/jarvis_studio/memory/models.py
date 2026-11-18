@@ -25,6 +25,12 @@ class MemoryItem(BaseModel):
     source: str | None = Field(
         default=None, description="Origin session_id or 'manual'"
     )
+    source_session_id: str | None = Field(
+        default=None, description="ID of chat session where this memory was formed"
+    )
+    source_task_id: str | None = Field(
+        default=None, description="ID of agent task where this memory was formed"
+    )
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
     importance: float = Field(
