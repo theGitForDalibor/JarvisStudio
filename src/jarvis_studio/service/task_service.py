@@ -286,6 +286,7 @@ class TaskService:
             )
 
         staged_dir = self.deliverable_mgr.stage_task_deliverables_dir(task_id)
+        target_thread_id = task.thread_id
 
         try:
             purged = self.coordinator.purge_task(task_id)
@@ -311,6 +312,32 @@ class TaskService:
                     "Post-commit cleanup of staged deliverables %s failed (deferred to reconcile): %s",
                     staged_dir,
                     rm_exc,
+                )
+
+        # Phase 4: Purge LangGraph checkpoints associated with this task's thread
+        if purged and target_thread_id:
+            try:
+                from jarvis_studio.core.persistence.checkpoint_gc import purge_task_checkpoint_sync
+                from jarvis_studio.core.runtime import get_active_runtime
+
+                active_rt = get_active_runtime()
+                checkpointer = None
+                if active_rt is not None:
+                    try:
+                        checkpointer = active_rt.checkpointer
+                    except Exception:  # noqa: BLE001
+                        pass
+                purge_task_checkpoint_sync(
+                    target_thread_id,
+                    db_path=self.coordinator.db_path,
+                    checkpointer=checkpointer,
+                )
+            except Exception as gc_exc:  # noqa: BLE001
+                _logger.warning(
+                    "Checkpoint purge for task %s (thread %s) failed: %s",
+                    task_id,
+                    target_thread_id,
+                    gc_exc,
                 )
 
         return purged

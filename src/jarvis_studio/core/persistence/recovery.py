@@ -32,6 +32,7 @@ class StartupRecoveryReport:
     kept_approved_for_explicit_resume: int = 0
     stale_tasks_reconciled: int = 0
     stale_runs_reconciled: int = 0
+    dangling_checkpoints_purged: int = 0
 
 
 def _extract_active_interrupt_approval_ids(
@@ -176,6 +177,16 @@ async def reconcile_on_startup(
         except Exception as exc:  # noqa: BLE001
             _logger.warning("Failed to reconcile stale tasks and runs on startup: %s", exc)
 
+    dangling_checkpoints = 0
+    if check_checkpoints and not is_memory:
+        try:
+            from jarvis_studio.core.persistence.checkpoint_gc import clean_dangling_checkpoints
+
+            gc_summary = clean_dangling_checkpoints(hitl_store.db_path, checkpointer=checkpointer)
+            dangling_checkpoints = int(gc_summary.get("purged_threads", 0))
+        except Exception as gc_exc:  # noqa: BLE001
+            _logger.warning("Failed to clean dangling checkpoints on startup: %s", gc_exc)
+
     report = StartupRecoveryReport(
         runtime_instance_id=current_runtime_id,
         stale_executing_marked_unknown=stale_exec,
@@ -185,6 +196,7 @@ async def reconcile_on_startup(
         kept_approved_for_explicit_resume=kept_approved,
         stale_tasks_reconciled=stale_tasks,
         stale_runs_reconciled=stale_runs,
+        dangling_checkpoints_purged=dangling_checkpoints,
     )
     if (
         stale_exec
@@ -194,6 +206,7 @@ async def reconcile_on_startup(
         or kept_approved
         or stale_tasks
         or stale_runs
+        or dangling_checkpoints
     ):
         _logger.info("Startup HITL & Task recovery completed: %s", report)
     return report
