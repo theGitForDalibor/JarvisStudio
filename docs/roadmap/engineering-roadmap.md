@@ -18,6 +18,8 @@ flowchart LR
     M2 --> M3["M3: HITL 与持久化检查点\n(已完成)"]
     M3 --> M4["M4: 长期记忆与 RAG\n(已完成)"]
     M4 --> M5["M5: Web 界面与流式输出\n(已完成)"]
+    M5 --> M6["M6: 思考流与意图守卫\n(已完成)"]
+    M6 --> M7["M7: 持久化调度与自愈\n(已完成)"]
 ```
 
 ---
@@ -121,3 +123,53 @@ flowchart LR
   - [x] 多阶段轻量生产镜像 (`Dockerfile`)。
   - [x] Docker Compose 一键挂载启动编排 (`docker-compose.yml`)。
   - [x] 跨平台系统常驻守护进程脚本 (`scripts/run_daemon.ps1`, `scripts/run_daemon.sh`)。
+
+---
+
+### Milestone 6: 体验优化与工程化技能跃迁 (Experience & AI Engineering Skills)
+*目标：打造首字响应 <50ms 的白盒渐进思考流与意图规则直出通道。*
+
+- [x] 4 阶段白盒渐进式思考流引擎 (`ThinkingEngine`)：
+  - [x] 意图分析 (`understand`) → 工具执行 (`tool`) → 答案整理 (`organize`) → 交付完成 (`completed`)。
+  - [x] 工具白盒化动作翻译与心跳保活循环。
+  - [x] 首字反馈响应时间（TTFT）压降至 <50ms。
+- [x] 意图规则守卫与极速通道 (`IntentRouteGuard`)：
+  - [x] 高频日常问候、系统查询 <50ms / 0 Token 消耗极速直出。
+  - [x] 紧急制动安全熔断 (`emergency_halt`)。
+  - [x] 多轮对话实体吸附锚定 (`sticky_anchor_enrichment`)。
+- [x] 多会话原生 CRUD 存储 (`SessionService`)：
+  - [x] 会话自动智能命名、全文快速检索过滤。
+  - [x] 会话秒级恢复、重命名与消息历史持久化。
+- [x] 5 阶段端到端全生命周期链路追踪 (`TraceStore`)：
+  - [x] `输入规整` → `规则守卫` → `上下文预热` → `思考与工具瀑布` → `流式交付`。
+  - [x] 毫秒级性能打标（TTFT, TTFA, TTLT）与 Web UI 瀑布流分析面板。
+
+---
+
+### Milestone 7: 生产级持久化架构与调度自愈基准 (Sprint 1C Engineering)
+*目标：构建零数据丢失、零悬空竞态、具备单实例互斥锁与故障自愈的工业级状态调度引擎。*
+
+- [x] SQLite Schema V3 版本化迁移体系 (`run_app_migrations`)：
+  - [x] `_APP_V1`、`_APP_V2`、`_APP_V3` 线性升级与降级防范。
+  - [x] 预升级物理文件原子备份 (`.bak.vX_to_vY`) 与只读完整性校验。
+- [x] 8 表事务级外键级联清理 (`delete_session`)：
+  - [x] 统一启用 `PRAGMA foreign_keys = ON;`。
+  - [x] 会话级联删除彻底清理 `chat_sessions`、`chat_messages`、`agent_tasks`、`agent_runs`、`hitl_approval_requests`、`tool_execution_outcomes`、`agent_conversation_traces`、`ltm_memories`。
+- [x] 持久化任务与运行协调器 (`TaskCoordinator`)：
+  - [x] 状态闭包机管理 (`AgentTask` / `AgentRun`)。
+  - [x] `(task_id, run_seq)` 唯一约束与事务防重。
+  - [x] HITL 审批恢复生成独立 Run，分段追踪执行耗时。
+- [x] 会话繁忙守卫 (`SessionBusyError` / HTTP 409 Conflict)：
+  - [x] 覆盖 `CREATED`、`RUNNING`、`WAITING_APPROVAL`、`EXECUTING_TOOL` 任务与未决审批。
+  - [x] 排他事务内原子校验，消除会话删除与任务执行竞态。
+- [x] 高危操作在途阻断 (Option B 语义与 Fail-Closed)：
+  - [x] 严格区分审批授权 (`ApprovalStatus`) 与物理副作用 (`ExecutionOutcomeStatus`)。
+  - [x] 物理工具在途取消时 Run 标记为 `UNKNOWN`，彻底防御执行重放。
+  - [x] 异步任务屏蔽保护 (`_execute_cancellation_cleanup_shielded`)，防止二次取消打断清理。
+- [x] 单实例排他锁与自愈恢复 (`RuntimeInstanceLock` & `reconcile_on_startup`)：
+  - [x] 跨平台排他锁守护，防多实例并发脑裂。
+  - [x] 实例崩溃重启时自动将悬空任务收敛为 `INTERRUPTED` 或 `UNKNOWN`。
+- [x] 实体吸附上下文实时写穿 (`Sticky Context Write-Through`)：
+  - [x] 内存即时缓存与 `chat_sessions.metadata` 同步写穿，支持冷启动懒加载。
+- [x] Trace 全生命周期归档与安全修剪 (`TraceStore.prune_old_traces`)：
+  - [x] 超过 30 天或单会话超过 200 条的 Trace 记录定时非阻塞修剪。

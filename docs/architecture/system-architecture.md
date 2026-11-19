@@ -5,9 +5,9 @@
 **Jarvis Studio** 是一款面向个人日常软件工程、文件处理与系统任务执行的**个人生产级 AI 操作系统助理**。
 
 与前三代探索型项目不同：
-- **Jarvis Agent**：自研纯 Python Agent Runtime，旨在学习与探究 ReAct 循环、内存与工具调用的底层机制。*(已归档)*
-- **Jarvis Agent Plus**：学习 LangChain 框架抽象与工具绑定的独立实验项目。*(独立项目)*
-- **Jarvis Agent Pro**：学习基于 LangGraph 图编排的独立实验项目。*(独立项目)*
+- **AgentCore**（原 Jarvis Agent）：自研纯 Python Agent Runtime，旨在学习与探究 ReAct 循环、内存与工具调用的底层机制。*(已归档)*
+- **AgentFlow**（原 Jarvis Agent Plus）：学习 LangChain 框架抽象与工具绑定的独立实验项目。*(独立项目)*
+- **AgentGraph**（原 Jarvis Agent Pro）：学习基于 LangGraph 图编排的独立实验项目。*(独立项目)*
 
 **Jarvis Studio 不再为了学习而重复造 Runtime**，而是全面采用官方成熟稳定的生产级框架（**LangGraph**、**LangChain** 与 **Model Context Protocol**），强调工程可靠性、系统安全边界、可替换模型生态与长期个人可维护性。
 

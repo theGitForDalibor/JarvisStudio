@@ -15,7 +15,7 @@ router = APIRouter(prefix="/chat", tags=["Chat"])
 
 @router.post("", response_model=ChatResponse)
 async def chat_with_agent(request: ChatRequest) -> ChatResponse:
-    """Send an instruction to the Jarvis Agent and wait for complete execution."""
+    """Send an instruction to Jarvis Studio and wait for complete execution."""
     session_service = get_session_service()
     agent_service = get_agent_service()
 

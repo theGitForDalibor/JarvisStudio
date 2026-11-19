@@ -11,7 +11,7 @@
 [![sqlite-vec](https://img.shields.io/badge/sqlite--vec-0.1.9-purple.svg)](https://github.com/asg017/sqlite-vec)
 [![uv](https://img.shields.io/badge/package%20manager-uv-green.svg)](https://github.com/astral-sh/uv)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-black.svg)](https://github.com/astral-sh/ruff)
-[![Tests: pytest](https://img.shields.io/badge/tests-43%20passed-brightgreen.svg)](tests/)
+[![Tests: pytest](https://img.shields.io/badge/tests-201%20passed-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [ 简体中文 ](README.md) | [ English ](README.en.md)
@@ -28,9 +28,9 @@ Jarvis Studio 代表了自主智能体从“学习型原型”到“生产级实
 
 | 项目代号 | 底层技术 | 项目目标 | 当前状态 |
 | :--- | :--- | :--- | :--- |
-| **Jarvis Agent** | 自研 Python 运行时 | 深度探究 ReAct 循环与 Agent 底层机制 | 已归档 (完成探索) |
-| **Jarvis Agent Plus** | LangChain Core | 学习 Framework 抽象与工具绑定体系 | 独立项目 |
-| **Jarvis Agent Pro** | LangGraph 原语 | 学习基于图的状态机编排与循环流转 | 独立项目 |
+| **AgentCore** (原 Jarvis Agent) | 自研 Python 运行时 | 深度探究 ReAct 循环与 Agent 底层机制 | 已归档 (完成探索) |
+| **AgentFlow** (原 Jarvis Agent Plus) | LangChain Core | 学习 Framework 抽象与工具绑定体系 | 独立项目 |
+| **AgentGraph** (原 Jarvis Agent Pro) | LangGraph 原语 | 学习基于图的状态机编排与循环流转 | 独立项目 |
 | **Jarvis Studio** | **LangGraph + MCP + sqlite-vec** | **构建真正可长期使用的个人生产力助理应用** | **活跃主开发项目** |
 
 > **核心哲学**：不为了学习而重复造 Runtime。直接采用成熟框架（**LangGraph**、**LangChain** 与 **MCP**），将工程精力聚焦于真实业务场景、安全边界控制、动态模型适配、人机协同安全性与长久可扩展性。
@@ -39,8 +39,14 @@ Jarvis Studio 代表了自主智能体从“学习型原型”到“生产级实
 
 ## 2. Implemented Features (已实现核心能力)
 
-> **当前状态**: 本项目全套核心工程里程碑已**全部开发完成**，并通过 43 项单元与集成测试验证（100% PASS）。
+> **当前状态**: 本项目全套核心工程里程碑与 Sprint 1C 高可靠持久化体系已**全部开发完成**，并通过 201 项单元、集成与端到端恢复测试验证（100% PASS，0 ResourceWarning）。
 
+- **持久化任务与运行协调器 (Durable Task & Run Coordinator)**: 基于 SQLite V3 Schema 严格管理 `agent_tasks` 与 `agent_runs` 状态演进；利用 `(task_id, run_seq)` 唯一约束与原子事务生成机制，彻底规避并发空洞与竞态；HITL 审批恢复时生成独立新 Run，实现任务全生命周期毫秒级度量与白盒化可观测性。
+- **高危操作在途阻断与结果语义分离 (Option B & Execution Outcome)**: 严格区分审批授权状态（`ApprovalStatus`）与物理副作用状态（`ExecutionOutcomeStatus`）；在客户端取消或进程退出时，若物理工具在途执行则将 Run 标记为 `UNKNOWN`（Fail-Closed 原则），结合 `_execute_cancellation_cleanup_shielded` 异步屏蔽，杜绝二次重放风险与连接断开导致的状态破坏。
+- **会话繁忙守卫与 8 表事务级联删除 (Session Busy Guard & Cascade Delete)**: 严格拦截处于活跃或等待人工审批状态（`RUNNING`、`WAITING_APPROVAL`、`EXECUTING_TOOL`、`CREATED`、`PENDING`）的会话删除并返回 HTTP 409 Conflict；会话删除在 `BEGIN IMMEDIATE` 排他事务中按外键依赖倒序级联清理 8 张表，实现彻底的数据清理且零孤儿数据残留。
+- **单实例排他锁与故障启动恢复 (Lock-Gated Startup Recovery)**: 基于 `RuntimeInstanceLock` 提供多进程防脑裂保护；实例重启时在锁保护下执行 `reconcile_on_startup`，自动将死进程残留的在途任务收敛为 `INTERRUPTED` 或 `UNKNOWN`，保障数据库状态机的绝对确定性。
+- **实体吸附上下文同步写穿 (Sticky Context Write-Through)**: `IntentRouteGuard` 实现内存缓存与 `chat_sessions.metadata` 实时同步；支持多轮对话实体吸附与服务端冷启动后的自动懒加载恢复。
+- **Trace 全生命周期归档与安全修剪 (Trace Retention Pruning)**: 自动将调用链路持久化至 `agent_conversation_traces`，并以非阻塞方式定时修剪超期（30天）与单会话超量（200条）的历史链路，防止数据库无限膨胀。
 - **完整多会话管理与即时切换 (Multi-Session Management)**: 基于 SQLite `chat_sessions` 与 `chat_messages` 实现会话的自动命名、新建、搜索过滤、历史消息秒级恢复、重命名与安全删除，支持前端可折叠侧边栏交互。
 - **白盒化渐进式思考流 (Pseudo-Thinking Stream)**: 遵循 AI 技能规范设计 4 阶段状态演进（`understand` 意图分析 → `tool` 工具执行 → `organize` 答案整理 → `completed` 完成交付），首字响应耗时（TTFT）压降至 **<50ms**；集成工具白盒化翻译与心跳保活循环，彻底消除大模型等待焦虑。
 - **意图守卫与极速通道 (Conversation State Guard)**: 针对日常问候、系统查询等高频场景实现 **<50ms / 0 Token 消耗直出**；具备多轮对话实体吸附（Sticky Context Anchor）与紧急制动安全熔断（Halt）。
@@ -321,7 +327,7 @@ OPENAI_API_KEY=your_api_key_here
 ```bash
 uv run --extra dev pytest
 ```
-*当前全量 43 项单元与集成测试用例全部通过（PASS）。*
+*当前全量 201 项单元、集成与端到端测试用例全部通过（PASS，0 资源泄漏警告）。*
 
 ---
 
@@ -357,7 +363,7 @@ uv run ruff check .
 uv run ruff check --fix .
 uv run ruff format .
 
-# 运行全套单元与集成测试 (43 项测试)
+# 运行全套单元与集成测试 (201 项测试)
 uv run --extra dev pytest -v
 ```
 
@@ -405,6 +411,12 @@ Jarvis Studio 全部核心工程里程碑已**全部开发完成并验证通过*
   - **意图规则守卫与快速通道 (Conversation State Guard)**: 针对日常问候、系统查询等高频场景实现 **<50ms / 0 Token 消耗直出**；实现多轮实体吸附与紧急制动；
   - **完整多会话管理 (Multi-Session CRUD)**: SQLite `chat_sessions` 与 `chat_messages` 原生驱动，自动标题、实时检索、快速重命名与历史消息秒级恢复；
   - **端到端 5 阶段生命周期可观测性 (Lifecycle Traces)**: 全链路 TTFT / TTFA / TTLT 毫秒级打标与工具瀑布流白盒分析控制台。
+- ✅ **Milestone 7: 生产级持久化架构与调度自愈基准 (Sprint 1C Engineering)**:
+  - **SQLite Schema V3 迁移与 8 表事务级联清理**: 支持版本化无损升级与原子备份，实现会话删除时关联数据彻底清零；
+  - **Durable Task / Run 持久化调度协调器**: 细粒度管理任务生命周期，`run_seq` 事务防重，HITL 恢复生成独立 Run；
+  - **Session Busy Guard 与并发安全**: 排他事务级拦截活跃执行会话删除，杜绝删除与执行竞态产生孤儿数据；
+  - **高危操作 Option B 语义与 Fail-Closed 判定**: 在途工具被取消时 Run 标为 `UNKNOWN`，配合屏蔽异步取消，彻底封堵重放风险；
+  - **单实例排他锁与 Startup Recovery**: 崩溃死进程在途任务自动收敛为 `INTERRUPTED` 或 `UNKNOWN`，杜绝多实例脑裂。
 
 ### Future & Extension Outlook (后续展望与生态扩展)
 - [ ] **原生跨平台桌面应用包装**: 基于 Tauri / Electron 将 Web 控制台打包为轻量级跨平台个人桌面端。

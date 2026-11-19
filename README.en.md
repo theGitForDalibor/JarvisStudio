@@ -11,7 +11,7 @@
 [![sqlite-vec](https://img.shields.io/badge/sqlite--vec-0.1.9-purple.svg)](https://github.com/asg017/sqlite-vec)
 [![uv](https://img.shields.io/badge/package%20manager-uv-green.svg)](https://github.com/astral-sh/uv)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-black.svg)](https://github.com/astral-sh/ruff)
-[![Tests: pytest](https://img.shields.io/badge/tests-43%20passed-brightgreen.svg)](tests/)
+[![Tests: pytest](https://img.shields.io/badge/tests-201%20passed-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [ 简体中文 ](README.md) | [ English ](README.en.md)
@@ -28,9 +28,9 @@ Jarvis Studio represents the engineering evolution from experimental agent proto
 
 | Project | Underlying Tech | Purpose | Status |
 | :--- | :--- | :--- | :--- |
-| **Jarvis Agent** | In-house Python Runtime | Deep exploration of ReAct and loop internals | Archived |
-| **Jarvis Agent Plus** | LangChain Core | Framework abstraction & tool binding study | Separate Project |
-| **Jarvis Agent Pro** | LangGraph Primitives | Graph-based state machine orchestration | Separate Project |
+| **AgentCore** (formerly Jarvis Agent) | In-house Python Runtime | Deep exploration of ReAct and loop internals | Archived |
+| **AgentFlow** (formerly Jarvis Agent Plus) | LangChain Core | Framework abstraction & tool binding study | Separate Project |
+| **AgentGraph** (formerly Jarvis Agent Pro) | LangGraph Primitives | Graph-based state machine orchestration | Separate Project |
 | **Jarvis Studio** | **LangGraph + MCP + sqlite-vec** | **Reliable, personal AI assistant for daily work** | **Active Project** |
 
 > **Core Philosophy**: Do not reinvent the agent runtime. Leverage mature, battle-tested production frameworks (**LangGraph**, **LangChain**, and **MCP**) to focus engineering efforts on real-world use cases, safety boundaries, swappable models, human-in-the-loop controls, and long-term maintainability.
@@ -39,8 +39,14 @@ Jarvis Studio represents the engineering evolution from experimental agent proto
 
 ## 2. Implemented Features
 
-> **Current Status**: All core engineering milestones are **100% completed**, verified by 43 unit and integration tests (100% PASS).
+> **Current Status**: All core engineering milestones and the Sprint 1C durable persistence system are **100% completed**, verified by 201 unit, integration, and recovery tests (100% PASS, 0 ResourceWarnings).
 
+- **Durable Task & Run Coordinator**: Built on SQLite Schema V3, managing lifecycle transitions for `agent_tasks` and `agent_runs`. Enforces atomic sequence increments with `(task_id, run_seq)` UNIQUE constraints to eliminate concurrency holes. Resuming from HITL generates a distinct Run for accurate multi-stage duration and token accounting.
+- **Fail-Closed High-Risk Tool Handling (Option B Outcome)**: Separates authorization state (`ApprovalStatus`) from physical execution side effects (`ExecutionOutcomeStatus`). When requests are cancelled or disconnected in-flight, the active run is safely categorized as `UNKNOWN` rather than prematurely `CANCELLED`, sealed by shielded background cancellation workers.
+- **Session Busy Guard & 8-Table Cascade Deletion**: Blocks session deletion during active task or approval states (`RUNNING`, `WAITING_APPROVAL`, `EXECUTING_TOOL`, `CREATED`, `PENDING`), returning HTTP 409 Conflict. Full cascade deletion removes records across all 8 tables in a single `BEGIN IMMEDIATE` transaction, leaving zero orphaned rows.
+- **Lock-Gated Startup Recovery**: Employs `RuntimeInstanceLock` to prevent split-brain issues across multiple processes. On startup, reconciles stale in-flight tasks and runs from crashed instances to `INTERRUPTED` or `UNKNOWN`.
+- **Sticky Context Write-Through & Lazy-Loading**: `IntentRouteGuard` synchronizes active entities to session metadata, lazy-loading them back into cache across restarts or cache evictions.
+- **Trace Retention & Non-Blocking Pruning**: Automatically prunes conversation traces older than 30 days or exceeding 200 records per session to prevent database bloating.
 - **Full Multi-Session Management (Multi-Session CRUD)**: SQLite-backed (`chat_sessions` & `chat_messages`) automatic title generation, real-time search, instant history recovery, session renaming, and deletion with a collapsible sidebar UI.
 - **Progressive Pseudo-Thinking Stream**: Implements a 4-phase thinking state machine (`understand` → `tool` → `organize` → `completed`), reducing Time To First Token (TTFT) to **<50ms** with keepalive heartbeats and white-box tool translation to eliminate LLM waiting anxiety.
 - **Intent Route Guard & Fast-Path Reply**: Sub-50ms 0-Token direct replies for common greetings and system queries; provides sticky context anchors across turns and emergency safety halts.
@@ -321,7 +327,7 @@ OPENAI_API_KEY=your_api_key_here
 ```bash
 uv run --extra dev pytest
 ```
-*All 43 unit and integration tests should pass within 12 seconds.*
+*All 201 unit, integration, and recovery tests pass (100% PASS, 0 ResourceWarnings).*
 
 ---
 
@@ -357,7 +363,7 @@ uv run ruff check .
 uv run ruff check --fix .
 uv run ruff format .
 
-# Run the complete test suite (43 tests)
+# Run the complete test suite (201 tests)
 uv run --extra dev pytest -v
 ```
 
@@ -405,6 +411,12 @@ All core milestones of Jarvis Studio are **fully implemented and verified**:
   - **Intent Route Guard & Fast-Path Reply**: Sub-50ms 0-Token direct replies for common greetings/status queries, multi-turn sticky entity context tracking, and emergency halts.
   - **Multi-Session CRUD & History**: SQLite tables `chat_sessions` and `chat_messages` driving automated titling, real-time filtering, renaming, and sub-second history restoration.
   - **5-Stage Lifecycle Observability (Traces)**: End-to-end millisecond TTFT / TTFA / TTLT metrics profiling and visual waterfall execution inspector.
+- ✅ **Milestone 7: Production-Grade Persistence & Reliable Recovery (Sprint 1C Engineering)**:
+  - **SQLite Schema V3 & 8-Table Cascade Cleanup**: Versioned migrations with pre-flight physical backups and atomic 8-table cascade deletion upon session removal.
+  - **Durable Task / Run Coordinator**: Fine-grained task lifecycle orchestration, transactionally safe `run_seq` increments, and dedicated Run generation upon HITL resume.
+  - **Session Busy Guard & Anti-Race Safety**: Prevents deletion of sessions with active executions or pending approvals (`409 Conflict`), eliminating orphaned writes.
+  - **Option B Fail-Closed Tool Outcome Semantics**: Marks runs as `UNKNOWN` when cancelled in-flight, supported by shielded background cancellation workers.
+  - **Lock-Gated Startup Recovery**: Single-instance mutex validation (`RuntimeInstanceLock`) with automated convergence of dead worker tasks to `INTERRUPTED` or `UNKNOWN`.
 
 ### Future & Extension Outlook
 - [ ] **Cross-Platform Native Desktop Packaging**: Package the Web console into a lightweight native desktop app using Tauri or Electron.

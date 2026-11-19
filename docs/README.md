@@ -49,4 +49,4 @@ docs/
 - **[ADR-003: 采用原生 interrupt() 实现 HITL](adr/ADR-003-native-interrupt-for-hitl.md)**：记录基于 LangGraph 原生断点机制与持久化 Checkpoint 实现安全拦截的权衡。
 
 ### 5. 演进路线图 (Roadmap)
-- **[工程演进路线图](roadmap/engineering-roadmap.md)**：全量记录 M0（脚手架）到 M5（生产级 Web 界面）的各阶段目标，如实标记已完成、进行中与规划中的工程事项。
+- **[工程演进路线图](roadmap/engineering-roadmap.md)**：全量记录 M0（脚手架）到 M7（Sprint 1C 生产级持久化与调度自愈基准）的各阶段目标与交付记录。

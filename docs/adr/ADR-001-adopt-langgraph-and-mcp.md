@@ -9,9 +9,9 @@
 ## 1. 背景与上下文 (Context)
 
 在此前的探索阶段，团队先后完成了三代学习型项目：
-- **Jarvis Agent**：从零自研纯 Python Agent Runtime，深入学习了 ReAct 循环、内存管理与工具执行机制。
-- **Jarvis Agent Plus**：专注于学习 LangChain 框架抽象。
-- **Jarvis Agent Pro**：专注于学习基于 LangGraph 的图循环编排。
+- **AgentCore**（原 Jarvis Agent）：从零自研纯 Python Agent Runtime，深入学习了 ReAct 循环、内存管理与工具执行机制。
+- **AgentFlow**（原 Jarvis Agent Plus）：专注于学习 LangChain 框架抽象。
+- **AgentGraph**（原 Jarvis Agent Pro）：专注于学习基于 LangGraph 的图循环编排。
 
 **Jarvis Studio 的定位是生产级个人应用**，目标是长期稳定服务于日常开发工作，而非为了学习继续重复手写底层 Runtime。自研 Agent Loop 在断点快照、并发安全、异常重试、流式传输与跨进程恢复等复杂场景下需要付出巨大的边角维护成本。
 
@@ -28,7 +28,7 @@
 
 ## 3. 备选方案权衡 (Alternatives Considered)
 
-1. **继续维护自研的 Jarvis Agent Runtime**：
+1. **继续维护自研的 AgentCore Runtime**（原 Jarvis Agent）：
    - *否决理由*：维护自研状态机与持久化引擎耗费大量精力，且生态扩展性弱，违背“产品优先”原则。
 2. **使用旧版 LangChain AgentExecutor**：
    - *否决理由*：旧版 `AgentExecutor` 过于黑盒、缺乏细粒度的单步快照，难以优雅实现多分支人机协同审查。
