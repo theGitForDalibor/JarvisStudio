@@ -97,11 +97,11 @@ def test_schema_v4_migration_idempotent_and_preserves_v3(tmp_path: Path):
     finally:
         conn.close()
 
-    # Migrate to V4
+    # Migrate to latest schema
     new_ver = run_app_migrations(db_path)
-    assert new_ver == APP_SCHEMA_VERSION == 4
+    assert new_ver == APP_SCHEMA_VERSION == 5
 
-    # Verify preserved data and new V4 columns
+    # Verify preserved data and new columns
     with open_sync_connection(db_path) as check_conn:
         row = check_conn.execute("SELECT * FROM agent_tasks WHERE task_id = 'task_v3'").fetchone()
         assert row is not None
@@ -110,7 +110,7 @@ def test_schema_v4_migration_idempotent_and_preserves_v3(tmp_path: Path):
         assert row[4] == "test query"
 
         # Verify idempotency
-        assert run_app_migrations(db_path) == 4
+        assert run_app_migrations(db_path) == 5
 
 
 def test_independent_task_creation_without_session(test_env):

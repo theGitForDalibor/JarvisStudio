@@ -24,7 +24,7 @@ from jarvis_studio.core.persistence.sqlite import (
     sync_transaction,
 )
 
-APP_SCHEMA_VERSION = 4
+APP_SCHEMA_VERSION = 5
 VEC_SCHEMA_VERSION = 1
 
 _logger = logging.getLogger(__name__)
@@ -369,6 +369,93 @@ _APP_V4_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_events_task_seq ON agent_events(task_id, seq ASC)",
     "CREATE INDEX IF NOT EXISTS idx_events_run ON agent_events(run_id)",
+)
+
+_APP_V5_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS agent_tasks_v5 (
+        task_id           TEXT PRIMARY KEY,
+        session_id        TEXT,
+        thread_id         TEXT NOT NULL,
+        status            TEXT NOT NULL CHECK (status IN (
+                              'CREATED', 'QUEUED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL',
+                              'PAUSED', 'CANCELLING', 'COMPLETED', 'FAILED', 'CANCELLED',
+                              'TIMEOUT', 'UNKNOWN', 'INTERRUPTED'
+                          )),
+        query             TEXT NOT NULL,
+        initiator         TEXT NOT NULL DEFAULT 'user',
+        assigned_agent_id TEXT NOT NULL DEFAULT 'general_agent',
+        current_run_id    TEXT,
+        plan_json         TEXT,
+        priority          TEXT NOT NULL DEFAULT 'NORMAL',
+        result_summary    TEXT,
+        created_at        REAL NOT NULL,
+        updated_at        REAL NOT NULL,
+        completed_at      REAL,
+        archived_at       REAL,
+        runtime_id        TEXT,
+        error_message     TEXT,
+        FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE SET NULL
+    )
+    """,
+    """
+    INSERT INTO agent_tasks_v5 (
+        task_id, session_id, thread_id, status, query, initiator,
+        assigned_agent_id, current_run_id, plan_json, priority,
+        result_summary, created_at, updated_at, completed_at,
+        archived_at, runtime_id, error_message
+    )
+    SELECT
+        task_id, session_id, thread_id, status, query, initiator,
+        assigned_agent_id, current_run_id, plan_json, priority,
+        result_summary, created_at, updated_at, completed_at,
+        archived_at, runtime_id, error_message
+    FROM agent_tasks
+    """,
+    "DROP TABLE agent_tasks",
+    "ALTER TABLE agent_tasks_v5 RENAME TO agent_tasks",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_session_created ON agent_tasks(session_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_status_runtime ON agent_tasks(status, runtime_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_thread_status ON agent_tasks(thread_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_archived ON agent_tasks(archived_at, created_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS agent_runs_v5 (
+        run_id          TEXT PRIMARY KEY,
+        task_id         TEXT NOT NULL,
+        run_seq         INTEGER NOT NULL,
+        trigger_type    TEXT NOT NULL CHECK (trigger_type IN (
+                            'initial', 'hitl_resume', 'recovery_resume', 'user_input', 'resume'
+                        )),
+        status          TEXT NOT NULL CHECK (status IN (
+                            'QUEUED', 'RUNNING', 'PAUSED', 'CANCELLING', 'INTERRUPTED',
+                            'COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'UNKNOWN'
+                        )),
+        runtime_id      TEXT NOT NULL,
+        started_at      REAL NOT NULL,
+        finished_at     REAL,
+        duration_ms     INTEGER,
+        checkpoint_id   TEXT,
+        error_message   TEXT,
+        FOREIGN KEY (task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+        UNIQUE (task_id, run_seq)
+    )
+    """,
+    """
+    INSERT INTO agent_runs_v5 (
+        run_id, task_id, run_seq, trigger_type, status,
+        runtime_id, started_at, finished_at, duration_ms,
+        checkpoint_id, error_message
+    )
+    SELECT
+        run_id, task_id, run_seq, trigger_type, status,
+        runtime_id, started_at, finished_at, duration_ms,
+        checkpoint_id, error_message
+    FROM agent_runs
+    """,
+    "DROP TABLE agent_runs",
+    "ALTER TABLE agent_runs_v5 RENAME TO agent_runs",
+    "CREATE INDEX IF NOT EXISTS idx_runs_task_seq ON agent_runs(task_id, run_seq)",
+    "CREATE INDEX IF NOT EXISTS idx_runs_runtime_status ON agent_runs(runtime_id, status)",
 )
 
 # `vec_chunks` virtual table depends on per-instance embedding dimension (e.g. 32 in tests,
@@ -799,6 +886,7 @@ def run_app_migrations(
             2: _APP_V2_STATEMENTS,
             3: _APP_V3_STATEMENTS,
             4: _APP_V4_STATEMENTS,
+            5: _APP_V5_STATEMENTS,
         },
         post_hooks={4: _migrate_traces_v4},
         enable_foreign_keys=False,

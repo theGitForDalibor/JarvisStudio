@@ -14,9 +14,12 @@ class TaskStatus(str, Enum):
     """Lifecycle status of an agent task."""
 
     CREATED = "CREATED"
+    QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     WAITING_APPROVAL = "WAITING_APPROVAL"
     EXECUTING_TOOL = "EXECUTING_TOOL"
+    PAUSED = "PAUSED"
+    CANCELLING = "CANCELLING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -28,7 +31,10 @@ class TaskStatus(str, Enum):
 class RunStatus(str, Enum):
     """Lifecycle status of an individual execution run."""
 
+    QUEUED = "QUEUED"
     RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
+    CANCELLING = "CANCELLING"
     INTERRUPTED = "INTERRUPTED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
@@ -43,6 +49,8 @@ class RunTriggerType(str, Enum):
     INITIAL = "initial"
     HITL_RESUME = "hitl_resume"
     RECOVERY_RESUME = "recovery_resume"
+    USER_INPUT = "user_input"
+    RESUME = "resume"
 
 
 class DeliverableType(str, Enum):
@@ -78,6 +86,7 @@ class EventType(str, Enum):
     """Lifecycle event types for execution observability."""
 
     TASK_CREATED = "task_created"
+    TASK_QUEUED = "task_queued"
     RUN_STARTED = "run_started"
     PLAN_UPDATED = "plan_updated"
     AGENT_DELEGATED = "agent_delegated"
@@ -88,9 +97,13 @@ class EventType(str, Enum):
     RUN_PAUSED = "run_paused"
     RUN_RESUMED = "run_resumed"
     RUN_FAILED = "run_failed"
+    TASK_PAUSED = "task_paused"
+    TASK_RESUMED = "task_resumed"
+    TASK_CANCELLING = "task_cancelling"
+    TASK_CANCELLED = "task_cancelled"
+    INSTRUCTION_APPENDED = "instruction_appended"
     DELIVERABLE_CREATED = "deliverable_created"
     TASK_COMPLETED = "task_completed"
-    TASK_CANCELLED = "task_cancelled"
     TASK_ARCHIVED = "task_archived"
 
 
