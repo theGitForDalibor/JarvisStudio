@@ -106,6 +106,7 @@ def _collect_loaded_global_stores() -> list[tuple[object, list[_GlobalStoreBindi
         ("jarvis_studio.service.session_service", "_global_session_service", None),
         ("jarvis_studio.rag.store", "_global_vec_store", None),
         ("jarvis_studio.core.tasks.coordinator", "_default_task_coordinator", None),
+        ("jarvis_studio.service.deliverable_manager", "_default_deliverable_manager", None),
     )
 
     stores_by_id: dict[int, tuple[object, list[_GlobalStoreBinding]]] = {}
