@@ -245,6 +245,10 @@ class AgentService:
         key = self._normalize_lock_key(thread_id)
         return _ThreadLockGuard(self._thread_locks, loop, key)
 
+    def is_session_busy(self, session_id: str) -> bool:
+        """Check whether the session has active tasks, pending approvals, or in-flight executions."""
+        return self.session_service.is_session_busy(session_id)
+
     def rebuild_graph(self, registry=None, model=None, checkpointer=None) -> None:
         """Rebuild and recompile the StateGraph with updated tools or configuration."""
         self.graph = build_agent_graph(

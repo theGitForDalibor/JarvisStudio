@@ -391,6 +391,13 @@ def test_p4_session_busy_guard_raises_and_returns_409(tmp_path: Path, monkeypatc
 
     sess = sess_svc.create_session(title="Busy Sess", session_id="sess_busy_1")
     task = coord.create_task(sess.session_id, sess.session_id, query="Long operation")
+
+    # While task is CREATED:
+    assert sess_svc.is_session_busy(sess.session_id) is True
+    assert coord.has_active_tasks(sess.session_id) is True
+    with pytest.raises(SessionBusyError):
+        sess_svc.delete_session(sess.session_id)
+
     run = coord.start_run(task.task_id, runtime_id="rt_1")
 
     # While task is RUNNING:
@@ -413,7 +420,7 @@ def test_p4_session_busy_guard_raises_and_returns_409(tmp_path: Path, monkeypatc
         assert resp_clear.status_code == 409
         assert "cannot be cleared while active" in resp_clear.json()["detail"]
 
-    # Now transition task to WAITING_APPROVAL, but approval request is EXECUTING
+    # Transition task to WAITING_APPROVAL with approval request in PENDING
     coord.pause_for_approval(task.task_id, run.run_id)
     appr = hitl_mgr.create_request(
         thread_id=sess.session_id,
@@ -424,7 +431,19 @@ def test_p4_session_busy_guard_raises_and_returns_409(tmp_path: Path, monkeypatc
         tool_call_id="call_busy_1",
         description="write foo",
     )
+    # Status is WAITING_APPROVAL & PENDING -> MUST be busy!
+    assert sess_svc.is_session_busy(sess.session_id) is True
+    assert coord.has_active_tasks(sess.session_id) is True
+    with pytest.raises(SessionBusyError):
+        sess_svc.delete_session(sess.session_id)
+
+    # Resolve to APPROVED -> still busy!
     hitl_mgr.resolve_request(appr.id, ApprovalDecision(decision="approve"), thread_id=sess.session_id)
+    assert sess_svc.is_session_busy(sess.session_id) is True
+    with pytest.raises(SessionBusyError):
+        sess_svc.delete_session(sess.session_id)
+
+    # Acquire execution lease -> EXECUTING -> still busy!
     hitl_mgr.acquire_execution_lease(
         appr.id,
         thread_id=sess.session_id,
@@ -433,8 +452,6 @@ def test_p4_session_busy_guard_raises_and_returns_409(tmp_path: Path, monkeypatc
         lease_owner_instance_id="rt_1",
         lease_acquired_run_id=run.run_id,
     )
-
-    # Status is EXECUTING -> still busy!
     assert sess_svc.is_session_busy(sess.session_id) is True
     with pytest.raises(SessionBusyError):
         sess_svc.delete_session(sess.session_id)
@@ -444,6 +461,7 @@ def test_p4_session_busy_guard_raises_and_returns_409(tmp_path: Path, monkeypatc
     coord.complete_task_and_run(task.task_id, run.run_id)
 
     assert sess_svc.is_session_busy(sess.session_id) is False
+    assert coord.has_active_tasks(sess.session_id) is False
 
 
 # ---------------------------------------------------------------------------

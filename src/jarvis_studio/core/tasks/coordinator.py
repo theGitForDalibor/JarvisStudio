@@ -449,13 +449,13 @@ class TaskCoordinator:
             return [_row_to_task(r) for r in rows]
 
     def get_active_task_for_thread(self, thread_id: str) -> AgentTask | None:
-        """Find the latest active task for thread (RUNNING, WAITING_APPROVAL, EXECUTING_TOOL)."""
+        """Find the latest active task for thread (CREATED, RUNNING, WAITING_APPROVAL, EXECUTING_TOOL)."""
         with self._read_conn() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
                 SELECT * FROM agent_tasks
-                WHERE thread_id = ? AND status IN ('RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL')
+                WHERE thread_id = ? AND status IN ('CREATED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL')
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -464,12 +464,12 @@ class TaskCoordinator:
             return _row_to_task(row) if row is not None else None
 
     def has_active_tasks(self, session_id: str) -> bool:
-        """Check whether the session has any actively running or executing task."""
+        """Check whether the session has any actively running, waiting, or executing task."""
         with self._read_conn() as conn:
             row = conn.execute(
                 """
                 SELECT 1 FROM agent_tasks
-                WHERE session_id = ? AND status IN ('RUNNING', 'EXECUTING_TOOL')
+                WHERE session_id = ? AND status IN ('CREATED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL')
                 LIMIT 1
                 """,
                 (session_id,),
@@ -529,7 +529,7 @@ class TaskCoordinator:
                 """
                 UPDATE agent_tasks
                 SET status = 'UNKNOWN', updated_at = ?, completed_at = ?, error_message = 'Reconciled to UNKNOWN on runtime startup'
-                WHERE status IN ('RUNNING', 'EXECUTING_TOOL')
+                WHERE status IN ('CREATED', 'RUNNING', 'EXECUTING_TOOL')
                   AND (
                       task_id IN (SELECT task_id FROM hitl_approval_requests WHERE status = 'UNKNOWN')
                       OR task_id IN (SELECT task_id FROM tool_execution_outcomes WHERE outcome_status = 'UNKNOWN')
@@ -541,7 +541,7 @@ class TaskCoordinator:
                 """
                 UPDATE agent_tasks
                 SET status = 'INTERRUPTED', updated_at = ?, error_message = 'Interrupted by runtime shutdown/restart'
-                WHERE status IN ('RUNNING', 'EXECUTING_TOOL')
+                WHERE status IN ('CREATED', 'RUNNING', 'EXECUTING_TOOL')
                 """,
                 (now,),
             )

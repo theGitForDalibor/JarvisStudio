@@ -278,7 +278,7 @@ class SessionService:
                 row = c.execute(
                     """
                     SELECT 1 FROM agent_tasks
-                    WHERE session_id = ? AND status IN ('RUNNING', 'EXECUTING_TOOL')
+                    WHERE session_id = ? AND status IN ('CREATED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL')
                     LIMIT 1
                     """,
                     (session_id,),
@@ -295,7 +295,7 @@ class SessionService:
                     """
                     SELECT 1 FROM hitl_approval_requests
                     WHERE (thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?))
-                      AND status = 'EXECUTING'
+                      AND status IN ('PENDING', 'APPROVED', 'MODIFIED', 'EXECUTING')
                     LIMIT 1
                     """,
                     (session_id, session_id),
