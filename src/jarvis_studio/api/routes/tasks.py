@@ -31,6 +31,16 @@ class CancelTaskRequest(BaseModel):
     reason: str = Field(default="Cancelled by user", description="Reason for cancelling the task")
 
 
+class ExecuteTaskRequest(BaseModel):
+    """Payload to execute or retry a task through AgentRuntime."""
+
+    user_message: str | None = Field(default=None, description="Optional override/follow-up input query")
+    fresh_checkpoint: bool = Field(
+        default=False,
+        description="Whether to clear prior LangGraph thread checkpoints before executing",
+    )
+
+
 class TaskDetailResponse(BaseModel):
     """Detailed task entity with execution runs, deliverables, and event logs."""
 
@@ -102,6 +112,27 @@ async def cancel_task(
         return task_service.cancel_task(task_id, reason=reason)
     except KeyError as err:
         raise HTTPException(status_code=404, detail=str(err)) from err
+
+
+@router.post("/{task_id}/execute", response_model=dict[str, Any])
+async def execute_task(
+    task_id: str,
+    request: ExecuteTaskRequest | None = None,
+) -> dict[str, Any]:
+    """Execute a task directly via AgentRuntime / AgentService."""
+    task_service = get_task_service()
+    payload = request or ExecuteTaskRequest()
+    try:
+        result = await task_service.execute_task(
+            task_id,
+            user_message=payload.user_message,
+            fresh_checkpoint=payload.fresh_checkpoint,
+        )
+        return result.to_dict()
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err)) from err
+    except (ValueError, RuntimeError) as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
 
 
 @router.delete("/{task_id}")

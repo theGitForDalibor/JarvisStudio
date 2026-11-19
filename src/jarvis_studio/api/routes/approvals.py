@@ -65,13 +65,24 @@ def _extract_consistent_thread_id(
     return normalized[0], True
 
 
+def _thread_exists_on_server(thread_id: str) -> bool:
+    """Check whether `thread_id` maps to a real session or an independent task thread."""
+    session_service = get_session_service()
+    if session_service.get_session(thread_id) is not None:
+        return True
+    agent_service = get_agent_service()
+    if agent_service.task_coordinator.get_task_by_thread_id(thread_id) is not None:
+        return True
+    return False
+
+
 def _resolve_verified_session_thread_id(
     request: Request,
     *,
     body_thread_id: str | None = None,
     query_thread_id: str | None = None,
 ) -> str:
-    """Resolve thread_id and verify it corresponds to a real server-side session."""
+    """Resolve thread_id and verify it corresponds to a real server-side session or task."""
     thread_id, _ = _extract_consistent_thread_id(
         request,
         body_thread_id=body_thread_id,
@@ -80,8 +91,7 @@ def _resolve_verified_session_thread_id(
     if not thread_id:
         _raise_not_found()
 
-    session_service = get_session_service()
-    if session_service.get_session(thread_id) is None:
+    if not _thread_exists_on_server(thread_id):
         _raise_not_found()
 
     return thread_id
@@ -106,8 +116,7 @@ async def list_pending_approvals(
     if not resolved_tid:
         _raise_not_found()
 
-    session_service = get_session_service()
-    if session_service.get_session(resolved_tid) is None:
+    if not _thread_exists_on_server(resolved_tid):
         return []
 
     hitl_mgr = get_hitl_manager()

@@ -18,7 +18,7 @@ from jarvis_studio.agent.hitl.manager import (
     compute_arguments_hash,
     get_hitl_manager,
 )
-from jarvis_studio.core.guard.route_guard import GuardAction, get_route_guard
+from jarvis_studio.core.guard.route_guard import GuardAction, GuardDecision, get_route_guard
 from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.core.observability.trace_logger import (
     ConversationTrace,
@@ -26,7 +26,12 @@ from jarvis_studio.core.observability.trace_logger import (
 )
 from jarvis_studio.core.observability.tracer import set_trace_context, timed_step
 from jarvis_studio.core.tasks.coordinator import TaskCoordinator, get_task_coordinator
-from jarvis_studio.core.tasks.models import RunTriggerType, TaskStatus
+from jarvis_studio.core.tasks.models import (
+    AgentTask,
+    EventType,
+    RunTriggerType,
+    TaskStatus,
+)
 from jarvis_studio.core.thinking.engine import ThinkingEngine
 from jarvis_studio.service.session_service import SessionService, get_session_service
 
@@ -122,6 +127,7 @@ class AgentExecutionResult:
         output_text: str = "",
         pending_approval: dict[str, Any] | None = None,
         error: str | None = None,
+        task_id: str | None = None,
     ):
         self.thread_id = thread_id
         self.run_id = run_id
@@ -129,11 +135,13 @@ class AgentExecutionResult:
         self.output_text = output_text
         self.pending_approval = pending_approval
         self.error = error
+        self.task_id = task_id
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "thread_id": self.thread_id,
             "run_id": self.run_id,
+            "task_id": self.task_id,
             "status": self.status,
             "output_text": self.output_text,
             "pending_approval": self.pending_approval,
@@ -258,18 +266,108 @@ class AgentService:
             hitl_mgr=self.hitl_manager,
         )
 
+    def _validate_task_executable(self, task_id: str) -> AgentTask:
+        """Validate that an explicit task exists, is unarchived, and is eligible for execution."""
+        task = self.task_coordinator.get_task(task_id)
+        if task is None:
+            raise KeyError(f"Task not found: {task_id}")
+        if task.archived_at is not None:
+            raise ValueError(f"Task '{task_id}' is archived and cannot be executed")
+        if task.status == TaskStatus.UNKNOWN:
+            raise RuntimeError(
+                f"Task '{task_id}' is in UNKNOWN state due to uncertain external side effects "
+                "and cannot be automatically re-executed."
+            )
+        if task.status in (
+            TaskStatus.RUNNING,
+            TaskStatus.EXECUTING_TOOL,
+            TaskStatus.WAITING_APPROVAL,
+        ):
+            raise ValueError(
+                f"Task '{task_id}' cannot be executed while in state '{task.status.value}'"
+            )
+        return task
+
+    def _safe_record_event(
+        self,
+        task_id: str,
+        event_type: EventType,
+        *,
+        run_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist observable task lifecycle event without crashing if coordinator lacks table/hook."""
+        try:
+            self.task_coordinator.record_event(
+                task_id=task_id,
+                event_type=event_type,
+                run_id=run_id,
+                payload=payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"Could not record event {event_type.value} for task {task_id}: {exc}")
+
     async def invoke_agent(
         self,
         thread_id: str,
         user_message: str,
         run_id: str | None = None,
+        *,
+        task_id: str | None = None,
     ) -> AgentExecutionResult:
-        """Execute the agent on a specific thread with user input."""
+        """Execute the agent on a specific thread or explicit task with user input."""
         self._verify_event_loop()
+        existing_task: AgentTask | None = None
+        lock_key = thread_id
+        if task_id is not None:
+            existing_task = self._validate_task_executable(task_id)
+            lock_key = existing_task.thread_id
+
         task_token = self._begin_runtime_run()
         try:
-            async with self._acquire_thread_lock(thread_id):
-                return await self._invoke_agent_unlocked(thread_id, user_message, run_id=run_id)
+            async with self._acquire_thread_lock(lock_key):
+                if task_id is not None:
+                    existing_task = self._validate_task_executable(task_id)
+                return await self._invoke_agent_unlocked(
+                    lock_key,
+                    user_message,
+                    run_id=run_id,
+                    existing_task=existing_task,
+                )
+        finally:
+            self._end_runtime_run(task_token)
+
+    async def execute_task(
+        self,
+        task_id: str,
+        *,
+        user_message: str | None = None,
+        run_id: str | None = None,
+        trigger_type: RunTriggerType = RunTriggerType.INITIAL,
+        checkpoint_id: str | None = None,
+        fresh_checkpoint: bool = False,
+    ) -> AgentExecutionResult:
+        """Execute an existing standalone or session-linked Task on its isolated thread_id."""
+        self._verify_event_loop()
+        task_preview = self._validate_task_executable(task_id)
+        task_token = self._begin_runtime_run()
+        try:
+            async with self._acquire_thread_lock(task_preview.thread_id):
+                locked_task = self._validate_task_executable(task_id)
+                effective_query = (
+                    user_message.strip()
+                    if isinstance(user_message, str) and user_message.strip()
+                    else locked_task.query
+                )
+                return await self._invoke_agent_unlocked(
+                    locked_task.thread_id,
+                    effective_query,
+                    run_id=run_id,
+                    existing_task=locked_task,
+                    trigger_type=trigger_type,
+                    checkpoint_id=checkpoint_id,
+                    fresh_checkpoint=fresh_checkpoint,
+                )
         finally:
             self._end_runtime_run(task_token)
 
@@ -278,38 +376,89 @@ class AgentService:
         thread_id: str,
         user_message: str,
         run_id: str | None = None,
+        *,
+        existing_task: AgentTask | None = None,
+        trigger_type: RunTriggerType = RunTriggerType.INITIAL,
+        checkpoint_id: str | None = None,
+        fresh_checkpoint: bool = False,
     ) -> AgentExecutionResult:
         """Internal invoke implementation executed under the per-thread lock."""
-        self.session_service.get_or_create_session(thread_id)
-        effective_run_id = set_trace_context(thread_id, run_id)
+        effective_session_id = (
+            existing_task.session_id if existing_task is not None else thread_id
+        )
+        effective_thread_id = (
+            existing_task.thread_id if existing_task is not None else thread_id
+        )
+
+        if effective_session_id is not None:
+            self.session_service.get_or_create_session(effective_session_id)
+
+        effective_run_id = set_trace_context(effective_thread_id, run_id)
         guard = get_route_guard()
         trace_store = self.trace_store or get_trace_store()
 
         runtime_id = self.hitl_manager.runtime_instance_id or "standalone"
-        task = self.task_coordinator.create_task(
-            session_id=thread_id,
-            thread_id=thread_id,
-            query=user_message,
-            runtime_id=runtime_id,
-        )
+        if existing_task is not None:
+            task = existing_task
+        else:
+            task = self.task_coordinator.create_task(
+                session_id=effective_session_id,
+                thread_id=effective_thread_id,
+                query=user_message,
+                runtime_id=runtime_id,
+            )
+
+        if fresh_checkpoint:
+            cp = getattr(self.graph, "checkpointer", None)
+            if cp is not None and callable(getattr(cp, "adelete_thread", None)):
+                await cp.adelete_thread(effective_thread_id)
+
         run = self.task_coordinator.start_run(
             task_id=task.task_id,
             runtime_id=runtime_id,
-            trigger_type=RunTriggerType.INITIAL,
+            trigger_type=trigger_type,
             run_id=effective_run_id,
+            checkpoint_id=None if fresh_checkpoint else checkpoint_id,
+        )
+        self._safe_record_event(
+            task.task_id,
+            EventType.RUN_STARTED,
+            run_id=run.run_id,
+            payload={
+                "run_seq": run.run_seq,
+                "trigger_type": trigger_type.value,
+                "runtime_id": runtime_id,
+                "checkpoint_id": None if fresh_checkpoint else checkpoint_id,
+            },
         )
 
         trace = ConversationTrace(
-            session_id=thread_id,
+            session_id=effective_session_id,
             run_id=effective_run_id,
             task_id=task.task_id,
             query=user_message,
         )
-        trace.input_stage = {"query": user_message, "thread_id": thread_id, "task_id": task.task_id}
+        trace.input_stage = {
+            "query": user_message,
+            "thread_id": effective_thread_id,
+            "session_id": effective_session_id,
+            "task_id": task.task_id,
+        }
 
-        # 1. Front-line Guard Evaluation (<50ms fast-path rule check)
+        # 1. Front-line Guard Evaluation (<50ms fast-path rule check for chat sessions)
+        is_chat_thread = (
+            existing_task is None
+            and effective_session_id is not None
+            and effective_thread_id == effective_session_id
+        )
         guard_start = time.time()
-        decision = guard.evaluate(user_message, thread_id)
+        if is_chat_thread and effective_session_id is not None:
+            decision = guard.evaluate(user_message, effective_session_id)
+        else:
+            decision = GuardDecision(
+                action=GuardAction.PASS_THROUGH,
+                matched_rule="task_execution_direct" if existing_task is not None else "standalone_task_direct",
+            )
         guard_ms = int((time.time() - guard_start) * 1000)
         trace.guard_stage = {
             "action": decision.action.value,
@@ -317,16 +466,34 @@ class AgentService:
             "duration_ms": guard_ms,
         }
 
-        # Handle Fast-Path Direct Reply or Emergency Halt
+        # Handle Fast-Path Direct Reply or Emergency Halt (chat path)
         if decision.action in (GuardAction.DIRECT_REPLY, GuardAction.HALT_TASK):
             reply_text = decision.reply_text or "已处理。"
-            self.session_service.add_message(
-                thread_id, role="user", content=user_message, task_id=task.task_id, run_id=run.run_id
-            )
-            self.session_service.add_message(
-                thread_id, role="assistant", content=reply_text, task_id=task.task_id, run_id=run.run_id
+            if is_chat_thread and effective_session_id is not None:
+                self.session_service.add_message(
+                    effective_session_id,
+                    role="user",
+                    content=user_message,
+                    task_id=task.task_id,
+                    run_id=run.run_id,
+                )
+                self.session_service.add_message(
+                    effective_session_id,
+                    role="assistant",
+                    content=reply_text,
+                    task_id=task.task_id,
+                    run_id=run.run_id,
+                )
+            self.task_coordinator.update_task_metadata(
+                task.task_id, result_summary=reply_text[:500]
             )
             self.task_coordinator.complete_task_and_run(task.task_id, run.run_id)
+            self._safe_record_event(
+                task.task_id,
+                EventType.TASK_COMPLETED,
+                run_id=run.run_id,
+                payload={"fast_path": True},
+            )
             trace.mark_ttft()
             trace.mark_ttfa()
             trace.finish(output=reply_text, status="rule_direct")
@@ -334,25 +501,34 @@ class AgentService:
             trace_store.prune_old_traces()
 
             return AgentExecutionResult(
-                thread_id=thread_id,
+                thread_id=effective_thread_id,
                 run_id=effective_run_id,
+                task_id=task.task_id,
                 status="completed",
                 output_text=reply_text,
             )
 
-        # Record user message and handle enriched intent
+        # Record user message and handle enriched intent (only for Chat turns, not isolated Tasks)
         actual_input_message = decision.enriched_message or user_message
-        self.session_service.add_message(
-            thread_id, role="user", content=user_message, task_id=task.task_id, run_id=run.run_id
-        )
+        if is_chat_thread and effective_session_id is not None:
+            self.session_service.add_message(
+                effective_session_id,
+                role="user",
+                content=user_message,
+                task_id=task.task_id,
+                run_id=run.run_id,
+            )
 
-        config = {"configurable": {"thread_id": thread_id}}
-        
-        # Check if state needs historical context from SQLite
+        configurable: dict[str, Any] = {"thread_id": effective_thread_id}
+        if checkpoint_id and not fresh_checkpoint:
+            configurable["checkpoint_id"] = checkpoint_id
+        config = {"configurable": configurable}
+
+        # Check if state needs historical context from SQLite (only for Chat threads, never bleed across Tasks)
         state_snapshot = await self.graph.aget_state(config)
         messages_input = [HumanMessage(content=actual_input_message)]
-        if not state_snapshot.values.get("messages"):
-            past_records = self.session_service.get_messages(thread_id)
+        if is_chat_thread and effective_session_id is not None and not state_snapshot.values.get("messages"):
+            past_records = self.session_service.get_messages(effective_session_id)
             if len(past_records) > 1:
                 history_msgs = []
                 for rec in past_records[:-1]:
@@ -364,27 +540,31 @@ class AgentService:
 
         trace.preload_stage = {
             "history_loaded_count": len(messages_input) - 1,
-            "sticky_context": guard.get_sticky_context(thread_id),
+            "sticky_context": (
+                guard.get_sticky_context(effective_session_id)
+                if is_chat_thread and effective_session_id is not None
+                else {}
+            ),
         }
 
         input_state = {
             "messages": messages_input,
             "run_context": {
-                "session_id": thread_id,
+                "thread_id": effective_thread_id,
+                "session_id": effective_session_id,
                 "run_id": effective_run_id,
                 "task_id": task.task_id,
             },
         }
 
         try:
-            with timed_step("agent_run", thread_id=thread_id, run_id=effective_run_id):
+            with timed_step("agent_run", thread_id=effective_thread_id, run_id=effective_run_id):
                 final_state = await self.graph.ainvoke(input_state, config=config)
 
             # Check if execution paused on an interrupt
             state_snapshot = await self.graph.aget_state(config)
-            checkpoint_id = _extract_checkpoint_id(state_snapshot)
+            cp_id = _extract_checkpoint_id(state_snapshot)
             if state_snapshot.next:
-                # Graph was interrupted (e.g. approval_gate)
                 tasks = state_snapshot.tasks
                 interrupt_val = None
                 for t in tasks:
@@ -392,14 +572,29 @@ class AgentService:
                         interrupt_val = t.interrupts[0].value
                         break
 
-                self.task_coordinator.pause_for_approval(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                self.task_coordinator.pause_for_approval(
+                    task.task_id, run.run_id, checkpoint_id=cp_id
+                )
+                self._safe_record_event(
+                    task.task_id,
+                    EventType.APPROVAL_REQUIRED,
+                    run_id=run.run_id,
+                    payload={"checkpoint_id": cp_id},
+                )
+                self._safe_record_event(
+                    task.task_id,
+                    EventType.RUN_PAUSED,
+                    run_id=run.run_id,
+                    payload={"reason": "waiting_approval", "checkpoint_id": cp_id},
+                )
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
                 trace_store.prune_old_traces()
 
                 return AgentExecutionResult(
-                    thread_id=thread_id,
+                    thread_id=effective_thread_id,
                     run_id=effective_run_id,
+                    task_id=task.task_id,
                     status="interrupted",
                     pending_approval=interrupt_val,
                 )
@@ -413,37 +608,69 @@ class AgentService:
                     break
 
             if output:
-                self.session_service.add_message(
-                    thread_id, role="assistant", content=output, task_id=task.task_id, run_id=run.run_id
+                if is_chat_thread and effective_session_id is not None:
+                    self.session_service.add_message(
+                        effective_session_id,
+                        role="assistant",
+                        content=output,
+                        task_id=task.task_id,
+                        run_id=run.run_id,
+                    )
+                self.task_coordinator.update_task_metadata(
+                    task.task_id, result_summary=output[:500]
                 )
 
-            self.task_coordinator.complete_task_and_run(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+            self.task_coordinator.complete_task_and_run(
+                task.task_id, run.run_id, checkpoint_id=cp_id
+            )
+            self._safe_record_event(
+                task.task_id,
+                EventType.TASK_COMPLETED,
+                run_id=run.run_id,
+                payload={"checkpoint_id": cp_id},
+            )
             trace.finish(output=output, status="completed")
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
 
             return AgentExecutionResult(
-                thread_id=thread_id,
+                thread_id=effective_thread_id,
                 run_id=effective_run_id,
+                task_id=task.task_id,
                 status="completed",
                 output_text=output,
             )
 
         except asyncio.CancelledError:
-            self.task_coordinator.cancel_task_and_run(task.task_id, run.run_id, is_unknown=False, error_message="Cancelled")
+            self.task_coordinator.cancel_task_and_run(
+                task.task_id, run.run_id, is_unknown=False, error_message="Cancelled"
+            )
+            self._safe_record_event(
+                task.task_id,
+                EventType.TASK_CANCELLED,
+                run_id=run.run_id,
+                payload={"reason": "Cancelled"},
+            )
             trace.finish(output="", error="Cancelled", status="cancelled")
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             raise
         except Exception as e:  # noqa: BLE001
-            logger.error(f"Error during agent invocation on thread {thread_id}: {e}")
+            logger.error(f"Error during agent invocation on thread {effective_thread_id}: {e}")
             self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
+            self._safe_record_event(
+                task.task_id,
+                EventType.RUN_FAILED,
+                run_id=run.run_id,
+                payload={"error": str(e)},
+            )
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             return AgentExecutionResult(
-                thread_id=thread_id,
+                thread_id=effective_thread_id,
                 run_id=effective_run_id,
+                task_id=task.task_id,
                 status="error",
                 error=str(e),
             )
@@ -453,13 +680,28 @@ class AgentService:
         thread_id: str,
         user_message: str,
         run_id: str | None = None,
+        *,
+        task_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Stream token-by-token and tool execution steps from the StateGraph."""
         self._verify_event_loop()
+        existing_task: AgentTask | None = None
+        lock_key = thread_id
+        if task_id is not None:
+            existing_task = self._validate_task_executable(task_id)
+            lock_key = existing_task.thread_id
+
         task_token = self._begin_runtime_run()
         try:
-            async with self._acquire_thread_lock(thread_id):
-                inner = self._stream_agent_unlocked(thread_id, user_message, run_id=run_id)
+            async with self._acquire_thread_lock(lock_key):
+                if task_id is not None:
+                    existing_task = self._validate_task_executable(task_id)
+                inner = self._stream_agent_unlocked(
+                    lock_key,
+                    user_message,
+                    run_id=run_id,
+                    existing_task=existing_task,
+                )
                 try:
                     async for event in inner:
                         yield event
@@ -473,38 +715,73 @@ class AgentService:
         thread_id: str,
         user_message: str,
         run_id: str | None = None,
+        *,
+        existing_task: AgentTask | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Internal stream implementation executed under the per-thread lock."""
-        self.session_service.get_or_create_session(thread_id)
-        effective_run_id = set_trace_context(thread_id, run_id)
+        effective_session_id = (
+            existing_task.session_id if existing_task is not None else thread_id
+        )
+        effective_thread_id = (
+            existing_task.thread_id if existing_task is not None else thread_id
+        )
+        if effective_session_id is not None:
+            self.session_service.get_or_create_session(effective_session_id)
+
+        effective_run_id = set_trace_context(effective_thread_id, run_id)
         guard = get_route_guard()
         trace_store = self.trace_store or get_trace_store()
 
         runtime_id = self.hitl_manager.runtime_instance_id or "standalone"
-        task = self.task_coordinator.create_task(
-            session_id=thread_id,
-            thread_id=thread_id,
-            query=user_message,
-            runtime_id=runtime_id,
-        )
+        if existing_task is not None:
+            task = existing_task
+        else:
+            task = self.task_coordinator.create_task(
+                session_id=effective_session_id,
+                thread_id=effective_thread_id,
+                query=user_message,
+                runtime_id=runtime_id,
+            )
         run = self.task_coordinator.start_run(
             task_id=task.task_id,
             runtime_id=runtime_id,
             trigger_type=RunTriggerType.INITIAL,
             run_id=effective_run_id,
         )
+        self._safe_record_event(
+            task.task_id,
+            EventType.RUN_STARTED,
+            run_id=run.run_id,
+            payload={"run_seq": run.run_seq, "trigger_type": RunTriggerType.INITIAL.value, "runtime_id": runtime_id},
+        )
 
         trace = ConversationTrace(
-            session_id=thread_id,
+            session_id=effective_session_id,
             run_id=effective_run_id,
             task_id=task.task_id,
             query=user_message,
         )
-        trace.input_stage = {"query": user_message, "thread_id": thread_id, "task_id": task.task_id}
+        trace.input_stage = {
+            "query": user_message,
+            "thread_id": effective_thread_id,
+            "session_id": effective_session_id,
+            "task_id": task.task_id,
+        }
 
         # 1. Front-line Guard Evaluation (<50ms fast-path rule check)
+        is_chat_thread = (
+            existing_task is None
+            and effective_session_id is not None
+            and effective_thread_id == effective_session_id
+        )
         guard_start = time.time()
-        decision = guard.evaluate(user_message, thread_id)
+        if is_chat_thread and effective_session_id is not None:
+            decision = guard.evaluate(user_message, effective_session_id)
+        else:
+            decision = GuardDecision(
+                action=GuardAction.PASS_THROUGH,
+                matched_rule="task_execution_direct" if existing_task is not None else "standalone_task_direct",
+            )
         guard_ms = int((time.time() - guard_start) * 1000)
         trace.guard_stage = {
             "action": decision.action.value,
@@ -515,13 +792,31 @@ class AgentService:
         # Fast-Path Rule Direct Reply (0 tokens, <50ms return)
         if decision.action in (GuardAction.DIRECT_REPLY, GuardAction.HALT_TASK):
             reply_text = decision.reply_text or "已处理。"
-            self.session_service.add_message(
-                thread_id, role="user", content=user_message, task_id=task.task_id, run_id=run.run_id
-            )
-            self.session_service.add_message(
-                thread_id, role="assistant", content=reply_text, task_id=task.task_id, run_id=run.run_id
+            if is_chat_thread and effective_session_id is not None:
+                self.session_service.add_message(
+                    effective_session_id,
+                    role="user",
+                    content=user_message,
+                    task_id=task.task_id,
+                    run_id=run.run_id,
+                )
+                self.session_service.add_message(
+                    effective_session_id,
+                    role="assistant",
+                    content=reply_text,
+                    task_id=task.task_id,
+                    run_id=run.run_id,
+                )
+            self.task_coordinator.update_task_metadata(
+                task.task_id, result_summary=reply_text[:500]
             )
             self.task_coordinator.complete_task_and_run(task.task_id, run.run_id)
+            self._safe_record_event(
+                task.task_id,
+                EventType.TASK_COMPLETED,
+                run_id=run.run_id,
+                payload={"fast_path": True},
+            )
             trace.mark_ttft()
             trace.mark_ttfa()
             trace.finish(output=reply_text, status="rule_direct")
@@ -541,8 +836,9 @@ class AgentService:
             yield {
                 "event": "completed",
                 "data": {
-                    "thread_id": thread_id,
+                    "thread_id": effective_thread_id,
                     "run_id": effective_run_id,
+                    "task_id": task.task_id,
                     "output_text": reply_text,
                     "trace_id": trace.trace_id,
                     "fast_path": True,
@@ -552,16 +848,21 @@ class AgentService:
 
         # Regular StateGraph execution
         actual_input_message = decision.enriched_message or user_message
-        self.session_service.add_message(
-            thread_id, role="user", content=user_message, task_id=task.task_id, run_id=run.run_id
-        )
-        config = {"configurable": {"thread_id": thread_id}}
+        if is_chat_thread and effective_session_id is not None:
+            self.session_service.add_message(
+                effective_session_id,
+                role="user",
+                content=user_message,
+                task_id=task.task_id,
+                run_id=run.run_id,
+            )
+        config = {"configurable": {"thread_id": effective_thread_id}}
 
         # Check if state needs historical context from SQLite
         state_snapshot = await self.graph.aget_state(config)
         messages_input = [HumanMessage(content=actual_input_message)]
-        if not state_snapshot.values.get("messages"):
-            past_records = self.session_service.get_messages(thread_id)
+        if is_chat_thread and effective_session_id is not None and not state_snapshot.values.get("messages"):
+            past_records = self.session_service.get_messages(effective_session_id)
             if len(past_records) > 1:
                 history_msgs = []
                 for rec in past_records[:-1]:
@@ -573,19 +874,24 @@ class AgentService:
 
         trace.preload_stage = {
             "history_loaded_count": len(messages_input) - 1,
-            "sticky_context": guard.get_sticky_context(thread_id),
+            "sticky_context": (
+                guard.get_sticky_context(effective_session_id)
+                if is_chat_thread and effective_session_id is not None
+                else {}
+            ),
         }
 
         input_state = {
             "messages": messages_input,
             "run_context": {
-                "session_id": thread_id,
+                "thread_id": effective_thread_id,
+                "session_id": effective_session_id,
                 "run_id": effective_run_id,
                 "task_id": task.task_id,
             },
         }
 
-        thinking_engine = ThinkingEngine(thread_id)
+        thinking_engine = ThinkingEngine(effective_thread_id)
         # Phase 1: Emit immediate understanding event (<100ms)
         await thinking_engine.emit_understand("正在理解您的指令并分析上下文...")
         trace.mark_ttft()
@@ -623,6 +929,12 @@ class AgentService:
                     t_input = event.get("data", {}).get("input")
                     active_tools[t_name] = (time.time(), t_input)
                     self.task_coordinator.set_task_status(task.task_id, TaskStatus.EXECUTING_TOOL)
+                    self._safe_record_event(
+                        task.task_id,
+                        EventType.TOOL_STARTED,
+                        run_id=run.run_id,
+                        payload={"tool": t_name},
+                    )
                     await thinking_engine.emit_tool_start(t_name, t_input)
                     for ev in await thinking_engine.get_queued_events():
                         yield ev
@@ -642,6 +954,12 @@ class AgentService:
                     t_duration_ms = int((time.time() - start_t) * 1000)
                     if not active_tools:
                         self.task_coordinator.set_task_status(task.task_id, TaskStatus.RUNNING)
+                    self._safe_record_event(
+                        task.task_id,
+                        EventType.TOOL_COMPLETED,
+                        run_id=run.run_id,
+                        payload={"tool": t_name, "duration_ms": t_duration_ms},
+                    )
 
                     trace.add_step(
                         step_type="tool",
@@ -683,6 +1001,12 @@ class AgentService:
                         interrupt_val = t.interrupts[0].value
                         break
                 self.task_coordinator.pause_for_approval(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                self._safe_record_event(
+                    task.task_id,
+                    EventType.APPROVAL_REQUIRED,
+                    run_id=run.run_id,
+                    payload={"checkpoint_id": checkpoint_id},
+                )
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
                 trace_store.prune_old_traces()
@@ -698,11 +1022,25 @@ class AgentService:
                         output = str(m.content)
                         break
                 if output:
-                    self.session_service.add_message(
-                        thread_id, role="assistant", content=output, task_id=task.task_id, run_id=run.run_id
+                    if effective_session_id is not None and task.thread_id == effective_session_id:
+                        self.session_service.add_message(
+                            effective_session_id,
+                            role="assistant",
+                            content=output,
+                            task_id=task.task_id,
+                            run_id=run.run_id,
+                        )
+                    self.task_coordinator.update_task_metadata(
+                        task.task_id, result_summary=output[:500]
                     )
 
                 self.task_coordinator.complete_task_and_run(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                self._safe_record_event(
+                    task.task_id,
+                    EventType.TASK_COMPLETED,
+                    run_id=run.run_id,
+                    payload={"checkpoint_id": checkpoint_id},
+                )
                 trace.finish(output=output, status="completed")
                 trace_store.save_trace(trace)
                 trace_store.prune_old_traces()
@@ -710,8 +1048,9 @@ class AgentService:
                 yield {
                     "event": "completed",
                     "data": {
-                        "thread_id": thread_id,
+                        "thread_id": effective_thread_id,
                         "run_id": effective_run_id,
+                        "task_id": task.task_id,
                         "output_text": output,
                         "trace_id": trace.trace_id,
                         "ttft_ms": trace.ttft_ms,
@@ -729,6 +1068,12 @@ class AgentService:
                 is_unknown=is_unknown,
                 error_message="Client disconnected during streaming execution",
             )
+            self._safe_record_event(
+                task.task_id,
+                EventType.TASK_CANCELLED,
+                run_id=run.run_id,
+                payload={"is_unknown": is_unknown},
+            )
             trace.finish(
                 output="",
                 error="Client disconnected during streaming execution",
@@ -739,8 +1084,14 @@ class AgentService:
             raise
         except Exception as e:  # noqa: BLE001
             thinking_engine.close()
-            logger.error(f"Error during streaming execution on thread {thread_id}: {e}")
+            logger.error(f"Error during streaming execution on thread {effective_thread_id}: {e}")
             self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
+            self._safe_record_event(
+                task.task_id,
+                EventType.RUN_FAILED,
+                run_id=run.run_id,
+                payload={"error": str(e)},
+            )
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
@@ -774,7 +1125,10 @@ class AgentService:
             return False
 
         clean_tid = thread_id.strip()
-        if self.session_service.get_session(clean_tid) is None:
+        if (
+            self.session_service.get_session(clean_tid) is None
+            and self.task_coordinator.get_task_by_thread_id(clean_tid) is None
+        ):
             return False
 
         if (
@@ -809,7 +1163,12 @@ class AgentService:
             return False
 
         run_ctx = (state_snapshot.values or {}).get("run_context") or {}
-        if not isinstance(run_ctx, dict) or run_ctx.get("session_id") != clean_tid:
+        if not isinstance(run_ctx, dict):
+            return False
+        ctx_tid = run_ctx.get("thread_id")
+        if ctx_tid is None:
+            ctx_tid = run_ctx.get("session_id")
+        if ctx_tid != clean_tid:
             return False
 
         for task in state_snapshot.tasks or ():
@@ -866,6 +1225,24 @@ class AgentService:
             return "Cannot overwrite persisted modified arguments"
         return None
 
+    async def resume_task_approval(
+        self,
+        task_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+    ) -> AgentExecutionResult:
+        """Resume an interrupted Task by approval decision using the task's isolated thread_id."""
+        task = self.task_coordinator.get_task(task_id)
+        if task is None:
+            raise KeyError(f"Task not found: {task_id}")
+        if task.archived_at is not None:
+            raise ValueError(f"Task '{task_id}' is archived and cannot be resumed")
+        return await self.resume_approval(
+            thread_id=task.thread_id,
+            approval_id=approval_id,
+            decision=decision,
+        )
+
     async def resume_approval(
         self,
         thread_id: str,
@@ -917,21 +1294,37 @@ class AgentService:
         if task is None:
             task = self.task_coordinator.get_active_task_for_thread(thread_id)
         if task is None:
+            task = self.task_coordinator.get_task_by_thread_id(thread_id)
+        if task is None:
             task = self.task_coordinator.create_task(
                 session_id=thread_id,
                 thread_id=thread_id,
                 query=f"Resume approval {approval_id}",
                 runtime_id=runtime_id,
             )
+        effective_session_id = task.session_id
+
         run = self.task_coordinator.start_run(
             task_id=task.task_id,
             runtime_id=runtime_id,
             trigger_type=RunTriggerType.HITL_RESUME,
             run_id=effective_run_id,
         )
+        self._safe_record_event(
+            task.task_id,
+            EventType.APPROVAL_RESOLVED,
+            run_id=run.run_id,
+            payload={"approval_id": approval_id, "decision": decision.decision},
+        )
+        self._safe_record_event(
+            task.task_id,
+            EventType.RUN_RESUMED,
+            run_id=run.run_id,
+            payload={"run_seq": run.run_seq, "trigger_type": RunTriggerType.HITL_RESUME.value},
+        )
 
         trace = ConversationTrace(
-            session_id=thread_id,
+            session_id=effective_session_id,
             run_id=effective_run_id,
             task_id=task.task_id,
             query=f"[Resume Approval: {approval_id}]",
@@ -939,6 +1332,7 @@ class AgentService:
         trace.input_stage = {
             "query": f"[Resume Approval: {approval_id}]",
             "thread_id": thread_id,
+            "session_id": effective_session_id,
             "task_id": task.task_id,
             "decision": decision.decision,
         }
@@ -970,12 +1364,19 @@ class AgentService:
                         interrupt_val = t.interrupts[0].value
                         break
                 self.task_coordinator.pause_for_approval(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                self._safe_record_event(
+                    task.task_id,
+                    EventType.APPROVAL_REQUIRED,
+                    run_id=run.run_id,
+                    payload={"checkpoint_id": checkpoint_id},
+                )
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
                 trace_store.prune_old_traces()
                 return AgentExecutionResult(
                     thread_id=thread_id,
                     run_id=effective_run_id,
+                    task_id=task.task_id,
                     status="interrupted",
                     pending_approval=interrupt_val,
                 )
@@ -988,11 +1389,25 @@ class AgentService:
                     break
 
             if output:
-                self.session_service.add_message(
-                    thread_id, role="assistant", content=output, task_id=task.task_id, run_id=run.run_id
+                if effective_session_id is not None and task.thread_id == effective_session_id:
+                    self.session_service.add_message(
+                        effective_session_id,
+                        role="assistant",
+                        content=output,
+                        task_id=task.task_id,
+                        run_id=run.run_id,
+                    )
+                self.task_coordinator.update_task_metadata(
+                    task.task_id, result_summary=output[:500]
                 )
 
             self.task_coordinator.complete_task_and_run(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+            self._safe_record_event(
+                task.task_id,
+                EventType.TASK_COMPLETED,
+                run_id=run.run_id,
+                payload={"checkpoint_id": checkpoint_id},
+            )
             trace.finish(output=output, status="completed")
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
@@ -1000,12 +1415,19 @@ class AgentService:
             return AgentExecutionResult(
                 thread_id=thread_id,
                 run_id=effective_run_id,
+                task_id=task.task_id,
                 status="completed",
                 output_text=output,
             )
         except asyncio.CancelledError:
             self.task_coordinator.cancel_task_and_run(
                 task.task_id, run.run_id, is_unknown=False, error_message="Cancelled"
+            )
+            self._safe_record_event(
+                task.task_id,
+                EventType.TASK_CANCELLED,
+                run_id=run.run_id,
+                payload={"reason": "Cancelled"},
             )
             trace.finish(output="", error="Cancelled", status="cancelled")
             trace_store.save_trace(trace)
@@ -1014,12 +1436,19 @@ class AgentService:
         except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to resume thread {thread_id}: {e}")
             self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
+            self._safe_record_event(
+                task.task_id,
+                EventType.RUN_FAILED,
+                run_id=run.run_id,
+                payload={"error": str(e)},
+            )
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             return AgentExecutionResult(
                 thread_id=thread_id,
                 run_id=effective_run_id,
+                task_id=task.task_id,
                 status="error",
                 error=str(e),
             )
@@ -1072,21 +1501,37 @@ class AgentService:
         if task is None:
             task = self.task_coordinator.get_active_task_for_thread(thread_id)
         if task is None:
+            task = self.task_coordinator.get_task_by_thread_id(thread_id)
+        if task is None:
             task = self.task_coordinator.create_task(
                 session_id=thread_id,
                 thread_id=thread_id,
                 query=f"Resume approval {approval_id}",
                 runtime_id=runtime_id,
             )
+        effective_session_id = task.session_id
+
         run = self.task_coordinator.start_run(
             task_id=task.task_id,
             runtime_id=runtime_id,
             trigger_type=RunTriggerType.HITL_RESUME,
             run_id=effective_run_id,
         )
+        self._safe_record_event(
+            task.task_id,
+            EventType.APPROVAL_RESOLVED,
+            run_id=run.run_id,
+            payload={"approval_id": approval_id, "decision": decision.decision},
+        )
+        self._safe_record_event(
+            task.task_id,
+            EventType.RUN_RESUMED,
+            run_id=run.run_id,
+            payload={"run_seq": run.run_seq, "trigger_type": RunTriggerType.HITL_RESUME.value},
+        )
 
         trace = ConversationTrace(
-            session_id=thread_id,
+            session_id=effective_session_id,
             run_id=effective_run_id,
             task_id=task.task_id,
             query=f"[Resume Approval: {approval_id}]",
@@ -1094,6 +1539,7 @@ class AgentService:
         trace.input_stage = {
             "query": f"[Resume Approval: {approval_id}]",
             "thread_id": thread_id,
+            "session_id": effective_session_id,
             "task_id": task.task_id,
             "decision": decision.decision,
         }
@@ -1163,6 +1609,12 @@ class AgentService:
                         interrupt_val = t.interrupts[0].value
                         break
                 self.task_coordinator.pause_for_approval(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                self._safe_record_event(
+                    task.task_id,
+                    EventType.APPROVAL_REQUIRED,
+                    run_id=run.run_id,
+                    payload={"checkpoint_id": checkpoint_id},
+                )
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
                 trace_store.prune_old_traces()
@@ -1178,11 +1630,25 @@ class AgentService:
                         output = str(m.content)
                         break
                 if output:
-                    self.session_service.add_message(
-                        thread_id, role="assistant", content=output, task_id=task.task_id, run_id=run.run_id
+                    if effective_session_id is not None and task.thread_id == effective_session_id:
+                        self.session_service.add_message(
+                            effective_session_id,
+                            role="assistant",
+                            content=output,
+                            task_id=task.task_id,
+                            run_id=run.run_id,
+                        )
+                    self.task_coordinator.update_task_metadata(
+                        task.task_id, result_summary=output[:500]
                     )
 
                 self.task_coordinator.complete_task_and_run(task.task_id, run.run_id, checkpoint_id=checkpoint_id)
+                self._safe_record_event(
+                    task.task_id,
+                    EventType.TASK_COMPLETED,
+                    run_id=run.run_id,
+                    payload={"checkpoint_id": checkpoint_id},
+                )
                 trace.finish(output=output, status="completed")
                 trace_store.save_trace(trace)
                 trace_store.prune_old_traces()
@@ -1191,6 +1657,7 @@ class AgentService:
                     "data": {
                         "thread_id": thread_id,
                         "run_id": effective_run_id,
+                        "task_id": task.task_id,
                         "output_text": output,
                         "trace_id": trace.trace_id,
                     },
@@ -1203,6 +1670,12 @@ class AgentService:
                 is_unknown=is_unknown,
                 error_message="Client disconnected during streaming resume",
             )
+            self._safe_record_event(
+                task.task_id,
+                EventType.TASK_CANCELLED,
+                run_id=run.run_id,
+                payload={"is_unknown": is_unknown},
+            )
             trace.finish(
                 output="",
                 error="Client disconnected during streaming resume",
@@ -1214,6 +1687,12 @@ class AgentService:
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error during streaming resume on thread {thread_id}: {e}")
             self.task_coordinator.fail_task_and_run(task.task_id, run.run_id, error_message=str(e))
+            self._safe_record_event(
+                task.task_id,
+                EventType.RUN_FAILED,
+                run_id=run.run_id,
+                payload={"error": str(e)},
+            )
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()

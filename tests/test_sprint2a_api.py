@@ -251,3 +251,40 @@ def test_api_task_archive_and_explicit_purge(client: TestClient):
     assert purge_resp.json()["status"] == "purged"
     assert client.get(f"/api/v1/tasks/{task_id}").status_code == 404
     assert client.get(f"/api/v1/deliverables/{deliv.deliverable_id}").status_code == 404
+
+
+def test_api_execute_standalone_task_endpoint(client: TestClient):
+    """POST /api/v1/tasks/{id}/execute runs an independent task via active AgentRuntime."""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage
+
+    from jarvis_studio.agent.graph import build_agent_graph
+    from jarvis_studio.core.tasks.models import TaskStatus
+    from jarvis_studio.service.agent_service import get_agent_service
+
+    class _FakeModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    svc = get_agent_service()
+    svc.graph = build_agent_graph(
+        model=_FakeModel(responses=[AIMessage(content="API executed standalone output")]),
+        checkpointer=svc.graph.checkpointer,
+        hitl_mgr=svc.hitl_manager,
+    )
+
+    t_resp = client.post("/api/v1/tasks", json={"query": "Execute via REST API"})
+    assert t_resp.status_code == 201
+    task_id = t_resp.json()["task_id"]
+
+    exec_resp = client.post(f"/api/v1/tasks/{task_id}/execute")
+    assert exec_resp.status_code == 200
+    exec_data = exec_resp.json()
+    assert exec_data["status"] == "completed"
+    assert exec_data["task_id"] == task_id
+    assert exec_data["output_text"] == "API executed standalone output"
+
+    assert client.post("/api/v1/tasks/task_missing_999/execute").status_code == 404
+
+    get_task_coordinator().set_task_status(task_id, TaskStatus.UNKNOWN)
+    assert client.post(f"/api/v1/tasks/{task_id}/execute").status_code == 409

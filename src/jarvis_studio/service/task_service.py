@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from jarvis_studio.agent.hitl.models import ApprovalDecision
+    from jarvis_studio.service.agent_service import AgentExecutionResult, AgentService
 
 from jarvis_studio.config import get_settings
 from jarvis_studio.core.tasks.coordinator import TaskCoordinator, get_task_coordinator
@@ -272,6 +276,48 @@ class TaskService:
     def list_events(self, task_id: str, *, since_seq: int = 0, limit: int = 100) -> list[EventRecord]:
         """Fetch observable business events for task after since_seq."""
         return self.coordinator.list_events_for_task(task_id, since_seq=since_seq, limit=limit)
+
+    async def execute_task(
+        self,
+        task_id: str,
+        *,
+        agent_service: AgentService | None = None,
+        user_message: str | None = None,
+        run_id: str | None = None,
+        trigger_type: RunTriggerType = RunTriggerType.INITIAL,
+        checkpoint_id: str | None = None,
+        fresh_checkpoint: bool = False,
+    ) -> AgentExecutionResult:
+        """Execute a Task directly through AgentService / AgentRuntime."""
+        from jarvis_studio.service.agent_service import get_agent_service
+
+        svc = agent_service or get_agent_service()
+        return await svc.execute_task(
+            task_id,
+            user_message=user_message,
+            run_id=run_id,
+            trigger_type=trigger_type,
+            checkpoint_id=checkpoint_id,
+            fresh_checkpoint=fresh_checkpoint,
+        )
+
+    async def resume_task_approval(
+        self,
+        task_id: str,
+        approval_id: str,
+        decision: ApprovalDecision,
+        *,
+        agent_service: AgentService | None = None,
+    ) -> AgentExecutionResult:
+        """Resume an interrupted Task approval through AgentService / AgentRuntime."""
+        from jarvis_studio.service.agent_service import get_agent_service
+
+        svc = agent_service or get_agent_service()
+        return await svc.resume_task_approval(
+            task_id,
+            approval_id=approval_id,
+            decision=decision,
+        )
 
 
 _default_task_service: TaskService | None = None

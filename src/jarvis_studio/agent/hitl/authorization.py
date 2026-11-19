@@ -29,13 +29,16 @@ def extract_valid_thread_id(state: AgentState | dict[str, Any]) -> str | None:
     """Extract and validate a real thread_id from execution state.
 
     Shared authoritative identity rule used by both approval_gate and executor:
-    - Requires a dict `run_context` containing a non-empty string `session_id`.
+    - Requires a dict `run_context` containing a non-empty string `thread_id` (or
+      legacy `session_id` when `thread_id` is omitted).
     - Explicitly rejects the reserved placeholder `'default'`.
     """
     run_context = state.get("run_context") if isinstance(state, dict) else None
     if not isinstance(run_context, dict):
         return None
-    raw_tid = run_context.get("session_id")
+    raw_tid = run_context.get("thread_id")
+    if raw_tid is None:
+        raw_tid = run_context.get("session_id")
     if not isinstance(raw_tid, str):
         return None
     cleaned = raw_tid.strip()

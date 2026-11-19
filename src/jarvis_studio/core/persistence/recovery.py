@@ -47,8 +47,10 @@ def _extract_active_interrupt_approval_ids(
     if isinstance(channel_values, dict):
         run_ctx = channel_values.get("run_context")
         if isinstance(run_ctx, dict):
-            sess_id = run_ctx.get("session_id")
-            if sess_id != expected_thread_id:
+            ctx_tid = run_ctx.get("thread_id")
+            if ctx_tid is None:
+                ctx_tid = run_ctx.get("session_id")
+            if ctx_tid != expected_thread_id:
                 return set()
 
     active_ids: set[str] = set()
