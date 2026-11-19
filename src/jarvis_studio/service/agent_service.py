@@ -169,6 +169,7 @@ class AgentService:
     ):
         self.session_service = session_service or get_session_service()
         self.hitl_manager = hitl_manager or get_hitl_manager()
+        self._explicit_task_coordinator = task_coordinator is not None
         if task_coordinator is not None:
             self._task_coordinator = task_coordinator
         elif self.session_service is not None:
@@ -190,11 +191,18 @@ class AgentService:
         if self._task_coordinator is None:
             db_path = self.session_service.db_path if self.session_service else None
             self._task_coordinator = TaskCoordinator(db_path=db_path)
+        elif (
+            not self._explicit_task_coordinator
+            and self.session_service is not None
+            and getattr(self._task_coordinator, "db_path", None) != self.session_service.db_path
+        ):
+            self._task_coordinator = TaskCoordinator(db_path=self.session_service.db_path)
         return self._task_coordinator
 
     @task_coordinator.setter
     def task_coordinator(self, value: TaskCoordinator) -> None:
         self._task_coordinator = value
+        self._explicit_task_coordinator = True
 
     def _begin_runtime_run(self) -> asyncio.Task[Any] | None:
         if self._run_begin_hook is not None:

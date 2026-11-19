@@ -310,7 +310,6 @@ def create_tool_executor_node(
                                     tool_call_id=target_call_id,
                                     outcome_status=ExecutionOutcomeStatus.UNKNOWN,
                                     error_message="Task execution cancelled in flight (asyncio.CancelledError)",
-                                    error="Task execution cancelled in flight (asyncio.CancelledError)",
                                 )
                             except Exception as unk_exc:  # noqa: BLE001
                                 logger.error(

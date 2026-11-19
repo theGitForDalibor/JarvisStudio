@@ -149,20 +149,37 @@ class TaskCoordinator:
         """Insert a new task into `agent_tasks`."""
         effective_task_id = task_id or f"task_{uuid.uuid4().hex[:12]}"
         effective_thread_id = thread_id or effective_task_id
-        task = AgentTask(
-            task_id=effective_task_id,
-            session_id=session_id,
-            thread_id=effective_thread_id,
-            status=TaskStatus.CREATED,
-            query=query,
-            initiator=initiator,
-            assigned_agent_id=assigned_agent_id,
-            plan_json=plan_json,
-            priority=priority,
-            result_summary=result_summary,
-            runtime_id=runtime_id,
-        )
+        effective_session_id = session_id
+
         with self._tx() as conn:
+            if effective_session_id is not None:
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                if "chat_sessions" in tables:
+                    row = conn.execute(
+                        "SELECT 1 FROM chat_sessions WHERE session_id = ?",
+                        (effective_session_id,),
+                    ).fetchone()
+                    if row is None:
+                        _logger.debug(
+                            "Session '%s' does not exist in chat_sessions; creating task independently with session_id=None",
+                            effective_session_id,
+                        )
+                        effective_session_id = None
+
+            task = AgentTask(
+                task_id=effective_task_id,
+                session_id=effective_session_id,
+                thread_id=effective_thread_id,
+                status=TaskStatus.CREATED,
+                query=query,
+                initiator=initiator,
+                assigned_agent_id=assigned_agent_id,
+                plan_json=plan_json,
+                priority=priority,
+                result_summary=result_summary,
+                runtime_id=runtime_id,
+            )
+
             cols = [r[1] for r in conn.execute("PRAGMA table_info(agent_tasks)").fetchall()]
             if "assigned_agent_id" in cols:
                 conn.execute(
