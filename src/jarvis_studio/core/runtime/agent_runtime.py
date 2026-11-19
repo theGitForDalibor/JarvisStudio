@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from jarvis_studio.agent.hitl.manager import HITLManager
     from jarvis_studio.config.settings import Settings
     from jarvis_studio.core.persistence.recovery import StartupRecoveryReport
+    from jarvis_studio.core.runtime.execution_engine import ExecutionEngine
     from jarvis_studio.core.tasks.coordinator import TaskCoordinator
     from jarvis_studio.service.agent_service import AgentService
     from jarvis_studio.tools.registry import ToolRegistry
@@ -175,6 +176,7 @@ class AgentRuntime:
         self._trace_store: Any | None = None
         self._recovery_report: StartupRecoveryReport | None = None
         self._agent_service: AgentService | None = None
+        self._execution_engine: ExecutionEngine | None = None
         self._mcp_manager: Any | None = None
         self._active_tasks: dict[asyncio.Task[Any], int] = {}
         self._closed_store_ids: set[int] = set()
@@ -255,6 +257,15 @@ class AgentRuntime:
                 f"AgentRuntime is not ready (state={self._state.value}); cannot access AgentService"
             )
         return self._agent_service
+
+    @property
+    def execution_engine(self) -> ExecutionEngine:
+        """Bound `ExecutionEngine` managed by this runtime."""
+        if self._execution_engine is None or self._state != RuntimeState.READY:
+            raise RuntimeError(
+                f"AgentRuntime is not ready (state={self._state.value}); cannot access ExecutionEngine"
+            )
+        return self._execution_engine
 
     def _begin_run(self) -> asyncio.Task[Any] | None:
         """Gate and register an active run task while `READY`, failing closed otherwise."""
@@ -388,8 +399,21 @@ class AgentRuntime:
                 run_end_hook=self._end_run,
             )
             self._state = RuntimeState.READY
+            from jarvis_studio.core.runtime.execution_engine import (
+                ExecutionEngine,
+                set_execution_engine,
+            )
+
+            max_concurrency = getattr(self._settings.app, "max_concurrent_tasks", 4)
+            self._execution_engine = ExecutionEngine(
+                coordinator=task_coord,
+                agent_service=self._agent_service,
+                max_concurrency=max_concurrency,
+            )
+            await self._execution_engine.start()
             if self._register_as_active:
                 set_active_runtime(self)
+                set_execution_engine(self._execution_engine)
             logger.info(
                 f"AgentRuntime started (instance_id={self.instance_id}, backend={backend})"
             )
@@ -527,6 +551,13 @@ class AgentRuntime:
 
         self._state = RuntimeState.SHUTTING_DOWN
 
+        # 0. Shut down ExecutionEngine workers and cancel queued/running tasks
+        if self._execution_engine is not None:
+            try:
+                await self._execution_engine.shutdown(timeout=self._drain_timeout)
+            except Exception as eng_exc:  # noqa: BLE001
+                logger.warning(f"Error shutting down ExecutionEngine: {eng_exc}")
+
         # 1. Stop new runs & confirm all active tasks terminated BEFORE tearing down resources.
         # Any TimeoutError or CancelledError aborts here, retaining lock & resources for retry.
         await self._drain_active_runs()
@@ -582,6 +613,9 @@ class AgentRuntime:
 
             if lock_released:
                 self._state = RuntimeState.CLOSED
+                if self._register_as_active:
+                    from jarvis_studio.core.runtime.execution_engine import reset_global_execution_engine
+                    reset_global_execution_engine()
                 logger.info(f"AgentRuntime closed (instance_id={self.instance_id})")
         else:
             incomplete_parts: list[str] = []

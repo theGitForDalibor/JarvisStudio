@@ -187,13 +187,7 @@ class AgentService:
 
     @property
     def task_coordinator(self) -> TaskCoordinator:
-        if (
-            self._task_coordinator is None
-            or (
-                self.session_service is not None
-                and self._task_coordinator.db_path != self.session_service.db_path
-            )
-        ):
+        if self._task_coordinator is None:
             db_path = self.session_service.db_path if self.session_service else None
             self._task_coordinator = TaskCoordinator(db_path=db_path)
         return self._task_coordinator
@@ -266,7 +260,9 @@ class AgentService:
             hitl_mgr=self.hitl_manager,
         )
 
-    def _validate_task_executable(self, task_id: str) -> AgentTask:
+    def _validate_task_executable(
+        self, task_id: str, *, allow_queued: bool = False
+    ) -> AgentTask:
         """Validate that an explicit task exists, is unarchived, and is eligible for execution."""
         task = self.task_coordinator.get_task(task_id)
         if task is None:
@@ -278,11 +274,15 @@ class AgentService:
                 f"Task '{task_id}' is in UNKNOWN state due to uncertain external side effects "
                 "and cannot be automatically re-executed."
             )
-        if task.status in (
+        blocked = [
             TaskStatus.RUNNING,
             TaskStatus.EXECUTING_TOOL,
             TaskStatus.WAITING_APPROVAL,
-        ):
+            TaskStatus.CANCELLING,
+        ]
+        if not allow_queued:
+            blocked.append(TaskStatus.QUEUED)
+        if task.status in blocked:
             raise ValueError(
                 f"Task '{task_id}' cannot be executed while in state '{task.status.value}'"
             )
@@ -346,14 +346,15 @@ class AgentService:
         trigger_type: RunTriggerType = RunTriggerType.INITIAL,
         checkpoint_id: str | None = None,
         fresh_checkpoint: bool = False,
+        allow_queued: bool = False,
     ) -> AgentExecutionResult:
         """Execute an existing standalone or session-linked Task on its isolated thread_id."""
         self._verify_event_loop()
-        task_preview = self._validate_task_executable(task_id)
+        task_preview = self._validate_task_executable(task_id, allow_queued=allow_queued)
         task_token = self._begin_runtime_run()
         try:
             async with self._acquire_thread_lock(task_preview.thread_id):
-                locked_task = self._validate_task_executable(task_id)
+                locked_task = self._validate_task_executable(task_id, allow_queued=allow_queued)
                 effective_query = (
                     user_message.strip()
                     if isinstance(user_message, str) and user_message.strip()
@@ -642,16 +643,33 @@ class AgentService:
             )
 
         except asyncio.CancelledError:
+            is_unknown = False
+            try:
+                if (
+                    self.hitl_manager
+                    and hasattr(self.hitl_manager, "store")
+                    and self.hitl_manager.store is not None
+                ):
+                    unfinalized = self.hitl_manager.store.mark_run_in_flight_outcomes_unknown(run.run_id)
+                    if unfinalized > 0:
+                        is_unknown = True
+            except Exception:
+                pass
+
             self.task_coordinator.cancel_task_and_run(
-                task.task_id, run.run_id, is_unknown=False, error_message="Cancelled"
+                task.task_id, run.run_id, is_unknown=is_unknown, error_message="Cancelled"
             )
             self._safe_record_event(
                 task.task_id,
                 EventType.TASK_CANCELLED,
                 run_id=run.run_id,
-                payload={"reason": "Cancelled"},
+                payload={"reason": "Cancelled", "is_unknown": is_unknown},
             )
-            trace.finish(output="", error="Cancelled", status="cancelled")
+            trace.finish(
+                output="",
+                error="Cancelled",
+                status="unknown" if is_unknown else "cancelled",
+            )
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             raise
@@ -1420,16 +1438,33 @@ class AgentService:
                 output_text=output,
             )
         except asyncio.CancelledError:
+            is_unknown = False
+            try:
+                if (
+                    self.hitl_manager
+                    and hasattr(self.hitl_manager, "store")
+                    and self.hitl_manager.store is not None
+                ):
+                    unfinalized = self.hitl_manager.store.mark_run_in_flight_outcomes_unknown(run.run_id)
+                    if unfinalized > 0:
+                        is_unknown = True
+            except Exception:
+                pass
+
             self.task_coordinator.cancel_task_and_run(
-                task.task_id, run.run_id, is_unknown=False, error_message="Cancelled"
+                task.task_id, run.run_id, is_unknown=is_unknown, error_message="Cancelled"
             )
             self._safe_record_event(
                 task.task_id,
                 EventType.TASK_CANCELLED,
                 run_id=run.run_id,
-                payload={"reason": "Cancelled"},
+                payload={"reason": "Cancelled", "is_unknown": is_unknown},
             )
-            trace.finish(output="", error="Cancelled", status="cancelled")
+            trace.finish(
+                output="",
+                error="Cancelled",
+                status="unknown" if is_unknown else "cancelled",
+            )
             trace_store.save_trace(trace)
             trace_store.prune_old_traces()
             raise

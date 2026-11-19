@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from jarvis_studio.core.tasks.models import AgentRun, AgentTask, DeliverableRecord, EventRecord
@@ -29,6 +30,25 @@ class CancelTaskRequest(BaseModel):
     """Payload to cancel an active task."""
 
     reason: str = Field(default="Cancelled by user", description="Reason for cancelling the task")
+
+
+class PauseTaskRequest(BaseModel):
+    """Payload to pause an active task."""
+
+    reason: str = Field(default="Paused by user", description="Reason for pausing the task")
+
+
+class ResumeTaskRequest(BaseModel):
+    """Payload to resume a paused or interrupted task."""
+
+    checkpoint_id: str | None = Field(default=None, description="Optional checkpoint to resume from")
+
+
+class AppendInstructionRequest(BaseModel):
+    """Payload to append follow-up user instruction to an existing task."""
+
+    instruction: str = Field(..., min_length=1, description="Follow-up instruction for the task")
+    checkpoint_id: str | None = Field(default=None, description="Optional checkpoint to build upon")
 
 
 class ExecuteTaskRequest(BaseModel):
@@ -109,20 +129,89 @@ async def cancel_task(
     task_service = get_task_service()
     reason = request.reason if request else "Cancelled by user"
     try:
-        return task_service.cancel_task(task_id, reason=reason)
+        return await task_service.cancel_task_async(task_id, reason=reason)
     except KeyError as err:
         raise HTTPException(status_code=404, detail=str(err)) from err
+
+
+@router.post("/{task_id}/pause", response_model=AgentTask)
+async def pause_task(
+    task_id: str,
+    request: PauseTaskRequest | None = None,
+) -> AgentTask:
+    """Pause an active or queued task."""
+    task_service = get_task_service()
+    reason = request.reason if request else "Paused by user"
+    try:
+        return await task_service.pause_task(task_id, reason=reason)
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err)) from err
+    except (ValueError, RuntimeError) as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
+
+
+@router.post("/{task_id}/resume", response_model=AgentRun)
+async def resume_task(
+    task_id: str,
+    request: ResumeTaskRequest | None = None,
+) -> AgentRun:
+    """Resume a paused or interrupted task with a new run inheriting the checkpoint."""
+    task_service = get_task_service()
+    checkpoint_id = request.checkpoint_id if request else None
+    try:
+        return await task_service.resume_task(task_id, checkpoint_id=checkpoint_id)
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err)) from err
+    except (ValueError, RuntimeError) as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
+
+
+@router.post("/{task_id}/append-instruction", response_model=AgentRun)
+async def append_instruction(
+    task_id: str,
+    request: AppendInstructionRequest,
+) -> AgentRun:
+    """Append a follow-up instruction to an existing task and queue a new run."""
+    task_service = get_task_service()
+    try:
+        return await task_service.append_instruction(
+            task_id,
+            request.instruction,
+            checkpoint_id=request.checkpoint_id,
+        )
+    except KeyError as err:
+        raise HTTPException(status_code=404, detail=str(err)) from err
+    except (ValueError, RuntimeError) as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
 
 
 @router.post("/{task_id}/execute", response_model=dict[str, Any])
 async def execute_task(
     task_id: str,
     request: ExecuteTaskRequest | None = None,
-) -> dict[str, Any]:
-    """Execute a task directly via AgentRuntime / AgentService."""
+    background: bool = Query(default=False, description="Whether to execute asynchronously in background"),
+) -> Any:
+    """Execute a task directly via AgentRuntime / AgentService, or queue it for background processing."""
     task_service = get_task_service()
     payload = request or ExecuteTaskRequest()
     try:
+        if background:
+            run, _ = await task_service.submit_task(
+                task_id,
+                user_message=payload.user_message,
+                fresh_checkpoint=payload.fresh_checkpoint,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content={
+                    "task_id": task_id,
+                    "run_id": run.run_id,
+                    "status": run.status.value,
+                    "run_seq": run.run_seq,
+                    "trigger_type": run.trigger_type.value,
+                },
+            )
+
         result = await task_service.execute_task(
             task_id,
             user_message=payload.user_message,

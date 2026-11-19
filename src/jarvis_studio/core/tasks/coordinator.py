@@ -219,6 +219,62 @@ class TaskCoordinator:
                 )
         return task
 
+    def queue_run(
+        self,
+        task_id: str,
+        runtime_id: str,
+        *,
+        trigger_type: RunTriggerType = RunTriggerType.INITIAL,
+        run_id: str | None = None,
+        checkpoint_id: str | None = None,
+    ) -> AgentRun:
+        """Create and queue a run in QUEUED status under task_id."""
+        now = time.time()
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(run_seq), 0) FROM agent_runs WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            next_seq = int(row[0]) + 1 if row is not None and row[0] is not None else 1
+
+            run = AgentRun(
+                run_id=run_id or f"run_{uuid.uuid4().hex[:12]}",
+                task_id=task_id,
+                run_seq=next_seq,
+                trigger_type=trigger_type,
+                status=RunStatus.QUEUED,
+                runtime_id=runtime_id,
+                started_at=now,
+                checkpoint_id=checkpoint_id,
+            )
+            conn.execute(
+                """
+                INSERT INTO agent_runs (
+                    run_id, task_id, run_seq, trigger_type, status,
+                    runtime_id, started_at, checkpoint_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.run_id,
+                    run.task_id,
+                    run.run_seq,
+                    run.trigger_type.value,
+                    run.status.value,
+                    run.runtime_id,
+                    run.started_at,
+                    run.checkpoint_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE agent_tasks
+                SET current_run_id = ?, status = ?, runtime_id = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (run.run_id, TaskStatus.QUEUED.value, runtime_id, now, task_id),
+            )
+        return run
+
     def start_run(
         self,
         task_id: str,
@@ -228,9 +284,44 @@ class TaskCoordinator:
         run_id: str | None = None,
         checkpoint_id: str | None = None,
     ) -> AgentRun:
-        """Create and start a new run under the given task, bumping run_seq."""
+        """Create and start a new run under the given task, or transition an existing QUEUED run to RUNNING."""
         now = time.time()
         with self._tx() as conn:
+            existing = None
+            if run_id:
+                conn.row_factory = sqlite3.Row
+                existing_row = conn.execute(
+                    "SELECT * FROM agent_runs WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if existing_row:
+                    existing = _row_to_run(existing_row)
+
+            if existing is not None:
+                conn.execute(
+                    """
+                    UPDATE agent_runs
+                    SET status = ?, started_at = ?, runtime_id = ?,
+                        checkpoint_id = COALESCE(?, checkpoint_id)
+                    WHERE run_id = ?
+                    """,
+                    (RunStatus.RUNNING.value, now, runtime_id, checkpoint_id, run_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET current_run_id = ?, status = ?, runtime_id = ?, updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (run_id, TaskStatus.RUNNING.value, runtime_id, now, task_id),
+                )
+                existing.status = RunStatus.RUNNING
+                existing.started_at = now
+                existing.runtime_id = runtime_id
+                if checkpoint_id:
+                    existing.checkpoint_id = checkpoint_id
+                return existing
+
             row = conn.execute(
                 "SELECT COALESCE(MAX(run_seq), 0) FROM agent_runs WHERE task_id = ?",
                 (task_id,),
@@ -462,6 +553,68 @@ class TaskCoordinator:
                 """,
                 (task_status.value, now, now, error_message, task_id),
             )
+
+    def pause_task_and_run(
+        self,
+        task_id: str,
+        run_id: str,
+        *,
+        checkpoint_id: str | None = None,
+    ) -> None:
+        """Transition task and active run to PAUSED."""
+        now = time.time()
+        with self._tx() as conn:
+            started_row = conn.execute(
+                "SELECT started_at FROM agent_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            duration_ms = None
+            if started_row is not None and started_row[0] is not None:
+                duration_ms = max(0, int((now - float(started_row[0])) * 1000))
+
+            conn.execute(
+                """
+                UPDATE agent_runs
+                SET status = ?, finished_at = ?, duration_ms = ?,
+                    checkpoint_id = COALESCE(?, checkpoint_id)
+                WHERE run_id = ?
+                """,
+                (RunStatus.PAUSED.value, now, duration_ms, checkpoint_id, run_id),
+            )
+            conn.execute(
+                """
+                UPDATE agent_tasks
+                SET status = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (TaskStatus.PAUSED.value, now, task_id),
+            )
+
+    def mark_cancelling(
+        self,
+        task_id: str,
+        run_id: str | None = None,
+    ) -> None:
+        """Transition task and optional active run to CANCELLING."""
+        now = time.time()
+        with self._tx() as conn:
+            conn.execute(
+                """
+                UPDATE agent_tasks
+                SET status = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (TaskStatus.CANCELLING.value, now, task_id),
+            )
+            if run_id:
+                conn.execute(
+                    """
+                    UPDATE agent_runs
+                    SET status = ?
+                    WHERE run_id = ?
+                    """,
+                    (RunStatus.CANCELLING.value, run_id),
+                )
 
     def get_task(self, task_id: str) -> AgentTask | None:
         """Retrieve task by task_id."""
@@ -718,13 +871,13 @@ class TaskCoordinator:
             )
 
     def get_active_task_for_thread(self, thread_id: str) -> AgentTask | None:
-        """Find the latest active task for thread (CREATED, RUNNING, WAITING_APPROVAL, EXECUTING_TOOL)."""
+        """Find the latest active task for thread (CREATED, QUEUED, RUNNING, WAITING_APPROVAL, EXECUTING_TOOL, CANCELLING)."""
         with self._read_conn() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
                 SELECT * FROM agent_tasks
-                WHERE thread_id = ? AND status IN ('CREATED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL')
+                WHERE thread_id = ? AND status IN ('CREATED', 'QUEUED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL', 'CANCELLING')
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -733,12 +886,12 @@ class TaskCoordinator:
             return _row_to_task(row) if row is not None else None
 
     def has_active_tasks(self, session_id: str) -> bool:
-        """Check whether the session has any actively running, waiting, or executing task."""
+        """Check whether the session has any actively queued, running, waiting, or cancelling task."""
         with self._read_conn() as conn:
             row = conn.execute(
                 """
                 SELECT 1 FROM agent_tasks
-                WHERE session_id = ? AND status IN ('CREATED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL')
+                WHERE session_id = ? AND status IN ('CREATED', 'QUEUED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL', 'CANCELLING')
                 LIMIT 1
                 """,
                 (session_id,),
@@ -764,8 +917,8 @@ class TaskCoordinator:
     def reconcile_stale_tasks_and_runs(self, current_runtime_id: str) -> tuple[int, int]:
         """Reconcile tasks and runs from prior crashes or dead runtimes.
 
-        - Runs in 'RUNNING' status become 'INTERRUPTED' (or 'UNKNOWN' if associated with UNKNOWN approval/outcome).
-        - Tasks in 'RUNNING' or 'EXECUTING_TOOL' become 'INTERRUPTED' (or 'UNKNOWN' if associated with UNKNOWN approval/outcome).
+        - Runs in 'RUNNING', 'QUEUED', 'CANCELLING' status become 'INTERRUPTED' (or 'UNKNOWN' if associated with UNKNOWN approval/outcome).
+        - Tasks in 'RUNNING', 'QUEUED', 'EXECUTING_TOOL', 'CANCELLING' become 'INTERRUPTED' (or 'UNKNOWN' if associated with UNKNOWN approval/outcome).
         """
         now = time.time()
         with self._tx() as conn:
@@ -774,7 +927,7 @@ class TaskCoordinator:
                 """
                 UPDATE agent_runs
                 SET status = 'UNKNOWN', finished_at = ?, error_message = 'Reconciled to UNKNOWN on runtime startup'
-                WHERE status = 'RUNNING'
+                WHERE status IN ('RUNNING', 'QUEUED', 'CANCELLING')
                   AND task_id IN (
                       SELECT task_id FROM hitl_approval_requests WHERE status = 'UNKNOWN'
                       UNION
@@ -787,7 +940,7 @@ class TaskCoordinator:
                 """
                 UPDATE agent_runs
                 SET status = 'INTERRUPTED', finished_at = ?, error_message = 'Interrupted by runtime shutdown/restart'
-                WHERE status = 'RUNNING'
+                WHERE status IN ('RUNNING', 'QUEUED', 'CANCELLING')
                 """,
                 (now,),
             )
@@ -798,7 +951,7 @@ class TaskCoordinator:
                 """
                 UPDATE agent_tasks
                 SET status = 'UNKNOWN', updated_at = ?, completed_at = ?, error_message = 'Reconciled to UNKNOWN on runtime startup'
-                WHERE status IN ('CREATED', 'RUNNING', 'EXECUTING_TOOL')
+                WHERE status IN ('CREATED', 'QUEUED', 'RUNNING', 'EXECUTING_TOOL', 'CANCELLING')
                   AND (
                       task_id IN (SELECT task_id FROM hitl_approval_requests WHERE status = 'UNKNOWN')
                       OR task_id IN (SELECT task_id FROM tool_execution_outcomes WHERE outcome_status = 'UNKNOWN')
@@ -810,7 +963,7 @@ class TaskCoordinator:
                 """
                 UPDATE agent_tasks
                 SET status = 'INTERRUPTED', updated_at = ?, error_message = 'Interrupted by runtime shutdown/restart'
-                WHERE status IN ('CREATED', 'RUNNING', 'EXECUTING_TOOL')
+                WHERE status IN ('CREATED', 'QUEUED', 'RUNNING', 'EXECUTING_TOOL', 'CANCELLING')
                 """,
                 (now,),
             )

@@ -920,6 +920,33 @@ class HITLStore:
             )
             return int(cur.rowcount or 0)
 
+    def mark_run_in_flight_outcomes_unknown(self, run_id: str) -> int:
+        """Mark any in-flight outcomes or executing approvals for run_id as UNKNOWN on cancel/interrupt."""
+        now = time.time()
+        with self._tx() as conn:
+            cur1 = conn.execute(
+                """
+                UPDATE hitl_approval_requests
+                SET status = 'UNKNOWN',
+                    execution_error = 'cancelled_while_executing',
+                    completed_at = COALESCE(completed_at, ?)
+                WHERE run_id = ? AND status = 'EXECUTING'
+                """,
+                (now, run_id),
+            )
+            cur2 = conn.execute(
+                """
+                UPDATE tool_execution_outcomes
+                SET outcome_status = 'UNKNOWN',
+                    error_message = 'cancelled_while_executing',
+                    finished_at = COALESCE(finished_at, ?),
+                    updated_at = ?
+                WHERE run_id = ? AND outcome_status = 'NOT_STARTED'
+                """,
+                (now, now, run_id),
+            )
+            return int((cur1.rowcount or 0) + (cur2.rowcount or 0))
+
     def mark_orphan_pending_failed(self, approval_id: str, reason: str) -> bool:
         """Fail-closed orphan `PENDING` request lacking an active checkpoint interrupt."""
         now = time.time()

@@ -38,10 +38,21 @@ class TaskService:
         self,
         coordinator: TaskCoordinator | None = None,
         deliverable_mgr: DeliverableManager | None = None,
+        execution_engine: ExecutionEngine | None = None,
         db_path: str | Path | None = None,
     ) -> None:
         self.coordinator = coordinator or get_task_coordinator(db_path=db_path)
         self.deliverable_mgr = deliverable_mgr or get_deliverable_manager(db_path=db_path)
+        self._execution_engine = execution_engine
+
+    @property
+    def execution_engine(self) -> ExecutionEngine | None:
+        """Resolved active ExecutionEngine instance, if available."""
+        if self._execution_engine is not None:
+            return self._execution_engine
+        from jarvis_studio.core.runtime.execution_engine import get_execution_engine
+
+        return get_execution_engine()
 
     def create_task(
         self,
@@ -173,6 +184,28 @@ class TaskService:
         ):
             # Already terminal
             return task
+
+        # Check in-process execution engine for active handle
+        engine = self.execution_engine
+        if engine is not None:
+            if task_id in engine._queued_requests:
+                req = engine._queued_requests.pop(task_id, None)
+                if req is not None:
+                    req.cancelled = True
+                    if req.future and not req.future.done():
+                        req.future.cancel()
+            elif task_id in engine._running_tasks:
+                handle, req = engine._running_tasks[task_id]
+                self.coordinator.mark_cancelling(task_id, req.run_id)
+                self.coordinator.record_event(
+                    task_id=task_id,
+                    event_type=EventType.TASK_CANCELLING,
+                    run_id=req.run_id,
+                    payload={"reason": reason},
+                )
+                handle.cancel()
+                refreshed = self.coordinator.get_task(task_id)
+                return refreshed or task
 
         if task.current_run_id:
             self.coordinator.cancel_task_and_run(
@@ -328,14 +361,158 @@ class TaskService:
             decision=decision,
         )
 
+    async def cancel_task_async(
+        self, task_id: str, *, reason: str = "Cancelled by user"
+    ) -> AgentTask:
+        """Cancel a queued or running task with in-flight coroutine cancellation."""
+        engine = self.execution_engine
+        if engine is not None:
+            return await engine.cancel_task(task_id, reason=reason)
+        return self.cancel_task(task_id, reason=reason)
+
+    async def pause_task(
+        self, task_id: str, *, reason: str = "Paused by user"
+    ) -> AgentTask:
+        """Pause a queued or running task."""
+        engine = self.execution_engine
+        if engine is not None:
+            return await engine.pause_task(task_id, reason=reason)
+        task = self.coordinator.get_task(task_id)
+        if task is None:
+            raise KeyError(f"Task not found: {task_id}")
+        if task.current_run_id:
+            self.coordinator.pause_task_and_run(task_id, task.current_run_id)
+        else:
+            self.coordinator.set_task_status(task_id, TaskStatus.PAUSED)
+        self.coordinator.record_event(
+            task_id=task_id,
+            event_type=EventType.TASK_PAUSED,
+            run_id=task.current_run_id,
+            payload={"reason": reason},
+        )
+        return self.coordinator.get_task(task_id) or task
+
+    async def resume_task(
+        self, task_id: str, *, checkpoint_id: str | None = None
+    ) -> AgentRun:
+        """Resume a paused or interrupted task with a new run inheriting checkpoint."""
+        engine = self.execution_engine
+        if engine is not None:
+            return await engine.resume_task(task_id, checkpoint_id=checkpoint_id)
+        task = self.coordinator.get_task(task_id)
+        if task is None:
+            raise KeyError(f"Task not found: {task_id}")
+        if task.status not in (TaskStatus.PAUSED, TaskStatus.INTERRUPTED):
+            raise ValueError(
+                f"Task '{task_id}' cannot be resumed from state '{task.status.value}'; "
+                "must be PAUSED or INTERRUPTED"
+            )
+        run = self.start_run(
+            task_id,
+            runtime_id="standalone",
+            trigger_type=RunTriggerType.RESUME,
+            checkpoint_id=checkpoint_id,
+        )
+        self.coordinator.record_event(
+            task_id=task_id,
+            event_type=EventType.TASK_RESUMED,
+            run_id=run.run_id,
+            payload={"checkpoint_id": checkpoint_id},
+        )
+        return run
+
+    async def append_instruction(
+        self,
+        task_id: str,
+        instruction: str,
+        *,
+        checkpoint_id: str | None = None,
+    ) -> AgentRun:
+        """Append user instruction to an existing task and queue a new run."""
+        engine = self.execution_engine
+        if engine is not None:
+            return await engine.append_instruction(
+                task_id, instruction, checkpoint_id=checkpoint_id
+            )
+        clean = instruction.strip()
+        if not clean:
+            raise ValueError("Instruction cannot be empty")
+        task = self.coordinator.get_task(task_id)
+        if task is None:
+            raise KeyError(f"Task not found: {task_id}")
+        self.coordinator.record_event(
+            task_id=task_id,
+            event_type=EventType.INSTRUCTION_APPENDED,
+            payload={"instruction": clean},
+        )
+        return self.start_run(
+            task_id,
+            runtime_id="standalone",
+            trigger_type=RunTriggerType.USER_INPUT,
+            checkpoint_id=checkpoint_id,
+        )
+
+    async def submit_task(
+        self,
+        task_id: str,
+        *,
+        user_message: str | None = None,
+        run_id: str | None = None,
+        trigger_type: RunTriggerType = RunTriggerType.INITIAL,
+        checkpoint_id: str | None = None,
+        fresh_checkpoint: bool = False,
+        return_future: bool = False,
+    ) -> tuple[AgentRun, Any]:
+        """Submit task to ExecutionEngine for background execution."""
+        engine = self.execution_engine
+        if engine is not None:
+            return await engine.submit_task(
+                task_id,
+                user_message=user_message,
+                run_id=run_id,
+                trigger_type=trigger_type,
+                checkpoint_id=checkpoint_id,
+                fresh_checkpoint=fresh_checkpoint,
+                return_future=return_future,
+            )
+        # Fallback if engine is not running: synchronous run
+        run = self.start_run(
+            task_id,
+            runtime_id="standalone",
+            trigger_type=trigger_type,
+            checkpoint_id=checkpoint_id,
+        )
+        return run, None
+
 
 _default_task_service: TaskService | None = None
 _default_task_service_lock = threading.Lock()
 
 
 def get_task_service(db_path: str | Path | None = None) -> TaskService:
-    """Return process-wide default TaskService singleton."""
+    """Return process-wide default TaskService singleton or active runtime TaskService."""
     global _default_task_service
+    if db_path is None:
+        from jarvis_studio.core.runtime.agent_runtime import RuntimeState, get_active_runtime
+
+        active_rt = get_active_runtime()
+        if active_rt is not None and active_rt.state == RuntimeState.READY:
+            if (
+                _default_task_service is not None
+                and _default_task_service.coordinator.db_path == active_rt.task_coordinator.db_path
+            ):
+                return _default_task_service
+            coord = active_rt.task_coordinator
+            deliv = get_deliverable_manager(db_path=coord.db_path)
+            svc = TaskService(
+                coordinator=coord,
+                deliverable_mgr=deliv,
+                execution_engine=getattr(active_rt, "execution_engine", None),
+                db_path=coord.db_path,
+            )
+            _default_task_service = svc
+            return svc
+
     if _default_task_service is not None and db_path is None:
         return _default_task_service
 
