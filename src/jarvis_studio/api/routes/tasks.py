@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
 
-from jarvis_studio.core.tasks.models import AgentRun, AgentTask, DeliverableRecord, EventRecord
+from jarvis_studio.core.tasks.models import (
+    AgentRun,
+    AgentTask,
+    DeliverableRecord,
+    EventRecord,
+    EventType,
+    TaskStatus,
+)
 from jarvis_studio.service.deliverable_manager import get_deliverable_manager
 from jarvis_studio.service.task_service import get_task_service
 
@@ -281,6 +292,81 @@ async def list_task_events(
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
     return task_service.list_events(task_id, since_seq=since_seq, limit=limit)
+
+
+@router.get("/{task_id}/events/stream")
+async def stream_task_events(
+    task_id: str,
+    request: Request,
+    since_seq: int = Query(default=0, ge=0, description="Replay events strictly after this sequence number"),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> EventSourceResponse:
+    """Stream real-time task lifecycle events via Server-Sent Events (SSE).
+
+    Supports reconnect replay via query parameter `since_seq` or HTTP header `Last-Event-ID`.
+    Emits events with monotonic `id` field and event name matching `EventType`.
+    """
+    task_service = get_task_service()
+    task = task_service.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+
+    effective_since = since_seq
+    if last_event_id:
+        try:
+            effective_since = max(effective_since, int(last_event_id.strip()))
+        except ValueError:
+            pass
+
+    async def event_generator() -> AsyncIterator[dict[str, Any]]:
+        from jarvis_studio.core.observability.event_broadcaster import get_event_broadcaster
+
+        broadcaster = get_event_broadcaster()
+        async with broadcaster.subscribe(task_id) as queue:
+            # 1. Replay historical events strictly after effective_since
+            historical = task_service.list_events(task_id, since_seq=effective_since, limit=1000)
+            last_seq = effective_since
+            for ev in historical:
+                if ev.seq > last_seq:
+                    last_seq = ev.seq
+                    yield {
+                        "event": ev.event_type.value,
+                        "id": str(ev.seq),
+                        "data": json.dumps(ev.model_dump(mode="json"), ensure_ascii=False),
+                    }
+
+            # 2. Check if task was already terminal before listening
+            current_task = task_service.get_task(task_id)
+            if (
+                current_task is not None
+                and current_task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+                and queue.empty()
+            ):
+                return
+
+            # 3. Stream live events as they arrive
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    record = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    if record.seq > last_seq:
+                        last_seq = record.seq
+                        yield {
+                            "event": record.event_type.value,
+                            "id": str(record.seq),
+                            "data": json.dumps(record.model_dump(mode="json"), ensure_ascii=False),
+                        }
+                        if record.event_type in (
+                            EventType.TASK_COMPLETED,
+                            EventType.TASK_CANCELLED,
+                            EventType.RUN_FAILED,
+                        ):
+                            break
+                except asyncio.TimeoutError:
+                    yield {"comment": "ping"}
+
+    return EventSourceResponse(event_generator())
 
 
 @router.get("/{task_id}/deliverables", response_model=list[DeliverableRecord])

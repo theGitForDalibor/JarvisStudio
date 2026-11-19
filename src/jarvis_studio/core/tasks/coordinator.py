@@ -786,7 +786,7 @@ class TaskCoordinator:
                 """,
                 (e_id, task_id, run_id, next_seq, evt_type.value, now, payload_json),
             )
-        return EventRecord(
+        record = EventRecord(
             event_id=e_id,
             task_id=task_id,
             run_id=run_id,
@@ -795,6 +795,13 @@ class TaskCoordinator:
             timestamp=now,
             payload_json=payload_json,
         )
+        try:
+            from jarvis_studio.core.observability.event_broadcaster import get_event_broadcaster
+
+            get_event_broadcaster().broadcast(record)
+        except Exception as b_exc:  # noqa: BLE001
+            _logger.debug("Failed to broadcast event %s: %s", e_id, b_exc)
+        return record
 
     def list_events_for_task(
         self,

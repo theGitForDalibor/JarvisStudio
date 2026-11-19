@@ -64,6 +64,27 @@ def classify_tool_execution_exception(exc: BaseException) -> ExecutionOutcomeSta
     return ExecutionOutcomeStatus.UNKNOWN
 
 
+def _sanitize_tool_args(args: Any) -> Any:
+    """Recursively mask sensitive values and limit large payloads for event payload recording."""
+    if not isinstance(args, (dict, list, str)):
+        return args
+    sensitive_keys = {"api_key", "token", "password", "secret", "auth", "authorization", "private_key"}
+    if isinstance(args, dict):
+        sanitized: dict[str, Any] = {}
+        for k, v in args.items():
+            k_str = str(k).lower()
+            if any(s in k_str for s in sensitive_keys):
+                sanitized[k] = "***"
+            else:
+                sanitized[k] = _sanitize_tool_args(v)
+        return sanitized
+    if isinstance(args, list):
+        return [_sanitize_tool_args(item) for item in args]
+    if isinstance(args, str) and len(args) > 1000:
+        return args[:1000] + "... [truncated]"
+    return args
+
+
 async def _execute_cancellation_cleanup_shielded(
     cleanup_fn: Callable[[], None],
 ) -> None:
@@ -221,6 +242,25 @@ def create_tool_executor_node(
             tool_succeeded = False
             execution_output = ""
 
+            if task_id:
+                try:
+                    from jarvis_studio.core.tasks.coordinator import get_task_coordinator
+                    from jarvis_studio.core.tasks.models import EventType
+
+                    coord = get_task_coordinator()
+                    coord.record_event(
+                        task_id=task_id,
+                        event_type=EventType.TOOL_STARTED,
+                        run_id=run_id if run_id != "run_unknown" else None,
+                        payload={
+                            "tool_name": tool_name,
+                            "tool_call_id": call_id,
+                            "arguments": _sanitize_tool_args(effective_args),
+                        },
+                    )
+                except Exception as evt_err:  # noqa: BLE001
+                    logger.debug("Failed to record TOOL_STARTED event: %s", evt_err)
+
             with timed_step(f"tool_exec_{tool_name}", tool_name=tool_name):
                 try:
                     if hasattr(tool, "ainvoke"):
@@ -270,6 +310,7 @@ def create_tool_executor_node(
                                     tool_call_id=target_call_id,
                                     outcome_status=ExecutionOutcomeStatus.UNKNOWN,
                                     error_message="Task execution cancelled in flight (asyncio.CancelledError)",
+                                    error="Task execution cancelled in flight (asyncio.CancelledError)",
                                 )
                             except Exception as unk_exc:  # noqa: BLE001
                                 logger.error(
@@ -277,6 +318,25 @@ def create_tool_executor_node(
                                 )
 
                     await _execute_cancellation_cleanup_shielded(_perform_cancellation_cleanup)
+                    if task_id:
+                        try:
+                            from jarvis_studio.core.tasks.coordinator import get_task_coordinator
+                            from jarvis_studio.core.tasks.models import EventType
+
+                            coord = get_task_coordinator()
+                            coord.record_event(
+                                task_id=task_id,
+                                event_type=EventType.TOOL_COMPLETED,
+                                run_id=run_id if run_id != "run_unknown" else None,
+                                payload={
+                                    "tool_name": tool_name,
+                                    "tool_call_id": call_id,
+                                    "success": False,
+                                    "cancelled": True,
+                                },
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     raise
                 except Exception as exc:  # noqa: BLE001
                     logger.error(f"Error executing tool '{tool_name}': {exc}")
@@ -308,6 +368,27 @@ def create_tool_executor_node(
                             logger.error(
                                 f"Failed to finalize failed SAFE outcome for '{call_id}': {fin_exc}"
                             )
+
+            if task_id:
+                try:
+                    from jarvis_studio.core.tasks.coordinator import get_task_coordinator
+                    from jarvis_studio.core.tasks.models import EventType
+
+                    coord = get_task_coordinator()
+                    summary = execution_output[:500] if len(execution_output) > 500 else execution_output
+                    coord.record_event(
+                        task_id=task_id,
+                        event_type=EventType.TOOL_COMPLETED,
+                        run_id=run_id if run_id != "run_unknown" else None,
+                        payload={
+                            "tool_name": tool_name,
+                            "tool_call_id": call_id,
+                            "success": tool_succeeded,
+                            "output_preview": summary,
+                        },
+                    )
+                except Exception as evt_err:  # noqa: BLE001
+                    logger.debug("Failed to record TOOL_COMPLETED event: %s", evt_err)
 
             msg_kwargs: dict[str, Any] = {}
             if tool_succeeded:
