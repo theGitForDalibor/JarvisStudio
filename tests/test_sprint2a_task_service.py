@@ -142,36 +142,144 @@ def test_independent_task_creation_without_session(test_env):
 
 
 def test_session_deletion_keeps_tasks_unlinked(test_env):
-    """Deleting a session with keep_tasks=True preserves tasks and unlinks session_id to NULL."""
+    """Direct SessionService.delete_session() defaults safely to preserving tasks, runs, deliverables, and task traces."""
+    from jarvis_studio.core.observability.trace_logger import ConversationTrace, TraceStore
+    from jarvis_studio.memory.models import MemoryCategory, MemoryItem
+    from jarvis_studio.memory.store import MemoryStore
+
     sess_svc: SessionService = test_env["sess_svc"]
     task_svc: TaskService = test_env["task_svc"]
+    deliv_mgr: DeliverableManager = test_env["deliv_mgr"]
+    db_path = test_env["db_path"]
+    ws_dir: Path = test_env["ws_dir"]
+
+    trace_store = TraceStore(db_path=str(db_path))
+    mem_store = MemoryStore(db_path=str(db_path))
+    try:
+        # 1. Create session + messages
+        sess = sess_svc.create_session("User Research Session")
+        sess_svc.add_message(sess.session_id, "user", "Please start research")
+
+        # 2. Create completed task + run + deliverable under this session
+        task1, run1 = task_svc.create_task(
+            "Task 1 in session",
+            session_id=sess.session_id,
+            auto_start_run=True,
+        )
+        assert run1 is not None
+        task_svc.coordinator.complete_task_and_run(task1.task_id, run1.run_id)
+        deliv = deliv_mgr.create_deliverable(
+            task_id=task1.task_id,
+            run_id=run1.run_id,
+            title="Research Brief",
+            content="# Preserved Brief",
+        )
+        task2, _ = task_svc.create_task("Task 2 in session", session_id=sess.session_id)
+        task_svc.coordinator.set_task_status(task2.task_id, TaskStatus.COMPLETED)
+
+        # 3. Create both a task-linked trace and a session-only trace + LTM item
+        tr_task = ConversationTrace(
+            session_id=sess.session_id,
+            run_id=run1.run_id,
+            task_id=task1.task_id,
+            query="Task trace query",
+        )
+        tr_task.finish(output="done")
+        trace_store.save_trace(tr_task)
+
+        tr_chat = ConversationTrace(
+            session_id=sess.session_id,
+            run_id="run_chat_only",
+            task_id=None,
+            query="Chat only query",
+        )
+        tr_chat.finish(output="hi")
+        trace_store.save_trace(tr_chat)
+
+        mem = mem_store.add(
+            MemoryItem(
+                category=MemoryCategory.FACT,
+                content="Preserved fact",
+                source_session_id=sess.session_id,
+                source_task_id=task1.task_id,
+            )
+        )
+
+        # 4. Call delete_session directly with NO keep_tasks arg (must default to keep_tasks=True)
+        deleted = sess_svc.delete_session(sess.session_id)
+        assert deleted is True
+
+        # 5. Session + chat messages + taskless trace are deleted; no NOT NULL IntegrityError
+        assert sess_svc.get_session(sess.session_id) is None
+        assert sess_svc.get_messages(sess.session_id) == []
+        assert trace_store.get_trace(tr_chat.trace_id) is None
+
+        # 6. Tasks, runs, deliverables, task-linked traces, and LTM source_task_id are preserved
+        t1 = task_svc.get_task(task1.task_id)
+        t2 = task_svc.get_task(task2.task_id)
+        assert t1 is not None and t1.session_id is None
+        assert t2 is not None and t2.session_id is None
+        assert len(task_svc.coordinator.list_runs(task1.task_id)) == 1
+        assert deliv_mgr.get_deliverable(deliv.deliverable_id) is not None
+        assert (ws_dir / deliv.file_path).is_file()
+
+        with open_sync_connection(db_path) as conn:
+            tr_row = conn.execute(
+                "SELECT session_id, task_id FROM agent_conversation_traces WHERE trace_id = ?",
+                (tr_task.trace_id,),
+            ).fetchone()
+            assert tr_row is not None
+            assert tr_row[0] is None and tr_row[1] == task1.task_id
+
+            ltm_row = conn.execute(
+                "SELECT source_session_id, source_task_id FROM ltm_memories WHERE id = ?",
+                (mem.id,),
+            ).fetchone()
+            assert ltm_row is not None
+            assert ltm_row[0] is None and ltm_row[1] == task1.task_id
+    finally:
+        trace_store.close()
+        mem_store.close()
+
+
+def test_session_clear_messages_preserves_tasks_and_deliverables(test_env):
+    """Direct SessionService.clear_session_messages() clears chat messages without deleting tasks or deliverables."""
+    from jarvis_studio.core.observability.trace_logger import ConversationTrace, TraceStore
+
+    sess_svc: SessionService = test_env["sess_svc"]
+    task_svc: TaskService = test_env["task_svc"]
+    deliv_mgr: DeliverableManager = test_env["deliv_mgr"]
     db_path = test_env["db_path"]
 
-    # 1. Create a session
-    sess = sess_svc.create_session("User Research Session")
-    sess_svc.add_message(sess.session_id, "user", "Please start research")
+    trace_store = TraceStore(db_path=str(db_path))
+    try:
+        sess = sess_svc.create_session("Clear Messages Session")
+        sess_svc.add_message(sess.session_id, "user", "First message")
+        task, run = task_svc.create_task("Linked task", session_id=sess.session_id, auto_start_run=True)
+        assert run is not None
+        task_svc.coordinator.complete_task_and_run(task.task_id, run.run_id)
+        deliv = deliv_mgr.create_deliverable(
+            task_id=task.task_id,
+            run_id=run.run_id,
+            title="Report",
+            content="# Saved across clear",
+        )
+        tr_chat = ConversationTrace(
+            session_id=sess.session_id, run_id="r_chat", task_id=None, query="q1"
+        )
+        tr_chat.finish(output="ok")
+        trace_store.save_trace(tr_chat)
 
-    # 2. Create tasks under this session
-    task1, _ = task_svc.create_task("Task 1 in session", session_id=sess.session_id)
-    task2, _ = task_svc.create_task("Task 2 in session", session_id=sess.session_id)
-    task_svc.coordinator.set_task_status(task1.task_id, TaskStatus.COMPLETED)
-    task_svc.coordinator.set_task_status(task2.task_id, TaskStatus.COMPLETED)
-
-    # 3. Delete session with keep_tasks=True
-    deleted = sess_svc.delete_session(sess.session_id, keep_tasks=True)
-    assert deleted is True
-
-    # 4. Check that session and its messages are gone
-    assert sess_svc.get_session(sess.session_id) is None
-    assert sess_svc.get_messages(sess.session_id) == []
-
-    # 5. Check that tasks are still intact with session_id = NULL
-    t1 = task_svc.get_task(task1.task_id)
-    t2 = task_svc.get_task(task2.task_id)
-    assert t1 is not None
-    assert t1.session_id is None
-    assert t2 is not None
-    assert t2.session_id is None
+        cleared = sess_svc.clear_session_messages(sess.session_id)
+        assert cleared is True
+        assert sess_svc.get_session(sess.session_id) is not None
+        assert sess_svc.get_messages(sess.session_id) == []
+        assert trace_store.get_trace(tr_chat.trace_id) is None
+        assert task_svc.get_task(task.task_id) is not None
+        assert len(task_svc.coordinator.list_runs(task.task_id)) == 1
+        assert deliv_mgr.get_deliverable(deliv.deliverable_id) is not None
+    finally:
+        trace_store.close()
 
 
 def test_multi_run_sequencing_and_event_logging(test_env):

@@ -332,12 +332,13 @@ class SessionService:
         session_id: str,
         *,
         checkpointer: Any | None = None,
-        keep_tasks: bool = False,
+        keep_tasks: bool = True,
     ) -> bool:
-        """Remove a session.
+        """Remove a session thread.
 
-        If keep_tasks is True, unlinks tasks (session_id = NULL) while preserving tasks and deliverables.
-        If keep_tasks is False (legacy cascade), cascade deletes all related records across 8 tables.
+        Defaults to `keep_tasks=True`: unlinks tasks (`session_id = NULL`) and task-linked traces
+        so user tasks, runs, and deliverables are preserved safely.
+        Pass `keep_tasks=False` explicitly only when full legacy cascade deletion is intended.
 
         Raises SessionBusyError if any active task or execution is in progress.
         """
@@ -432,7 +433,25 @@ class SessionService:
                         (session_id, session_id),
                     )
 
-                # 4. agent_runs
+                # 4. agent_deliverables & agent_events (when present)
+                tbl_deliv = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_deliverables'"
+                ).fetchone()
+                if tbl_deliv:
+                    conn.execute(
+                        "DELETE FROM agent_deliverables WHERE task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)",
+                        (session_id,),
+                    )
+                tbl_events = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_events'"
+                ).fetchone()
+                if tbl_events:
+                    conn.execute(
+                        "DELETE FROM agent_events WHERE task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)",
+                        (session_id,),
+                    )
+
+                # 5. agent_runs
                 tbl_runs = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'"
                 ).fetchone()
@@ -605,8 +624,16 @@ class SessionService:
                 )
             return messages
 
-    def clear_session_messages(self, session_id: str) -> bool:
-        """Remove all messages and execution artifacts for a session while retaining session metadata.
+    def clear_session_messages(
+        self,
+        session_id: str,
+        *,
+        keep_tasks: bool = True,
+    ) -> bool:
+        """Remove chat messages for a session while retaining session metadata.
+
+        When `keep_tasks=True` (default), preserves tasks, runs, deliverables, HITL approvals,
+        and task-linked traces; only clears `chat_messages` and task-less session traces.
 
         Raises SessionBusyError if any active task or execution is in progress.
         """
@@ -616,6 +643,19 @@ class SessionService:
                     f"Session '{session_id}' messages cannot be cleared while active tasks or executions are running."
                 )
 
+            if keep_tasks:
+                tbl_traces = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
+                ).fetchone()
+                if tbl_traces:
+                    conn.execute(
+                        "DELETE FROM agent_conversation_traces WHERE session_id = ? AND task_id IS NULL",
+                        (session_id,),
+                    )
+                cursor = conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+                return cursor.rowcount > 0
+
+            # Legacy explicit cascade clear (keep_tasks=False)
             # Clean traces
             tbl_traces = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
@@ -653,6 +693,24 @@ class SessionService:
                     WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
                     """,
                     (session_id, session_id),
+                )
+
+            # Clean deliverables & events
+            tbl_deliv = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_deliverables'"
+            ).fetchone()
+            if tbl_deliv:
+                conn.execute(
+                    "DELETE FROM agent_deliverables WHERE task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)",
+                    (session_id,),
+                )
+            tbl_events = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_events'"
+            ).fetchone()
+            if tbl_events:
+                conn.execute(
+                    "DELETE FROM agent_events WHERE task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)",
+                    (session_id,),
                 )
 
             # Clean runs

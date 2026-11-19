@@ -539,8 +539,8 @@ def test_p4_cascade_delete_across_8_tables(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM agent_conversation_traces WHERE session_id = ?", (sess_id,)).fetchone()[0] == 1
         assert conn.execute("SELECT source_session_id FROM ltm_memories WHERE id = ?", (mem.id,)).fetchone()[0] == sess_id
 
-    # Execute cascade deletion
-    deleted = sess_svc.delete_session(sess_id)
+    # Execute explicit cascade deletion (opt-in legacy mode)
+    deleted = sess_svc.delete_session(sess_id, keep_tasks=False)
     assert deleted is True
 
     # Verify all related records deleted across 8 tables

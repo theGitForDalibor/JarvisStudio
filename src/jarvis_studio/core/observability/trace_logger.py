@@ -48,7 +48,7 @@ class ConversationTrace:
     """Full 5-stage business lifecycle trace for a single agent turn."""
 
     trace_id: str = field(default_factory=lambda: f"tr_{uuid.uuid4().hex[:12]}")
-    session_id: str = ""
+    session_id: str | None = None
     run_id: str = ""
     task_id: str | None = None
     query: str = ""
@@ -192,7 +192,7 @@ class TraceStore:
                 """
                 CREATE TABLE IF NOT EXISTS agent_conversation_traces (
                     trace_id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
+                    session_id TEXT,
                     run_id TEXT,
                     task_id TEXT,
                     query TEXT NOT NULL,
@@ -276,7 +276,7 @@ class TraceStore:
                         SELECT trace_id FROM (
                             SELECT trace_id,
                                    ROW_NUMBER() OVER (
-                                       PARTITION BY session_id
+                                       PARTITION BY COALESCE(session_id, task_id, '')
                                        ORDER BY start_time DESC
                                    ) as rn
                             FROM agent_conversation_traces
