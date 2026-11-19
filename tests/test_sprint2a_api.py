@@ -202,3 +202,52 @@ def test_api_deliverable_get_and_download(client: TestClient):
 
     # 6. Non-existent deliverable download
     assert client.get("/api/v1/deliverables/deliv_nonexistent/download").status_code == 404
+
+
+def test_api_task_archive_and_explicit_purge(client: TestClient):
+    """DELETE /api/v1/tasks/{id} soft-archives while preserving deliverables; DELETE .../purge?confirm=true purges."""
+    t_resp = client.post(
+        "/api/v1/tasks",
+        json={"query": "Archivable task", "auto_start_run": True},
+    )
+    assert t_resp.status_code == 201
+    task_id = t_resp.json()["task_id"]
+    run_id = t_resp.json()["current_run_id"]
+    get_task_coordinator().complete_task_and_run(task_id, run_id)
+
+    deliv = get_deliverable_manager().create_deliverable(
+        task_id=task_id,
+        run_id=run_id,
+        title="Archive Deliverable",
+        content="# Retained across archive",
+    )
+
+    # Ordinary DELETE archives the task
+    arch_resp = client.delete(f"/api/v1/tasks/{task_id}")
+    assert arch_resp.status_code == 200
+    assert arch_resp.json()["status"] == "archived"
+    assert arch_resp.json()["archived_at"] is not None
+
+    # Hidden from default list, visible with include_archived=true
+    assert all(item["task_id"] != task_id for item in client.get("/api/v1/tasks").json())
+    assert any(
+        item["task_id"] == task_id
+        for item in client.get("/api/v1/tasks?include_archived=true").json()
+    )
+
+    # Deliverable download MUST still work after soft-delete/archive
+    dl_resp = client.get(f"/api/v1/deliverables/{deliv.deliverable_id}/download")
+    assert dl_resp.status_code == 200
+    assert dl_resp.text == "# Retained across archive"
+
+    # Explicit purge without confirm=true must return 400
+    no_confirm_resp = client.delete(f"/api/v1/tasks/{task_id}/purge")
+    assert no_confirm_resp.status_code == 400
+    assert client.get(f"/api/v1/tasks/{task_id}").status_code == 200
+
+    # Explicit purge with confirm=true removes task, deliverable DB, and file
+    purge_resp = client.delete(f"/api/v1/tasks/{task_id}/purge?confirm=true")
+    assert purge_resp.status_code == 200
+    assert purge_resp.json()["status"] == "purged"
+    assert client.get(f"/api/v1/tasks/{task_id}").status_code == 404
+    assert client.get(f"/api/v1/deliverables/{deliv.deliverable_id}").status_code == 404

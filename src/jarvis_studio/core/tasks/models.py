@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from enum import Enum
@@ -89,6 +90,8 @@ class EventType(str, Enum):
     RUN_FAILED = "run_failed"
     DELIVERABLE_CREATED = "deliverable_created"
     TASK_COMPLETED = "task_completed"
+    TASK_CANCELLED = "task_cancelled"
+    TASK_ARCHIVED = "task_archived"
 
 
 class EventRecord(BaseModel):
@@ -131,6 +134,7 @@ class AgentTask(BaseModel):
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
     completed_at: float | None = None
+    archived_at: float | None = None
     runtime_id: str | None = None
     error_message: str | None = None
 

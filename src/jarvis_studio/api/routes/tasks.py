@@ -62,11 +62,17 @@ async def create_task(request: CreateTaskRequest) -> AgentTask:
 async def list_tasks(
     session_id: str | None = Query(default=None, description="Filter by session ID"),
     status: str | None = Query(default=None, description="Filter by task status"),
+    include_archived: bool = Query(default=False, description="Include soft-deleted/archived tasks"),
     limit: int = Query(default=50, ge=1, le=200, description="Max items to return"),
 ) -> list[AgentTask]:
-    """List tasks, optionally filtered by session or status."""
+    """List tasks, optionally filtered by session, status, or archive state."""
     task_service = get_task_service()
-    return task_service.list_tasks(session_id=session_id, status=status, limit=limit)
+    return task_service.list_tasks(
+        session_id=session_id,
+        status=status,
+        include_archived=include_archived,
+        limit=limit,
+    )
 
 
 @router.get("/{task_id}", response_model=TaskDetailResponse)
@@ -100,16 +106,47 @@ async def cancel_task(
 
 @router.delete("/{task_id}")
 async def delete_task(task_id: str) -> dict[str, Any]:
-    """Permanently delete a task, its runs, database records, and physical deliverables."""
+    """Soft-delete (archive) a task while preserving its Runs and physical deliverables."""
     task_service = get_task_service()
     try:
-        deleted = task_service.delete_task(task_id)
+        archived = task_service.archive_task(task_id)
     except ValueError as err:
         raise HTTPException(status_code=409, detail=str(err)) from err
 
-    if not deleted:
+    if archived is None:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
-    return {"status": "deleted", "task_id": task_id}
+    return {
+        "status": "archived",
+        "task_id": task_id,
+        "archived_at": archived.archived_at,
+    }
+
+
+@router.delete("/{task_id}/purge")
+async def purge_task(
+    task_id: str,
+    confirm: bool = Query(default=False, description="Explicit confirmation required for permanent purge"),
+) -> dict[str, Any]:
+    """Permanently purge a task, its DB records, and its physical deliverables directory."""
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Permanent task purge requires confirm=true",
+        )
+    task_service = get_task_service()
+    try:
+        purged = task_service.purge_task(task_id, confirm=True)
+    except ValueError as err:
+        raise HTTPException(status_code=409, detail=str(err)) from err
+    except OSError as err:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed purging task deliverables safely (database rolled back): {err}",
+        ) from err
+
+    if not purged:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    return {"status": "purged", "task_id": task_id}
 
 
 @router.get("/{task_id}/events", response_model=list[EventRecord])

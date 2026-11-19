@@ -302,6 +302,7 @@ _APP_V4_STATEMENTS: tuple[str, ...] = (
         created_at        REAL NOT NULL,
         updated_at        REAL NOT NULL,
         completed_at      REAL,
+        archived_at       REAL,
         runtime_id        TEXT,
         error_message     TEXT,
         FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE SET NULL
@@ -312,13 +313,13 @@ _APP_V4_STATEMENTS: tuple[str, ...] = (
         task_id, session_id, thread_id, status, query, initiator,
         assigned_agent_id, current_run_id, plan_json, priority,
         result_summary, created_at, updated_at, completed_at,
-        runtime_id, error_message
+        archived_at, runtime_id, error_message
     )
     SELECT
         task_id, session_id, thread_id, status, query, initiator,
         'general_agent', current_run_id, NULL, 'NORMAL',
         NULL, created_at, updated_at, completed_at,
-        runtime_id, error_message
+        NULL, runtime_id, error_message
     FROM agent_tasks
     """,
     "DROP TABLE agent_tasks",
@@ -326,6 +327,7 @@ _APP_V4_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_tasks_session_created ON agent_tasks(session_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_status_runtime ON agent_tasks(status, runtime_id)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_thread_status ON agent_tasks(thread_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_archived ON agent_tasks(archived_at, created_at DESC)",
     """
     CREATE TABLE IF NOT EXISTS agent_deliverables (
         deliverable_id    TEXT PRIMARY KEY,
@@ -571,6 +573,102 @@ def create_verified_backup(
     return bak_path
 
 
+_TRACES_V4_COLUMNS: tuple[str, ...] = (
+    "trace_id",
+    "session_id",
+    "run_id",
+    "task_id",
+    "query",
+    "status",
+    "start_time",
+    "updated_at",
+    "total_duration_ms",
+    "ttft_ms",
+    "ttfa_ms",
+    "ttlt_ms",
+    "steps_count",
+    "payload",
+)
+
+
+def _migrate_traces_v4(conn: sqlite3.Connection) -> None:
+    """Rebuild `agent_conversation_traces` so `session_id` is nullable for standalone tasks."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
+    ).fetchone()
+    if exists is None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_conversation_traces (
+                trace_id          TEXT PRIMARY KEY,
+                session_id        TEXT,
+                run_id            TEXT,
+                task_id           TEXT,
+                query             TEXT NOT NULL,
+                status            TEXT NOT NULL,
+                start_time        REAL NOT NULL,
+                updated_at        REAL,
+                total_duration_ms INTEGER,
+                ttft_ms           INTEGER,
+                ttfa_ms           INTEGER,
+                ttlt_ms           INTEGER,
+                steps_count       INTEGER,
+                payload           TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_session ON agent_conversation_traces(session_id, start_time DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_task_id ON agent_conversation_traces(task_id)"
+        )
+        return
+
+    table_info = conn.execute("PRAGMA table_info(agent_conversation_traces)").fetchall()
+    existing_cols = [str(row[1]) for row in table_info]
+    sess_notnull = next((int(row[3]) for row in table_info if str(row[1]) == "session_id"), 1)
+    if sess_notnull == 0 and all(col in existing_cols for col in _TRACES_V4_COLUMNS):
+        return
+
+    conn.execute("DROP TABLE IF EXISTS agent_conversation_traces_v4")
+    conn.execute(
+        """
+        CREATE TABLE agent_conversation_traces_v4 (
+            trace_id          TEXT PRIMARY KEY,
+            session_id        TEXT,
+            run_id            TEXT,
+            task_id           TEXT,
+            query             TEXT NOT NULL,
+            status            TEXT NOT NULL,
+            start_time        REAL NOT NULL,
+            updated_at        REAL,
+            total_duration_ms INTEGER,
+            ttft_ms           INTEGER,
+            ttfa_ms           INTEGER,
+            ttlt_ms           INTEGER,
+            steps_count       INTEGER,
+            payload           TEXT NOT NULL
+        )
+        """
+    )
+    common_cols = [col for col in _TRACES_V4_COLUMNS if col in existing_cols]
+    if common_cols:
+        cols_sql = ", ".join(common_cols)
+        conn.execute(
+            f"INSERT INTO agent_conversation_traces_v4 ({cols_sql}) "
+            f"SELECT {cols_sql} FROM agent_conversation_traces"
+        )
+    conn.execute("DROP TABLE agent_conversation_traces")
+    conn.execute("ALTER TABLE agent_conversation_traces_v4 RENAME TO agent_conversation_traces")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_traces_session ON agent_conversation_traces(session_id, start_time DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_traces_task_id ON agent_conversation_traces(task_id)"
+    )
+
+
 def _apply_steps(
     conn: sqlite3.Connection,
     *,
@@ -592,6 +690,21 @@ def _apply_steps(
     return target_version
 
 
+def _run_post_hooks(
+    conn: sqlite3.Connection,
+    *,
+    from_version: int,
+    to_version: int,
+    post_hooks: dict[int, Callable[[sqlite3.Connection], None]] | None,
+) -> None:
+    if not post_hooks or to_version <= from_version:
+        return
+    for ver in range(from_version + 1, to_version + 1):
+        hook = post_hooks.get(ver)
+        if hook is not None:
+            hook(conn)
+
+
 def _run_migrations(
     db_path: str | Path,
     *,
@@ -599,6 +712,7 @@ def _run_migrations(
     steps: dict[int, tuple[str, ...]],
     enable_foreign_keys: bool,
     enable_sqlite_vec: bool,
+    post_hooks: dict[int, Callable[[sqlite3.Connection], None]] | None = None,
     in_memory_conn: sqlite3.Connection | None = None,
 ) -> int:
     normalized = normalize_db_path(db_path)
@@ -619,7 +733,9 @@ def _run_migrations(
                 enable_foreign_keys=enable_foreign_keys,
                 enable_sqlite_vec=enable_sqlite_vec,
             ) as conn:
+                prev_ver = _read_user_version(conn)
                 res = _apply_steps(conn, target_version=target_version, steps=steps)
+                _run_post_hooks(conn, from_version=prev_ver, to_version=res, post_hooks=post_hooks)
                 violations = conn.execute("PRAGMA foreign_key_check").fetchall()
                 if violations:
                     raise MigrationError(
@@ -658,7 +774,9 @@ def _run_migrations(
             enable_foreign_keys=enable_foreign_keys,
             enable_sqlite_vec=enable_sqlite_vec,
         ) as conn:
+            prev_ver = _read_user_version(conn)
             res = _apply_steps(conn, target_version=target_version, steps=steps)
+            _run_post_hooks(conn, from_version=prev_ver, to_version=res, post_hooks=post_hooks)
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
                 raise MigrationError(
@@ -682,6 +800,7 @@ def run_app_migrations(
             3: _APP_V3_STATEMENTS,
             4: _APP_V4_STATEMENTS,
         },
+        post_hooks={4: _migrate_traces_v4},
         enable_foreign_keys=False,
         enable_sqlite_vec=False,
         in_memory_conn=in_memory_conn,

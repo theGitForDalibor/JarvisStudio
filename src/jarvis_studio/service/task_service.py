@@ -127,10 +127,16 @@ class TaskService:
         session_id: str | None = None,
         *,
         status: TaskStatus | str | None = None,
+        include_archived: bool = False,
         limit: int = 50,
     ) -> list[AgentTask]:
-        """List tasks with optional session or status filters."""
-        return self.coordinator.list_tasks(session_id=session_id, status=status, limit=limit)
+        """List tasks with optional session, status, or archive filters."""
+        return self.coordinator.list_tasks(
+            session_id=session_id,
+            status=status,
+            include_archived=include_archived,
+            limit=limit,
+        )
 
     def get_task_detail(self, task_id: str) -> dict[str, Any] | None:
         """Retrieve complete task detail with runs, deliverables, and recent execution events."""
@@ -187,25 +193,81 @@ class TaskService:
         refreshed = self.coordinator.get_task(task_id)
         return refreshed or task
 
-    def delete_task(self, task_id: str) -> bool:
-        """Delete a task, purging its physical deliverables and all database relations.
+    def archive_task(self, task_id: str) -> AgentTask | None:
+        """Soft-delete (archive) a task while preserving all Runs, Events, and Deliverables."""
+        task = self.coordinator.get_task(task_id)
+        if task is None:
+            return None
 
-        Refuses deletion if the task is currently RUNNING or EXECUTING_TOOL.
+        if task.status in (
+            TaskStatus.RUNNING,
+            TaskStatus.EXECUTING_TOOL,
+            TaskStatus.WAITING_APPROVAL,
+        ):
+            raise ValueError(
+                f"Task '{task_id}' cannot be archived while in active state '{task.status.value}'"
+            )
+
+        already_archived = task.archived_at is not None
+        archived = self.coordinator.archive_task(task_id)
+        if archived is None:
+            return None
+
+        if not already_archived:
+            self.coordinator.record_event(
+                task_id=task_id,
+                event_type=EventType.TASK_ARCHIVED,
+                run_id=task.current_run_id,
+                payload={"archived_at": archived.archived_at},
+            )
+        return archived
+
+    def delete_task(self, task_id: str) -> bool:
+        """Soft-delete (archive) a task without removing its Run or Deliverable history."""
+        return self.archive_task(task_id) is not None
+
+    def purge_task(self, task_id: str, *, confirm: bool = False) -> bool:
+        """Permanently purge a task, its DB records, and its physical deliverables.
+
+        Requires explicit `confirm=True`. Uses two-phase directory staging inside the SQLite
+        transaction so filesystem failures roll back DB deletions and restore disk state.
         """
+        if not confirm:
+            raise ValueError("Permanent task purge requires explicit confirm=True")
+
         task = self.coordinator.get_task(task_id)
         if task is None:
             return False
 
-        if task.status in (TaskStatus.RUNNING, TaskStatus.EXECUTING_TOOL):
+        if task.status in (
+            TaskStatus.RUNNING,
+            TaskStatus.EXECUTING_TOOL,
+            TaskStatus.WAITING_APPROVAL,
+        ):
             raise ValueError(
-                f"Task '{task_id}' cannot be deleted while in active state '{task.status.value}'"
+                f"Task '{task_id}' cannot be purged while in active state '{task.status.value}'"
             )
 
-        # 1. Clean up physical deliverable files
-        self.deliverable_mgr.delete_task_deliverables_dir(task_id)
+        staged_dir = self.deliverable_mgr.stage_task_deliverables_dir(task_id)
 
-        # 2. Delete database records
-        return self.coordinator.delete_task(task_id)
+        def _before_commit() -> None:
+            if staged_dir is not None:
+                self.deliverable_mgr.remove_staged_dir(staged_dir)
+
+        try:
+            return self.coordinator.purge_task(task_id, before_commit_hook=_before_commit)
+        except BaseException:
+            if staged_dir is not None and staged_dir.exists():
+                try:
+                    self.deliverable_mgr.restore_staged_dir(staged_dir, task_id)
+                except Exception as restore_exc:  # noqa: BLE001
+                    _logger.error(
+                        "Failed to restore staged deliverables %s for task %s after purge error: %s",
+                        staged_dir,
+                        task_id,
+                        restore_exc,
+                    )
+            raise
 
     def list_events(self, task_id: str, *, since_seq: int = 0, limit: int = 100) -> list[EventRecord]:
         """Fetch observable business events for task after since_seq."""

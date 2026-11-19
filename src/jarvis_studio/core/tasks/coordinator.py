@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -50,6 +51,11 @@ def _row_to_task(row: sqlite3.Row) -> AgentTask:
         created_at=float(row["created_at"]),
         updated_at=float(row["updated_at"]),
         completed_at=float(row["completed_at"]) if row["completed_at"] is not None else None,
+        archived_at=(
+            float(row["archived_at"])
+            if ("archived_at" in keys and row["archived_at"] is not None)
+            else None
+        ),
         runtime_id=row["runtime_id"],
         error_message=row["error_message"],
     )
@@ -492,12 +498,15 @@ class TaskCoordinator:
         session_id: str | None = None,
         *,
         status: TaskStatus | str | None = None,
+        include_archived: bool = False,
         limit: int = 50,
     ) -> list[AgentTask]:
-        """List tasks, optionally filtered by session_id and/or status."""
+        """List tasks, optionally filtered by session_id, status, and archive state."""
         query = "SELECT * FROM agent_tasks"
         params: list[object] = []
         conditions: list[str] = []
+        if not include_archived:
+            conditions.append("archived_at IS NULL")
         if session_id is not None:
             conditions.append("session_id = ?")
             params.append(session_id)
@@ -515,8 +524,56 @@ class TaskCoordinator:
             rows = conn.execute(query, tuple(params)).fetchall()
             return [_row_to_task(r) for r in rows]
 
+    def get_task_by_thread_id(self, thread_id: str) -> AgentTask | None:
+        """Retrieve the latest task bound to the given LangGraph thread_id."""
+        with self._read_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM agent_tasks WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1",
+                (thread_id,),
+            ).fetchone()
+            return _row_to_task(row) if row is not None else None
+
+    def archive_task(self, task_id: str) -> AgentTask | None:
+        """Soft-delete (archive) a task while preserving all Runs, Events, and Deliverables."""
+        now = time.time()
+        with self._tx() as conn:
+            conn.row_factory = sqlite3.Row
+            existing = conn.execute(
+                "SELECT 1 FROM agent_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            conn.execute(
+                """
+                UPDATE agent_tasks
+                SET archived_at = COALESCE(archived_at, ?), updated_at = ?
+                WHERE task_id = ?
+                """,
+                (now, now, task_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM agent_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            return _row_to_task(row) if row is not None else None
+
     def delete_task(self, task_id: str) -> bool:
-        """Permanently delete a task and its associated records from the database."""
+        """Soft-delete a task via archive_task so Run and Deliverable history remain intact."""
+        return self.archive_task(task_id) is not None
+
+    def purge_task(
+        self,
+        task_id: str,
+        *,
+        before_commit_hook: Callable[[], None] | None = None,
+    ) -> bool:
+        """Permanently purge a task and all associated DB records inside one transaction.
+
+        If `before_commit_hook` is supplied and raises, the database transaction rolls back
+        atomically so DB state and external side effects remain consistent.
+        """
         with self._tx() as conn:
             row = conn.execute("SELECT 1 FROM agent_tasks WHERE task_id = ?", (task_id,)).fetchone()
             if row is None:
@@ -524,17 +581,25 @@ class TaskCoordinator:
             # Cascade delete in proper child-to-parent order
             conn.execute("DELETE FROM agent_deliverables WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM agent_events WHERE task_id = ?", (task_id,))
-            tbl_traces = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'").fetchone()
+            tbl_traces = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
+            ).fetchone()
             if tbl_traces:
                 conn.execute("DELETE FROM agent_conversation_traces WHERE task_id = ?", (task_id,))
-            tbl_outcomes = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_execution_outcomes'").fetchone()
+            tbl_outcomes = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_execution_outcomes'"
+            ).fetchone()
             if tbl_outcomes:
                 conn.execute("DELETE FROM tool_execution_outcomes WHERE task_id = ?", (task_id,))
-            tbl_approvals = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hitl_approval_requests'").fetchone()
+            tbl_approvals = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hitl_approval_requests'"
+            ).fetchone()
             if tbl_approvals:
                 conn.execute("DELETE FROM hitl_approval_requests WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM agent_runs WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM agent_tasks WHERE task_id = ?", (task_id,))
+            if before_commit_hook is not None:
+                before_commit_hook()
             return True
 
     def record_event(
@@ -759,8 +824,15 @@ _default_task_coordinator_lock = threading.Lock()
 
 
 def get_task_coordinator(db_path: str | Path | None = None) -> TaskCoordinator:
-    """Return the process-wide default TaskCoordinator singleton."""
+    """Return the active AgentRuntime's TaskCoordinator or process-wide default singleton."""
     global _default_task_coordinator
+    if db_path is None:
+        from jarvis_studio.core.runtime.agent_runtime import RuntimeState, get_active_runtime
+
+        active_rt = get_active_runtime()
+        if active_rt is not None and active_rt.state == RuntimeState.READY:
+            return active_rt.task_coordinator
+
     if _default_task_coordinator is not None and db_path is None:
         return _default_task_coordinator
 

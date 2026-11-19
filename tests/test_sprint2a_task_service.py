@@ -189,15 +189,18 @@ def test_multi_run_sequencing_and_event_logging(test_env):
     run2 = task_svc.start_run(task.task_id, runtime_id="rt_1")
     assert run2.run_seq == 2
 
-    # Events check
+    # Events check (including parsed payload dict)
     events = task_svc.list_events(task.task_id, since_seq=0)
     assert len(events) >= 3  # TASK_CREATED + 2 RUN_STARTED
     assert events[0].event_type == EventType.TASK_CREATED
     assert events[0].seq == 1
+    assert events[0].payload["query"] == "Multi-run analysis task"
     assert events[1].event_type == EventType.RUN_STARTED
     assert events[1].seq == 2
+    assert events[1].payload["run_seq"] == 1
     assert events[2].event_type == EventType.RUN_STARTED
     assert events[2].seq == 3
+    assert events[2].payload["run_seq"] == 2
 
     # Incremental since_seq
     inc_events = task_svc.list_events(task.task_id, since_seq=2)
@@ -220,8 +223,8 @@ def test_task_cancellation(test_env):
     assert run_refreshed.status == RunStatus.CANCELLED
 
 
-def test_task_deletion_purges_deliverables_and_db_records(test_env):
-    """Deleting a task removes database records and physical deliverable directory."""
+def test_task_soft_delete_preserves_history_and_explicit_purge_cleans_up(test_env):
+    """Ordinary delete_task/archive_task preserves Runs & Deliverables; explicit purge requires confirm=True."""
     task_svc: TaskService = test_env["task_svc"]
     deliv_mgr: DeliverableManager = test_env["deliv_mgr"]
     ws_dir: Path = test_env["ws_dir"]
@@ -229,23 +232,78 @@ def test_task_deletion_purges_deliverables_and_db_records(test_env):
     task, run = task_svc.create_task("Task with deliverables", auto_start_run=True)
     task_svc.coordinator.complete_task_and_run(task.task_id, run.run_id)
 
-    # Create a deliverable
     deliv = deliv_mgr.create_deliverable(
         task_id=task.task_id,
         run_id=run.run_id,
         title="Final Deliverable Report",
         content="# Sample report content",
     )
-    assert Path(ws_dir / deliv.file_path).is_file()
+    deliv_path = Path(ws_dir / deliv.file_path)
+    assert deliv_path.is_file()
 
-    # Active task cannot be deleted if running, but our task is COMPLETED
+    # Ordinary deletion must archive (soft-delete) and keep Runs & Deliverables intact
     deleted = task_svc.delete_task(task.task_id)
     assert deleted is True
 
-    # Database records deleted
+    archived_task = task_svc.get_task(task.task_id)
+    assert archived_task is not None
+    assert archived_task.archived_at is not None
+    assert [t.task_id for t in task_svc.list_tasks()] == []
+    assert [t.task_id for t in task_svc.list_tasks(include_archived=True)] == [task.task_id]
+    assert len(task_svc.coordinator.list_runs(task.task_id)) == 1
+    assert deliv_mgr.get_deliverable(deliv.deliverable_id) is not None
+    assert deliv_path.is_file()
+    events = task_svc.list_events(task.task_id)
+    assert any(e.event_type == EventType.TASK_ARCHIVED for e in events)
+
+    # Explicit purge without confirm=True must fail closed
+    with pytest.raises(ValueError, match="confirm=True"):
+        task_svc.purge_task(task.task_id)
+    assert task_svc.get_task(task.task_id) is not None
+    assert deliv_path.is_file()
+
+    # Explicit purge with confirm=True removes DB rows and physical deliverables dir
+    purged = task_svc.purge_task(task.task_id, confirm=True)
+    assert purged is True
     assert task_svc.get_task(task.task_id) is None
     assert deliv_mgr.get_deliverable(deliv.deliverable_id) is None
+    assert not (ws_dir / "deliverables" / task.task_id).exists()
 
-    # Physical directory deleted
-    task_deliv_dir = ws_dir / "deliverables" / task.task_id
-    assert not task_deliv_dir.exists()
+
+def test_task_purge_filesystem_failure_rolls_back_db_and_restores_files(
+    test_env, monkeypatch: pytest.MonkeyPatch
+):
+    """If physical removal fails during purge_task, SQLite DB deletes roll back and disk dir is restored."""
+    task_svc: TaskService = test_env["task_svc"]
+    deliv_mgr: DeliverableManager = test_env["deliv_mgr"]
+    ws_dir: Path = test_env["ws_dir"]
+
+    task, run = task_svc.create_task("Purge rollback task", auto_start_run=True)
+    task_svc.coordinator.complete_task_and_run(task.task_id, run.run_id)
+    deliv = deliv_mgr.create_deliverable(
+        task_id=task.task_id,
+        run_id=run.run_id,
+        title="Locked Report",
+        content="# Critical deliverable",
+    )
+    deliv_path = Path(ws_dir / deliv.file_path)
+    assert deliv_path.is_file()
+
+    import jarvis_studio.service.deliverable_manager as deliv_mod
+
+    def _fail_rmtree(path, *args, **kwargs):
+        raise PermissionError("Simulated locked deliverable file")
+
+    monkeypatch.setattr(deliv_mod.shutil, "rmtree", _fail_rmtree)
+
+    with pytest.raises(PermissionError, match="Simulated locked deliverable file"):
+        task_svc.purge_task(task.task_id, confirm=True)
+
+    # DB and disk must BOTH remain completely consistent
+    assert task_svc.get_task(task.task_id) is not None
+    assert len(task_svc.coordinator.list_runs(task.task_id)) == 1
+    assert deliv_mgr.get_deliverable(deliv.deliverable_id) is not None
+    assert deliv_path.is_file()
+    assert deliv_path.read_text(encoding="utf-8") == "# Critical deliverable"
+    leftover_staging = list((ws_dir / "deliverables").glob(".purging_*"))
+    assert leftover_staging == []

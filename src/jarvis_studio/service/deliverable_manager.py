@@ -405,18 +405,55 @@ class DeliverableManager:
         path = self.get_deliverable_file_path(deliverable_id)
         return path.read_bytes()
 
-    def delete_task_deliverables_dir(self, task_id: str) -> None:
-        """Physically delete all files and directory under workspace/deliverables/{task_id}."""
+    def _validate_task_dir(self, task_id: str) -> Path:
+        """Validate task_id contains no path traversal and resolves inside deliverables_dir."""
+        if not task_id or "/" in task_id or "\\" in task_id or task_id in (".", ".."):
+            raise ValueError(f"Invalid task_id for deliverable directory operation: {task_id!r}")
         target_dir = (self.deliverables_dir / task_id).resolve()
-        if not target_dir.is_relative_to(self.deliverables_dir):
-            _logger.warning("Refusing to delete deliverables directory outside root: %s", target_dir)
-            return
-        if target_dir.name != task_id:
-            _logger.warning("Sanity check failed: target dir name %s != task_id %s", target_dir.name, task_id)
-            return
+        if not target_dir.is_relative_to(self.deliverables_dir) or target_dir.name != task_id:
+            raise PermissionError(f"Refusing deliverable directory operation outside root: {target_dir}")
+        return target_dir
 
+    def stage_task_deliverables_dir(self, task_id: str) -> Path | None:
+        """Atomically move workspace/deliverables/{task_id} to a hidden staging directory before DB purge."""
+        target_dir = self._validate_task_dir(task_id)
+        if not target_dir.exists():
+            return None
+        staged_dir = (self.deliverables_dir / f".purging_{task_id}_{uuid.uuid4().hex[:8]}").resolve()
+        if not staged_dir.is_relative_to(self.deliverables_dir):
+            raise PermissionError(f"Refusing staging directory outside root: {staged_dir}")
+        os.replace(target_dir, staged_dir)
+        return staged_dir
+
+    def restore_staged_dir(self, staged_dir: Path, task_id: str) -> None:
+        """Restore a staged deliverables directory back to its canonical location on rollback."""
+        target_dir = self._validate_task_dir(task_id)
+        resolved_staged = staged_dir.resolve()
+        if (
+            not resolved_staged.is_relative_to(self.deliverables_dir)
+            or not resolved_staged.name.startswith(".purging_")
+        ):
+            raise PermissionError(f"Invalid staged directory for restore: {staged_dir}")
+        if resolved_staged.exists() and not target_dir.exists():
+            os.replace(resolved_staged, target_dir)
+
+    def remove_staged_dir(self, staged_dir: Path) -> None:
+        """Strictly remove a previously staged deliverables directory (raises on I/O errors)."""
+        resolved_staged = staged_dir.resolve()
+        if (
+            not resolved_staged.is_relative_to(self.deliverables_dir)
+            or not resolved_staged.name.startswith(".purging_")
+        ):
+            raise PermissionError(f"Refusing removal of invalid staged directory: {staged_dir}")
+        if resolved_staged.exists() and resolved_staged.is_dir():
+            shutil.rmtree(resolved_staged)
+            _logger.info("Purged staged deliverables directory %s", resolved_staged)
+
+    def delete_task_deliverables_dir(self, task_id: str) -> None:
+        """Strictly delete all files and directory under workspace/deliverables/{task_id}."""
+        target_dir = self._validate_task_dir(task_id)
         if target_dir.exists() and target_dir.is_dir():
-            shutil.rmtree(target_dir, ignore_errors=True)
+            shutil.rmtree(target_dir)
             _logger.info("Deleted deliverables directory for task %s at %s", task_id, target_dir)
 
 
