@@ -254,12 +254,8 @@ class TaskService:
 
         staged_dir = self.deliverable_mgr.stage_task_deliverables_dir(task_id)
 
-        def _before_commit() -> None:
-            if staged_dir is not None:
-                self.deliverable_mgr.remove_staged_dir(staged_dir)
-
         try:
-            return self.coordinator.purge_task(task_id, before_commit_hook=_before_commit)
+            purged = self.coordinator.purge_task(task_id)
         except BaseException:
             if staged_dir is not None and staged_dir.exists():
                 try:
@@ -272,6 +268,19 @@ class TaskService:
                         restore_exc,
                     )
             raise
+
+        # Phase 3: Post-commit physical cleanup of staged directory
+        if purged and staged_dir is not None and staged_dir.exists():
+            try:
+                self.deliverable_mgr.remove_staged_dir(staged_dir)
+            except Exception as rm_exc:  # noqa: BLE001
+                _logger.warning(
+                    "Post-commit cleanup of staged deliverables %s failed (deferred to reconcile): %s",
+                    staged_dir,
+                    rm_exc,
+                )
+
+        return purged
 
     def list_events(self, task_id: str, *, since_seq: int = 0, limit: int = 100) -> list[EventRecord]:
         """Fetch observable business events for task after since_seq."""

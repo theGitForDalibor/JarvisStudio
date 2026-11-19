@@ -523,3 +523,99 @@ async def test_multi_run_fresh_checkpoint_retry_after_failed_run(tmp_path):
         assert "Retryable query" not in msg_texts
         assert "Fresh retry input" in msg_texts
         assert "Clean Run 2 success" in msg_texts
+
+
+@pytest.mark.asyncio
+async def test_purged_task_residual_checkpoint_cannot_be_reexecuted_or_resumed(tmp_path):
+    """Purging a task leaves SQLite DB records deleted; residual checkpointer rows can never be re-executed."""
+    cfg = _sqlite_settings(tmp_path)
+    reg = ToolRegistry()
+
+    async with AgentRuntime.open(cfg, instance_id="rt-s2a-purge-cp", tool_registry=reg) as rt:
+        rt.agent_service.graph = build_agent_graph(
+            model=_FakeToolChatModel(responses=[AIMessage(content="Run 1 output")]),
+            registry=reg,
+            checkpointer=rt.checkpointer,
+            hitl_mgr=rt.hitl_manager,
+        )
+        task_svc = TaskService(coordinator=rt.task_coordinator, db_path=cfg.storage.sqlite_path)
+        task, _ = task_svc.create_task("Will be purged", session_id=None)
+
+        res = await task_svc.execute_task(task.task_id, agent_service=rt.agent_service)
+        assert res.status == "completed"
+
+        # Verify checkpoint exists
+        snap_before = await rt.agent_service.graph.aget_state({"configurable": {"thread_id": task.thread_id}})
+        assert snap_before.values.get("messages") is not None
+
+        # Purge the task permanently
+        purged = task_svc.purge_task(task.task_id, confirm=True)
+        assert purged is True
+        assert task_svc.get_task(task.task_id) is None
+
+        # 1. Attempting to execute the purged task fails closed
+        with pytest.raises(KeyError, match=f"Task not found: {task.task_id}"):
+            await task_svc.execute_task(task.task_id, agent_service=rt.agent_service)
+
+        # 2. Attempting to resume approval on purged task fails closed
+        with pytest.raises(KeyError, match=f"Task not found: {task.task_id}"):
+            await task_svc.resume_task_approval(
+                task.task_id, "appr_dummy", ApprovalDecision(decision="approve"), agent_service=rt.agent_service
+            )
+
+        # 3. HTTP /api/v1/approvals rejects purged thread_id because _thread_exists_on_server is False
+        from jarvis_studio.api.routes import approvals as approvals_mod
+        assert approvals_mod._thread_exists_on_server(task.thread_id) is False
+
+
+@pytest.mark.asyncio
+async def test_followup_run_inherits_checkpoint_history_without_reset(tmp_path):
+    """Subsequent run on same task with fresh_checkpoint=False inherits full conversation and tool history."""
+    cfg = _sqlite_settings(tmp_path)
+    reg = ToolRegistry()
+
+    async with AgentRuntime.open(cfg, instance_id="rt-s2a-inherit", tool_registry=reg) as rt:
+        model = _FakeToolChatModel(
+            responses=[
+                AIMessage(content="Step 1 response"),
+                AIMessage(content="Step 2 continuation"),
+            ]
+        )
+        rt.agent_service.graph = build_agent_graph(
+            model=model,
+            registry=reg,
+            checkpointer=rt.checkpointer,
+            hitl_mgr=rt.hitl_manager,
+        )
+        task_svc = TaskService(coordinator=rt.task_coordinator, db_path=cfg.storage.sqlite_path)
+        task, _ = task_svc.create_task("Step 1 query", session_id=None)
+
+        # Run 1
+        res1 = await task_svc.execute_task(task.task_id, agent_service=rt.agent_service)
+        assert res1.status == "completed"
+        assert res1.output_text == "Step 1 response"
+
+        # Run 2: inherits context (fresh_checkpoint=False)
+        res2 = await task_svc.execute_task(
+            task.task_id,
+            user_message="Step 2 query",
+            fresh_checkpoint=False,
+            agent_service=rt.agent_service,
+        )
+        assert res2.status == "completed"
+        assert res2.output_text == "Step 2 continuation"
+
+        runs = rt.task_coordinator.list_runs(task.task_id)
+        assert len(runs) == 2
+        assert [r.run_seq for r in runs] == [1, 2]
+
+        # Checkpoint snapshot contains all messages accumulated across Run 1 and Run 2
+        snap = await rt.agent_service.graph.aget_state({"configurable": {"thread_id": task.thread_id}})
+        msg_contents = [str(m.content) for m in snap.values["messages"]]
+        assert msg_contents == [
+            "Step 1 query",
+            "Step 1 response",
+            "Step 2 query",
+            "Step 2 continuation",
+        ]
+

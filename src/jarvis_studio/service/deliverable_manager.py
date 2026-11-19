@@ -547,6 +547,29 @@ class DeliverableManager:
         - Detects disk files with no matching DB record (`orphan_files`), deleting only when
           `cleanup_orphans=True` (disabled by default for safety).
         """
+        # Step 0: Restore any uncommitted .purging_* staging directories before checking deliverable records
+        if self.deliverables_dir.exists():
+            pattern = f".purging_{task_id}_*" if task_id is not None else ".purging_*"
+            for p_dir in self.deliverables_dir.glob(pattern):
+                if not p_dir.is_dir():
+                    continue
+                parts = p_dir.name[len(".purging_"):].rsplit("_", 1)
+                c_task_id = parts[0] if len(parts) == 2 else (task_id or "")
+                if c_task_id:
+                    with self._read_conn() as conn:
+                        r = conn.execute(
+                            "SELECT 1 FROM agent_tasks WHERE task_id = ?",
+                            (c_task_id,),
+                        ).fetchone()
+                    if r is not None:
+                        target_task_dir = self.deliverables_dir / c_task_id
+                        if not target_task_dir.exists():
+                            self.restore_staged_dir(p_dir, c_task_id)
+                            _logger.info(
+                                "Reconcile restored uncommitted staged deliverables for task %s",
+                                c_task_id,
+                            )
+
         scan_root = self._validate_task_dir(task_id) if task_id is not None else self.deliverables_dir
 
         with self._read_conn() as conn:
@@ -590,6 +613,28 @@ class DeliverableManager:
                 for dname in dirnames:
                     dpath = (root_path / dname).resolve()
                     if dname.startswith(".purging_") and dpath.is_relative_to(self.deliverables_dir):
+                        # Extract task_id from .purging_{task_id}_{uuid}
+                        parts = dname[len(".purging_"):].rsplit("_", 1)
+                        c_task_id = parts[0] if len(parts) == 2 else None
+                        task_exists_in_db = False
+                        if c_task_id:
+                            with self._read_conn() as conn:
+                                r = conn.execute(
+                                    "SELECT 1 FROM agent_tasks WHERE task_id = ?",
+                                    (c_task_id,),
+                                ).fetchone()
+                                task_exists_in_db = r is not None
+
+                        if task_exists_in_db and c_task_id:
+                            target_task_dir = self.deliverables_dir / c_task_id
+                            if not target_task_dir.exists():
+                                self.restore_staged_dir(dpath, c_task_id)
+                                _logger.info(
+                                    "Reconcile restored uncommitted staged deliverables for task %s",
+                                    c_task_id,
+                                )
+                                continue
+
                         rel_dir_str = dpath.relative_to(self.workspace_root).as_posix()
                         stale_temp_files.append(rel_dir_str)
                         age = now - dpath.stat().st_mtime
@@ -625,6 +670,28 @@ class DeliverableManager:
                 resolved_d = dpath.resolve()
                 if not resolved_d.is_relative_to(self.deliverables_dir) or not resolved_d.is_dir():
                     continue
+
+                parts = resolved_d.name[len(".purging_"):].rsplit("_", 1)
+                c_task_id = parts[0] if len(parts) == 2 else task_id
+                task_still_in_db = False
+                if c_task_id:
+                    with self._read_conn() as conn:
+                        r = conn.execute(
+                            "SELECT 1 FROM agent_tasks WHERE task_id = ?",
+                            (c_task_id,),
+                        ).fetchone()
+                        task_still_in_db = r is not None
+
+                if task_still_in_db and c_task_id:
+                    target_task_dir = self.deliverables_dir / c_task_id
+                    if not target_task_dir.exists():
+                        self.restore_staged_dir(resolved_d, c_task_id)
+                        _logger.info(
+                            "Reconcile restored uncommitted staged deliverables for task %s",
+                            c_task_id,
+                        )
+                        continue
+
                 rel_dir_str = resolved_d.relative_to(self.workspace_root).as_posix()
                 if rel_dir_str not in stale_temp_files:
                     stale_temp_files.append(rel_dir_str)

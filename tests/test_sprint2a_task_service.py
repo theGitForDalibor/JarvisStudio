@@ -378,40 +378,126 @@ def test_task_soft_delete_preserves_history_and_explicit_purge_cleans_up(test_en
     assert not (ws_dir / "deliverables" / task.task_id).exists()
 
 
-def test_task_purge_filesystem_failure_rolls_back_db_and_restores_files(
+def test_task_purge_staging_failure_aborts_cleanly(
     test_env, monkeypatch: pytest.MonkeyPatch
 ):
-    """If physical removal fails during purge_task, SQLite DB deletes roll back and disk dir is restored."""
+    """If initial directory staging fails, DB records are never touched and files remain intact."""
     task_svc: TaskService = test_env["task_svc"]
     deliv_mgr: DeliverableManager = test_env["deliv_mgr"]
     ws_dir: Path = test_env["ws_dir"]
 
-    task, run = task_svc.create_task("Purge rollback task", auto_start_run=True)
+    task, run = task_svc.create_task("Staging fail task", auto_start_run=True)
     task_svc.coordinator.complete_task_and_run(task.task_id, run.run_id)
     deliv = deliv_mgr.create_deliverable(
         task_id=task.task_id,
         run_id=run.run_id,
-        title="Locked Report",
-        content="# Critical deliverable",
+        title="Safe Report",
+        content="# Unmoved content",
     )
     deliv_path = Path(ws_dir / deliv.file_path)
     assert deliv_path.is_file()
 
-    import jarvis_studio.service.deliverable_manager as deliv_mod
+    def _fail_stage(task_id: str):
+        raise PermissionError("Simulated directory staging lock")
 
-    def _fail_rmtree(path, *args, **kwargs):
-        raise PermissionError("Simulated locked deliverable file")
+    monkeypatch.setattr(deliv_mgr, "stage_task_deliverables_dir", _fail_stage)
 
-    monkeypatch.setattr(deliv_mod.shutil, "rmtree", _fail_rmtree)
-
-    with pytest.raises(PermissionError, match="Simulated locked deliverable file"):
+    with pytest.raises(PermissionError, match="Simulated directory staging lock"):
         task_svc.purge_task(task.task_id, confirm=True)
 
-    # DB and disk must BOTH remain completely consistent
+    assert task_svc.get_task(task.task_id) is not None
+    assert deliv_mgr.get_deliverable(deliv.deliverable_id) is not None
+    assert deliv_path.is_file()
+    assert deliv_path.read_text(encoding="utf-8") == "# Unmoved content"
+
+
+def test_task_purge_sqlite_commit_failure_restores_staged_files_and_preserves_db(
+    test_env, monkeypatch: pytest.MonkeyPatch
+):
+    """Key Failure Injection: Staging succeeds, but SQLite COMMIT fails.
+
+    Verifies the two-phase cleanup protocol:
+    1. Deliverables directory was staged to `.purging_{task_id}_{uuid}`.
+    2. SQLite COMMIT fails, causing database rollback.
+    3. The protocol catches the commit failure, restores `.purging_*` back to `deliverables/{task_id}`.
+    4. Both database records and original filesystem files are 100% recovered and consistent.
+    """
+    task_svc: TaskService = test_env["task_svc"]
+    deliv_mgr: DeliverableManager = test_env["deliv_mgr"]
+    ws_dir: Path = test_env["ws_dir"]
+
+    task, run = task_svc.create_task("Commit fail task", auto_start_run=True)
+    task_svc.coordinator.complete_task_and_run(task.task_id, run.run_id)
+    deliv = deliv_mgr.create_deliverable(
+        task_id=task.task_id,
+        run_id=run.run_id,
+        title="Critical Deliverable",
+        content="# Mission Critical Report Content",
+    )
+    deliv_path = Path(ws_dir / deliv.file_path)
+    assert deliv_path.is_file()
+
+    # Inject failure specifically when SQLite commits the purge transaction
+    from contextlib import contextmanager
+
+    orig_tx = task_svc.coordinator._tx
+
+    @contextmanager
+    def _failing_tx():
+        with orig_tx() as conn:
+            yield conn
+            # Simulating disk/WAL I/O failure on final commit
+            raise sqlite3.OperationalError("Simulated disk I/O error during SQLite COMMIT")
+
+    monkeypatch.setattr(task_svc.coordinator, "_tx", _failing_tx)
+
+    with pytest.raises(sqlite3.OperationalError, match="Simulated disk I/O error during SQLite COMMIT"):
+        task_svc.purge_task(task.task_id, confirm=True)
+
+    # Undo patch to verify state
+    monkeypatch.undo()
+
+    # 1. Database records MUST remain completely rolled back (preserved)
     assert task_svc.get_task(task.task_id) is not None
     assert len(task_svc.coordinator.list_runs(task.task_id)) == 1
     assert deliv_mgr.get_deliverable(deliv.deliverable_id) is not None
+
+    # 2. Filesystem deliverables directory MUST be 100% restored and valid
     assert deliv_path.is_file()
-    assert deliv_path.read_text(encoding="utf-8") == "# Critical deliverable"
+    assert deliv_path.read_text(encoding="utf-8") == "# Mission Critical Report Content"
+    ok, err = deliv_mgr.verify_deliverable(deliv.deliverable_id)
+    assert ok is True, f"Deliverable verification failed: {err}"
+
+    # 3. No leftover `.purging_*` temporary staging directories
     leftover_staging = list((ws_dir / "deliverables").glob(".purging_*"))
     assert leftover_staging == []
+
+
+def test_task_purge_crash_recovery_restores_uncommitted_staged_files_on_reconcile(test_env):
+    """Crash Recovery: Process dies after staging but before DB commit -> reconcile_storage restores files."""
+    task_svc: TaskService = test_env["task_svc"]
+    deliv_mgr: DeliverableManager = test_env["deliv_mgr"]
+    ws_dir: Path = test_env["ws_dir"]
+
+    task, run = task_svc.create_task("Crash task", auto_start_run=True)
+    task_svc.coordinator.complete_task_and_run(task.task_id, run.run_id)
+    deliv = deliv_mgr.create_deliverable(
+        task_id=task.task_id,
+        run_id=run.run_id,
+        title="Crash Recoverable",
+        content="# Restored after crash",
+    )
+    deliv_path = Path(ws_dir / deliv.file_path)
+    assert deliv_path.is_file()
+
+    # Simulate crash: stage directory to .purging_{task_id}_{uuid}, without committing purge in DB
+    staged = deliv_mgr.stage_task_deliverables_dir(task.task_id)
+    assert staged is not None and staged.exists()
+    assert not deliv_path.exists()
+
+    # On subsequent storage reconciliation, because task is still in DB, reconcile restores it
+    report = deliv_mgr.reconcile_storage(task_id=task.task_id)
+    assert deliv_path.is_file()
+    assert deliv_path.read_text(encoding="utf-8") == "# Restored after crash"
+    assert not staged.exists()
+    assert report.healthy_records == 1
