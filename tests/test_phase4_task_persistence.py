@@ -152,12 +152,12 @@ def test_p4_mig_01_v2_to_v3_migration_and_constraints(tmp_path: Path) -> None:
     finally:
         conn.close()
 
-    assert APP_SCHEMA_VERSION == 3
-    assert run_app_migrations(db_path) == 3
+    assert APP_SCHEMA_VERSION >= 3
+    assert run_app_migrations(db_path) == APP_SCHEMA_VERSION
 
     check_conn = open_sync_connection(db_path)
     try:
-        assert check_conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert check_conn.execute("PRAGMA user_version").fetchone()[0] == APP_SCHEMA_VERSION
 
         # Check orphan session restored
         restored = check_conn.execute("SELECT title FROM chat_sessions WHERE session_id = 'sess-orphan'").fetchone()

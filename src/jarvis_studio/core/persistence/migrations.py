@@ -24,7 +24,7 @@ from jarvis_studio.core.persistence.sqlite import (
     sync_transaction,
 )
 
-APP_SCHEMA_VERSION = 3
+APP_SCHEMA_VERSION = 4
 VEC_SCHEMA_VERSION = 1
 
 _logger = logging.getLogger(__name__)
@@ -282,6 +282,93 @@ _APP_V3_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_ltm_source_session ON ltm_memories(source_session_id)",
 )
 
+_APP_V4_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS agent_tasks_v4 (
+        task_id           TEXT PRIMARY KEY,
+        session_id        TEXT,
+        thread_id         TEXT NOT NULL,
+        status            TEXT NOT NULL CHECK (status IN (
+                              'CREATED', 'RUNNING', 'WAITING_APPROVAL', 'EXECUTING_TOOL',
+                              'COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'UNKNOWN', 'INTERRUPTED'
+                          )),
+        query             TEXT NOT NULL,
+        initiator         TEXT NOT NULL DEFAULT 'user',
+        assigned_agent_id TEXT NOT NULL DEFAULT 'general_agent',
+        current_run_id    TEXT,
+        plan_json         TEXT,
+        priority          TEXT NOT NULL DEFAULT 'NORMAL',
+        result_summary    TEXT,
+        created_at        REAL NOT NULL,
+        updated_at        REAL NOT NULL,
+        completed_at      REAL,
+        runtime_id        TEXT,
+        error_message     TEXT,
+        FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE SET NULL
+    )
+    """,
+    """
+    INSERT INTO agent_tasks_v4 (
+        task_id, session_id, thread_id, status, query, initiator,
+        assigned_agent_id, current_run_id, plan_json, priority,
+        result_summary, created_at, updated_at, completed_at,
+        runtime_id, error_message
+    )
+    SELECT
+        task_id, session_id, thread_id, status, query, initiator,
+        'general_agent', current_run_id, NULL, 'NORMAL',
+        NULL, created_at, updated_at, completed_at,
+        runtime_id, error_message
+    FROM agent_tasks
+    """,
+    "DROP TABLE agent_tasks",
+    "ALTER TABLE agent_tasks_v4 RENAME TO agent_tasks",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_session_created ON agent_tasks(session_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_status_runtime ON agent_tasks(status, runtime_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_thread_status ON agent_tasks(thread_id, status)",
+    """
+    CREATE TABLE IF NOT EXISTS agent_deliverables (
+        deliverable_id    TEXT PRIMARY KEY,
+        task_id           TEXT NOT NULL,
+        run_id            TEXT NOT NULL,
+        title             TEXT NOT NULL,
+        deliverable_type  TEXT NOT NULL CHECK (deliverable_type IN (
+                              'markdown_report', 'code_patch', 'file', 'data_table', 'json_artifact'
+                          )),
+        file_path         TEXT,
+        mime_type         TEXT NOT NULL,
+        file_size_bytes   INTEGER DEFAULT 0,
+        sha256_hash       TEXT,
+        summary           TEXT,
+        content_preview   TEXT,
+        metadata_json     TEXT,
+        created_at        REAL NOT NULL,
+        updated_at        REAL NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+        FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_deliv_task ON agent_deliverables(task_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_deliv_run ON agent_deliverables(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_deliv_type ON agent_deliverables(deliverable_type)",
+    """
+    CREATE TABLE IF NOT EXISTS agent_events (
+        event_id      TEXT PRIMARY KEY,
+        task_id       TEXT NOT NULL,
+        run_id        TEXT,
+        seq           INTEGER NOT NULL,
+        event_type    TEXT NOT NULL,
+        timestamp     REAL NOT NULL,
+        payload_json  TEXT NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+        FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+        UNIQUE (task_id, seq)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_events_task_seq ON agent_events(task_id, seq ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_events_run ON agent_events(run_id)",
+)
+
 # `vec_chunks` virtual table depends on per-instance embedding dimension (e.g. 32 in tests,
 # 1536 in production) and therefore remains created by `SqliteVecStore._init_db()`.
 _VEC_V1_STATEMENTS: tuple[str, ...] = (
@@ -522,13 +609,26 @@ def _run_migrations(
             )
         if _read_user_version(in_memory_conn) >= target_version:
             return _read_user_version(in_memory_conn)
-        with sync_transaction(
-            normalized,
-            in_memory_conn=in_memory_conn,
-            enable_foreign_keys=enable_foreign_keys,
-            enable_sqlite_vec=enable_sqlite_vec,
-        ) as conn:
-            return _apply_steps(conn, target_version=target_version, steps=steps)
+        prev_fk = in_memory_conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        if not enable_foreign_keys:
+            in_memory_conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with sync_transaction(
+                normalized,
+                in_memory_conn=in_memory_conn,
+                enable_foreign_keys=enable_foreign_keys,
+                enable_sqlite_vec=enable_sqlite_vec,
+            ) as conn:
+                res = _apply_steps(conn, target_version=target_version, steps=steps)
+                violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise MigrationError(
+                        f"Foreign key check failed after in-memory migration: {violations}"
+                    )
+                return res
+        finally:
+            if prev_fk:
+                in_memory_conn.execute("PRAGMA foreign_keys = ON")
 
     resolved = Path(normalized).resolve()
     with get_path_lock(resolved):
@@ -558,7 +658,13 @@ def _run_migrations(
             enable_foreign_keys=enable_foreign_keys,
             enable_sqlite_vec=enable_sqlite_vec,
         ) as conn:
-            return _apply_steps(conn, target_version=target_version, steps=steps)
+            res = _apply_steps(conn, target_version=target_version, steps=steps)
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise MigrationError(
+                    f"Foreign key check failed after disk migration: {violations}"
+                )
+            return res
 
 
 def run_app_migrations(
@@ -574,8 +680,9 @@ def run_app_migrations(
             1: _APP_V1_STATEMENTS,
             2: _APP_V2_STATEMENTS,
             3: _APP_V3_STATEMENTS,
+            4: _APP_V4_STATEMENTS,
         },
-        enable_foreign_keys=True,
+        enable_foreign_keys=False,
         enable_sqlite_vec=False,
         in_memory_conn=in_memory_conn,
     )

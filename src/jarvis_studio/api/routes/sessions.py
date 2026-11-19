@@ -75,11 +75,14 @@ async def update_session_title(
 
 
 @router.delete("/{session_id}")
-async def delete_session(session_id: str) -> dict[str, Any]:
-    """Delete a session thread and its conversation history."""
+async def delete_session(session_id: str, keep_tasks: bool = True) -> dict[str, Any]:
+    """Delete a session thread and its conversation history.
+
+    By default, tasks associated with this session are preserved and unlinked (keep_tasks=True).
+    """
     session_service = get_session_service()
     try:
-        success = session_service.delete_session(session_id)
+        success = session_service.delete_session(session_id, keep_tasks=keep_tasks)
     except SessionBusyError as err:
         raise HTTPException(status_code=409, detail=str(err)) from err
 

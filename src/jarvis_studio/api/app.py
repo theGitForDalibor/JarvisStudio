@@ -10,10 +10,12 @@ from fastapi.staticfiles import StaticFiles
 
 from jarvis_studio.api.routes.approvals import router as approvals_router
 from jarvis_studio.api.routes.chat import router as chat_router
+from jarvis_studio.api.routes.deliverables import router as deliverables_router
 from jarvis_studio.api.routes.memory import router as memory_router
 from jarvis_studio.api.routes.rag import router as rag_router
 from jarvis_studio.api.routes.sessions import router as sessions_router
 from jarvis_studio.api.routes.system import router as system_router
+from jarvis_studio.api.routes.tasks import router as tasks_router
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.core.runtime import AgentRuntime
@@ -71,6 +73,8 @@ def create_app() -> FastAPI:
     app.include_router(approvals_router, prefix=api_prefix)
     app.include_router(memory_router, prefix=api_prefix)
     app.include_router(rag_router, prefix=api_prefix)
+    app.include_router(tasks_router, prefix=api_prefix)
+    app.include_router(deliverables_router, prefix=api_prefix)
 
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():

@@ -14,6 +14,8 @@ from jarvis_studio.tools.builtin.rag_tools import (
     list_indexed_documents,
     search_knowledge_base,
 )
+from jarvis_studio.tools.builtin.report_tools import publish_research_report
+from jarvis_studio.tools.builtin.search_tools import search_web
 from jarvis_studio.tools.builtin.shell_tools import execute_shell_command
 from jarvis_studio.tools.registry import ToolRegistry, get_default_registry
 
@@ -27,6 +29,8 @@ _BUILTIN_TOOLS = (
     search_knowledge_base,
     index_workspace_directory,
     list_indexed_documents,
+    search_web,
+    publish_research_report,
 )
 
 
@@ -45,10 +49,12 @@ __all__ = [
     "index_workspace_directory",
     "list_directory",
     "list_indexed_documents",
+    "publish_research_report",
     "read_file",
     "recall_personal_memory",
     "register_builtin_tools",
     "save_personal_memory",
     "search_knowledge_base",
+    "search_web",
     "write_file",
 ]

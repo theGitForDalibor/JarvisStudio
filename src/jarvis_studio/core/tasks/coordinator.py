@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -22,6 +23,8 @@ from jarvis_studio.core.persistence.sqlite import (
 from jarvis_studio.core.tasks.models import (
     AgentRun,
     AgentTask,
+    EventRecord,
+    EventType,
     RunStatus,
     RunTriggerType,
     TaskStatus,
@@ -31,6 +34,7 @@ _logger = logging.getLogger(__name__)
 
 
 def _row_to_task(row: sqlite3.Row) -> AgentTask:
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
     return AgentTask(
         task_id=row["task_id"],
         session_id=row["session_id"],
@@ -38,7 +42,11 @@ def _row_to_task(row: sqlite3.Row) -> AgentTask:
         status=TaskStatus(row["status"]),
         query=row["query"],
         initiator=row["initiator"],
+        assigned_agent_id=row["assigned_agent_id"] if "assigned_agent_id" in keys else "general_agent",
         current_run_id=row["current_run_id"],
+        plan_json=row["plan_json"] if "plan_json" in keys else None,
+        priority=row["priority"] if "priority" in keys else "NORMAL",
+        result_summary=row["result_summary"] if "result_summary" in keys else None,
         created_at=float(row["created_at"]),
         updated_at=float(row["updated_at"]),
         completed_at=float(row["completed_at"]) if row["completed_at"] is not None else None,
@@ -120,48 +128,89 @@ class TaskCoordinator:
 
     def create_task(
         self,
-        session_id: str,
-        thread_id: str,
-        query: str,
+        session_id: str | None = None,
+        thread_id: str | None = None,
+        query: str = "",
         *,
         initiator: str = "user",
+        assigned_agent_id: str = "general_agent",
+        plan_json: str | None = None,
+        priority: str = "NORMAL",
+        result_summary: str | None = None,
         runtime_id: str | None = None,
         task_id: str | None = None,
     ) -> AgentTask:
         """Insert a new task into `agent_tasks`."""
+        effective_task_id = task_id or f"task_{uuid.uuid4().hex[:12]}"
+        effective_thread_id = thread_id or effective_task_id
         task = AgentTask(
-            task_id=task_id or f"task_{uuid.uuid4().hex[:12]}",
+            task_id=effective_task_id,
             session_id=session_id,
-            thread_id=thread_id,
+            thread_id=effective_thread_id,
             status=TaskStatus.CREATED,
             query=query,
             initiator=initiator,
+            assigned_agent_id=assigned_agent_id,
+            plan_json=plan_json,
+            priority=priority,
+            result_summary=result_summary,
             runtime_id=runtime_id,
         )
         with self._tx() as conn:
-            conn.execute(
-                """
-                INSERT INTO agent_tasks (
-                    task_id, session_id, thread_id, status, query,
-                    initiator, current_run_id, created_at, updated_at,
-                    completed_at, runtime_id, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task.task_id,
-                    task.session_id,
-                    task.thread_id,
-                    task.status.value,
-                    task.query,
-                    task.initiator,
-                    task.current_run_id,
-                    task.created_at,
-                    task.updated_at,
-                    task.completed_at,
-                    task.runtime_id,
-                    task.error_message,
-                ),
-            )
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(agent_tasks)").fetchall()]
+            if "assigned_agent_id" in cols:
+                conn.execute(
+                    """
+                    INSERT INTO agent_tasks (
+                        task_id, session_id, thread_id, status, query,
+                        initiator, assigned_agent_id, current_run_id, plan_json,
+                        priority, result_summary, created_at, updated_at,
+                        completed_at, runtime_id, error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task.task_id,
+                        task.session_id,
+                        task.thread_id,
+                        task.status.value,
+                        task.query,
+                        task.initiator,
+                        task.assigned_agent_id,
+                        task.current_run_id,
+                        task.plan_json,
+                        task.priority,
+                        task.result_summary,
+                        task.created_at,
+                        task.updated_at,
+                        task.completed_at,
+                        task.runtime_id,
+                        task.error_message,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO agent_tasks (
+                        task_id, session_id, thread_id, status, query,
+                        initiator, current_run_id, created_at, updated_at,
+                        completed_at, runtime_id, error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task.task_id,
+                        task.session_id or "default",
+                        task.thread_id,
+                        task.status.value,
+                        task.query,
+                        task.initiator,
+                        task.current_run_id,
+                        task.created_at,
+                        task.updated_at,
+                        task.completed_at,
+                        task.runtime_id,
+                        task.error_message,
+                    ),
+                )
         return task
 
     def start_run(
@@ -438,15 +487,170 @@ class TaskCoordinator:
             ).fetchall()
             return [_row_to_run(r) for r in rows]
 
-    def list_tasks(self, session_id: str) -> list[AgentTask]:
-        """List all tasks for a session, ordered by created_at descending."""
+    def list_tasks(
+        self,
+        session_id: str | None = None,
+        *,
+        status: TaskStatus | str | None = None,
+        limit: int = 50,
+    ) -> list[AgentTask]:
+        """List tasks, optionally filtered by session_id and/or status."""
+        query = "SELECT * FROM agent_tasks"
+        params: list[object] = []
+        conditions: list[str] = []
+        if session_id is not None:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        if status is not None:
+            status_val = status.value if isinstance(status, TaskStatus) else str(status)
+            conditions.append("status = ?")
+            params.append(status_val)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        with self._read_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(query, tuple(params)).fetchall()
+            return [_row_to_task(r) for r in rows]
+
+    def delete_task(self, task_id: str) -> bool:
+        """Permanently delete a task and its associated records from the database."""
+        with self._tx() as conn:
+            row = conn.execute("SELECT 1 FROM agent_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if row is None:
+                return False
+            # Cascade delete in proper child-to-parent order
+            conn.execute("DELETE FROM agent_deliverables WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM agent_events WHERE task_id = ?", (task_id,))
+            tbl_traces = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'").fetchone()
+            if tbl_traces:
+                conn.execute("DELETE FROM agent_conversation_traces WHERE task_id = ?", (task_id,))
+            tbl_outcomes = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_execution_outcomes'").fetchone()
+            if tbl_outcomes:
+                conn.execute("DELETE FROM tool_execution_outcomes WHERE task_id = ?", (task_id,))
+            tbl_approvals = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hitl_approval_requests'").fetchone()
+            if tbl_approvals:
+                conn.execute("DELETE FROM hitl_approval_requests WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM agent_runs WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM agent_tasks WHERE task_id = ?", (task_id,))
+            return True
+
+    def record_event(
+        self,
+        task_id: str,
+        event_type: EventType | str,
+        *,
+        run_id: str | None = None,
+        payload: dict[str, object] | None = None,
+        event_id: str | None = None,
+    ) -> EventRecord:
+        """Persist a user-observable business execution event with monotonic seq per task."""
+        now = time.time()
+        evt_type = event_type if isinstance(event_type, EventType) else EventType(str(event_type))
+        payload_data = payload or {}
+        payload_json = json.dumps(payload_data, ensure_ascii=False)
+        e_id = event_id or f"evt_{uuid.uuid4().hex[:12]}"
+
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM agent_events WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            next_seq = int(row[0]) + 1 if row is not None and row[0] is not None else 1
+
+            conn.execute(
+                """
+                INSERT INTO agent_events (
+                    event_id, task_id, run_id, seq, event_type, timestamp, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (e_id, task_id, run_id, next_seq, evt_type.value, now, payload_json),
+            )
+        return EventRecord(
+            event_id=e_id,
+            task_id=task_id,
+            run_id=run_id,
+            seq=next_seq,
+            event_type=evt_type,
+            timestamp=now,
+            payload_json=payload_json,
+        )
+
+    def list_events_for_task(
+        self,
+        task_id: str,
+        *,
+        since_seq: int = 0,
+        limit: int = 100,
+    ) -> list[EventRecord]:
+        """List events for task strictly after since_seq ordered by seq ASC."""
         with self._read_conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT * FROM agent_tasks WHERE session_id = ? ORDER BY created_at DESC",
-                (session_id,),
+                """
+                SELECT * FROM agent_events
+                WHERE task_id = ? AND seq > ?
+                ORDER BY seq ASC
+                LIMIT ?
+                """,
+                (task_id, since_seq, limit),
             ).fetchall()
-            return [_row_to_task(r) for r in rows]
+            results = []
+            for r in rows:
+                p_json = r["payload_json"] or "{}"
+                evt_name = r["event_type"]
+                event_type_enum = (
+                    EventType(evt_name)
+                    if evt_name in EventType._value2member_map_
+                    else EventType.TASK_CREATED
+                )
+                results.append(
+                    EventRecord(
+                        event_id=r["event_id"],
+                        task_id=r["task_id"],
+                        run_id=r["run_id"],
+                        seq=int(r["seq"]),
+                        event_type=event_type_enum,
+                        timestamp=float(r["timestamp"]),
+                        payload_json=p_json,
+                    )
+                )
+            return results
+
+    def update_task_metadata(
+        self,
+        task_id: str,
+        *,
+        plan_json: str | None = None,
+        result_summary: str | None = None,
+        priority: str | None = None,
+        assigned_agent_id: str | None = None,
+    ) -> None:
+        """Update mutable metadata on a task."""
+        now = time.time()
+        updates: list[str] = ["updated_at = ?"]
+        params: list[object] = [now]
+        if plan_json is not None:
+            updates.append("plan_json = ?")
+            params.append(plan_json)
+        if result_summary is not None:
+            updates.append("result_summary = ?")
+            params.append(result_summary)
+        if priority is not None:
+            updates.append("priority = ?")
+            params.append(priority)
+        if assigned_agent_id is not None:
+            updates.append("assigned_agent_id = ?")
+            params.append(assigned_agent_id)
+        params.append(task_id)
+
+        with self._tx() as conn:
+            conn.execute(
+                f"UPDATE agent_tasks SET {', '.join(updates)} WHERE task_id = ?",
+                tuple(params),
+            )
 
     def get_active_task_for_thread(self, thread_id: str) -> AgentTask | None:
         """Find the latest active task for thread (CREATED, RUNNING, WAITING_APPROVAL, EXECUTING_TOOL)."""

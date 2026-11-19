@@ -8,6 +8,10 @@ from jarvis_studio.core.tasks.coordinator import (
 from jarvis_studio.core.tasks.models import (
     AgentRun,
     AgentTask,
+    DeliverableRecord,
+    DeliverableType,
+    EventRecord,
+    EventType,
     RunStatus,
     RunTriggerType,
     TaskStatus,
@@ -16,6 +20,10 @@ from jarvis_studio.core.tasks.models import (
 __all__ = [
     "AgentRun",
     "AgentTask",
+    "DeliverableRecord",
+    "DeliverableType",
+    "EventRecord",
+    "EventType",
     "RunStatus",
     "RunTriggerType",
     "TaskCoordinator",

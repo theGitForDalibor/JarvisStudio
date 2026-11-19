@@ -327,8 +327,17 @@ class SessionService:
         with self._db.read_connection() as c:
             return _check(c)
 
-    def delete_session(self, session_id: str, *, checkpointer: Any | None = None) -> bool:
-        """Remove a session and cascade delete all related records across 8 tables.
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        checkpointer: Any | None = None,
+        keep_tasks: bool = False,
+    ) -> bool:
+        """Remove a session.
+
+        If keep_tasks is True, unlinks tasks (session_id = NULL) while preserving tasks and deliverables.
+        If keep_tasks is False (legacy cascade), cascade deletes all related records across 8 tables.
 
         Raises SessionBusyError if any active task or execution is in progress.
         """
@@ -344,82 +353,121 @@ class SessionService:
             if not exists:
                 return False
 
-            # Cascade deletion across 8 tables in exact FK dependency order:
-            # 1. agent_conversation_traces
-            tbl_traces = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
-            ).fetchone()
-            if tbl_traces:
-                conn.execute(
-                    """
-                    DELETE FROM agent_conversation_traces
-                    WHERE session_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
-                    """,
-                    (session_id, session_id),
-                )
+            if keep_tasks:
+                # Decoupled deletion: Preserve tasks, runs, outcomes, and deliverables.
+                # Unlink tasks by setting session_id to NULL
+                tbl_tasks = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_tasks'"
+                ).fetchone()
+                if tbl_tasks:
+                    conn.execute("UPDATE agent_tasks SET session_id = NULL WHERE session_id = ?", (session_id,))
 
-            # 2. tool_execution_outcomes
-            tbl_outcomes = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_execution_outcomes'"
-            ).fetchone()
-            if tbl_outcomes:
-                conn.execute(
-                    """
-                    DELETE FROM tool_execution_outcomes
-                    WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
-                    """,
-                    (session_id, session_id),
-                )
+                # Unlink or clean conversation traces
+                tbl_traces = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
+                ).fetchone()
+                if tbl_traces:
+                    conn.execute(
+                        "UPDATE agent_conversation_traces SET session_id = NULL WHERE session_id = ? AND task_id IS NOT NULL",
+                        (session_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM agent_conversation_traces WHERE session_id = ? AND task_id IS NULL",
+                        (session_id,),
+                    )
 
-            # 3. hitl_approval_requests
-            tbl_hitl = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hitl_approval_requests'"
-            ).fetchone()
-            if tbl_hitl:
-                conn.execute(
-                    """
-                    DELETE FROM hitl_approval_requests
-                    WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
-                    """,
-                    (session_id, session_id),
-                )
+                # Delete session chat messages
+                conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
 
-            # 4. agent_runs
-            tbl_runs = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'"
-            ).fetchone()
-            if tbl_runs:
-                conn.execute(
-                    "DELETE FROM agent_runs WHERE task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)",
-                    (session_id,),
-                )
+                # Unlink LTM memories from this session
+                tbl_ltm = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ltm_memories'"
+                ).fetchone()
+                if tbl_ltm:
+                    conn.execute(
+                        "UPDATE ltm_memories SET source_session_id = NULL WHERE source_session_id = ?",
+                        (session_id,),
+                    )
 
-            # 5. agent_tasks
-            tbl_tasks = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_tasks'"
-            ).fetchone()
-            if tbl_tasks:
-                conn.execute("DELETE FROM agent_tasks WHERE session_id = ?", (session_id,))
+                # Delete the session itself
+                cursor = conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
+            else:
+                # Cascade deletion across 8 tables in exact FK dependency order:
+                # 1. agent_conversation_traces
+                tbl_traces = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_conversation_traces'"
+                ).fetchone()
+                if tbl_traces:
+                    conn.execute(
+                        """
+                        DELETE FROM agent_conversation_traces
+                        WHERE session_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                        """,
+                        (session_id, session_id),
+                    )
 
-            # 6. chat_messages
-            conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+                # 2. tool_execution_outcomes
+                tbl_outcomes = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_execution_outcomes'"
+                ).fetchone()
+                if tbl_outcomes:
+                    conn.execute(
+                        """
+                        DELETE FROM tool_execution_outcomes
+                        WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                        """,
+                        (session_id, session_id),
+                    )
 
-            # 7. ltm_memories (nullify source session/task pointers)
-            tbl_ltm = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ltm_memories'"
-            ).fetchone()
-            if tbl_ltm:
-                conn.execute(
-                    """
-                    UPDATE ltm_memories
-                    SET source_session_id = NULL, source_task_id = NULL
-                    WHERE source_session_id = ?
-                    """,
-                    (session_id,),
-                )
+                # 3. hitl_approval_requests
+                tbl_hitl = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hitl_approval_requests'"
+                ).fetchone()
+                if tbl_hitl:
+                    conn.execute(
+                        """
+                        DELETE FROM hitl_approval_requests
+                        WHERE thread_id = ? OR task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)
+                        """,
+                        (session_id, session_id),
+                    )
 
-            # 8. chat_sessions
-            cursor = conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
+                # 4. agent_runs
+                tbl_runs = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'"
+                ).fetchone()
+                if tbl_runs:
+                    conn.execute(
+                        "DELETE FROM agent_runs WHERE task_id IN (SELECT task_id FROM agent_tasks WHERE session_id = ?)",
+                        (session_id,),
+                    )
+
+                # 5. agent_tasks
+                tbl_tasks = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_tasks'"
+                ).fetchone()
+                if tbl_tasks:
+                    conn.execute("DELETE FROM agent_tasks WHERE session_id = ?", (session_id,))
+
+                # 6. chat_messages
+                conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+
+                # 7. ltm_memories (nullify source session/task pointers)
+                tbl_ltm = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ltm_memories'"
+                ).fetchone()
+                if tbl_ltm:
+                    conn.execute(
+                        """
+                        UPDATE ltm_memories
+                        SET source_session_id = NULL, source_task_id = NULL
+                        WHERE source_session_id = ?
+                        """,
+                        (session_id,),
+                    )
+
+                # 8. chat_sessions
+                cursor = conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
 
         # Post-transaction: clean sticky context
         try:
@@ -638,3 +686,14 @@ def get_session_service() -> SessionService:
     if _global_session_service is None:
         _global_session_service = SessionService()
     return _global_session_service
+
+
+def reset_global_session_service() -> None:
+    """Reset the global SessionService instance."""
+    global _global_session_service
+    if _global_session_service is not None:
+        try:
+            _global_session_service.close()
+        except Exception:
+            pass
+        _global_session_service = None
