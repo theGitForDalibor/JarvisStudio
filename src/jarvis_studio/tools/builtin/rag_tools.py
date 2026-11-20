@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 
 from langchain_core.tools import tool
 
@@ -10,6 +14,30 @@ from jarvis_studio.rag.embeddings import EmbeddingsFactory
 from jarvis_studio.rag.indexer import WorkspaceIndexer
 from jarvis_studio.rag.store import SqliteVecStore
 from jarvis_studio.tools.base import RiskLevel, mark_tool_metadata
+
+_ACTIVE_KNOWLEDGE_SCOPE: contextvars.ContextVar[dict[str, list[str]] | None] = (
+    contextvars.ContextVar("active_knowledge_scope", default=None)
+)
+
+
+@contextmanager
+def scoped_knowledge_context(
+    scope: dict[str, Any] | None,
+) -> Iterator[None]:
+    """Bind an immutable Task Knowledge Scope for the duration of tool execution."""
+    if not scope or not isinstance(scope, dict):
+        yield
+        return
+    cols = [str(c) for c in (scope.get("collections") or []) if str(c).strip()]
+    docs = [str(d) for d in (scope.get("doc_ids") or []) if str(d).strip()]
+    if not cols and not docs:
+        yield
+        return
+    token = _ACTIVE_KNOWLEDGE_SCOPE.set({"collections": cols, "doc_ids": docs})
+    try:
+        yield
+    finally:
+        _ACTIVE_KNOWLEDGE_SCOPE.reset(token)
 
 
 @tool
@@ -33,6 +61,30 @@ def search_knowledge_base(
         doc_id: Optional specific document ID (e.g. 'doc_...') to restrict search scope.
         min_score: Minimum similarity score threshold in [0.0, 1.0] (default 0.0).
     """
+    active_scope = _ACTIVE_KNOWLEDGE_SCOPE.get()
+    effective_collections: list[str] | None = [collection] if collection else None
+    effective_doc_ids: list[str] | None = [doc_id] if doc_id else None
+
+    if active_scope is not None:
+        allowed_cols = active_scope.get("collections") or []
+        allowed_docs = active_scope.get("doc_ids") or []
+
+        if allowed_cols:
+            if collection and collection not in allowed_cols:
+                return (
+                    f"Access denied: collection '{collection}' is outside the task's "
+                    f"authorized knowledge scope {allowed_cols}."
+                )
+            effective_collections = [collection] if collection else allowed_cols
+
+        if allowed_docs:
+            if doc_id and doc_id not in allowed_docs:
+                return (
+                    f"Access denied: doc_id '{doc_id}' is outside the task's "
+                    f"authorized knowledge scope {allowed_docs}."
+                )
+            effective_doc_ids = [doc_id] if doc_id else allowed_docs
+
     store = SqliteVecStore()
     embeddings = EmbeddingsFactory.create_embeddings()
     query_vec = embeddings.embed_query(query)
@@ -42,8 +94,8 @@ def search_knowledge_base(
         top_k=max(1, min(20, top_k)),
         doc_path_prefix=path_filter,
         query_text=query,
-        collection=collection,
-        doc_id=doc_id,
+        collections=effective_collections,
+        doc_ids=effective_doc_ids,
         min_score=min_score,
     )
 
@@ -122,10 +174,29 @@ mark_tool_metadata(
 @tool
 def list_indexed_documents(collection: str | None = None) -> str:
     """List all documents currently indexed in the local RAG knowledge base with status and provenance."""
+    active_scope = _ACTIVE_KNOWLEDGE_SCOPE.get()
+    if active_scope is not None:
+        allowed_cols = active_scope.get("collections") or []
+        allowed_docs = active_scope.get("doc_ids") or []
+        if collection and allowed_cols and collection not in allowed_cols:
+            return (
+                f"Access denied: collection '{collection}' is outside the task's "
+                f"authorized knowledge scope {allowed_cols}."
+            )
     store = SqliteVecStore()
     files = store.list_indexed_files(collection=collection)
+    if active_scope is not None:
+        allowed_cols = active_scope.get("collections") or []
+        allowed_docs = active_scope.get("doc_ids") or []
+        files = [
+            f
+            for f in files
+            if (not allowed_cols or f.get("collection") in allowed_cols)
+            and (not allowed_docs or f.get("doc_id") in allowed_docs)
+        ]
+
     if not files:
-        return "The local knowledge base is currently empty. Run 'index_workspace_directory' or upload documents to index files."
+        return "The local knowledge base (within authorized scope) is currently empty."
 
     return json.dumps(files, indent=2, ensure_ascii=False)
 

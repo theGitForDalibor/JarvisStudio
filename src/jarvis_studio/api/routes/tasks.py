@@ -18,6 +18,7 @@ from jarvis_studio.core.tasks.models import (
     DeliverableRecord,
     EventRecord,
     EventType,
+    KnowledgeScope,
     TaskStatus,
 )
 from jarvis_studio.service.deliverable_manager import get_deliverable_manager
@@ -34,6 +35,10 @@ class CreateTaskRequest(BaseModel):
     assigned_agent_id: str = Field(default="general_agent", description="Assigned agent identifier")
     priority: str = Field(default="NORMAL", description="Task priority")
     plan_json: str | None = Field(default=None, description="Optional structured plan JSON")
+    knowledge_scope: KnowledgeScope | None = Field(
+        default=None,
+        description="Optional Knowledge Base scope (collections / doc_ids) enforced server-side",
+    )
     auto_start_run: bool = Field(default=False, description="Whether to start an initial execution run immediately")
 
 
@@ -92,6 +97,7 @@ async def create_task(request: CreateTaskRequest) -> AgentTask:
             assigned_agent_id=request.assigned_agent_id,
             priority=request.priority,
             plan_json=request.plan_json,
+            knowledge_scope=request.knowledge_scope,
             auto_start_run=request.auto_start_run,
         )
         return task

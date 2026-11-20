@@ -569,6 +569,7 @@ class AgentService:
                 "session_id": effective_session_id,
                 "run_id": effective_run_id,
                 "task_id": task.task_id,
+                "knowledge_scope": task.get_knowledge_scope(),
             },
         }
         is_checkpoint_resume = (
@@ -963,6 +964,7 @@ class AgentService:
                 "session_id": effective_session_id,
                 "run_id": effective_run_id,
                 "task_id": task.task_id,
+                "knowledge_scope": task.get_knowledge_scope(),
             },
         }
 

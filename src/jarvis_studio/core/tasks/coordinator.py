@@ -46,6 +46,9 @@ def _row_to_task(row: sqlite3.Row) -> AgentTask:
         assigned_agent_id=row["assigned_agent_id"] if "assigned_agent_id" in keys else "general_agent",
         current_run_id=row["current_run_id"],
         plan_json=row["plan_json"] if "plan_json" in keys else None,
+        knowledge_scope_json=(
+            row["knowledge_scope_json"] if "knowledge_scope_json" in keys else None
+        ),
         priority=row["priority"] if "priority" in keys else "NORMAL",
         result_summary=row["result_summary"] if "result_summary" in keys else None,
         created_at=float(row["created_at"]),
@@ -142,6 +145,7 @@ class TaskCoordinator:
         initiator: str = "user",
         assigned_agent_id: str = "general_agent",
         plan_json: str | None = None,
+        knowledge_scope_json: str | None = None,
         priority: str = "NORMAL",
         result_summary: str | None = None,
         runtime_id: str | None = None,
@@ -176,13 +180,44 @@ class TaskCoordinator:
                 initiator=initiator,
                 assigned_agent_id=assigned_agent_id,
                 plan_json=plan_json,
+                knowledge_scope_json=knowledge_scope_json,
                 priority=priority,
                 result_summary=result_summary,
                 runtime_id=runtime_id,
             )
 
             cols = [r[1] for r in conn.execute("PRAGMA table_info(agent_tasks)").fetchall()]
-            if "assigned_agent_id" in cols:
+            if "knowledge_scope_json" in cols:
+                conn.execute(
+                    """
+                    INSERT INTO agent_tasks (
+                        task_id, session_id, thread_id, status, query,
+                        initiator, assigned_agent_id, current_run_id, plan_json,
+                        knowledge_scope_json, priority, result_summary, created_at,
+                        updated_at, completed_at, runtime_id, error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task.task_id,
+                        task.session_id,
+                        task.thread_id,
+                        task.status.value,
+                        task.query,
+                        task.initiator,
+                        task.assigned_agent_id,
+                        task.current_run_id,
+                        task.plan_json,
+                        task.knowledge_scope_json,
+                        task.priority,
+                        task.result_summary,
+                        task.created_at,
+                        task.updated_at,
+                        task.completed_at,
+                        task.runtime_id,
+                        task.error_message,
+                    ),
+                )
+            elif "assigned_agent_id" in cols:
                 conn.execute(
                     """
                     INSERT INTO agent_tasks (

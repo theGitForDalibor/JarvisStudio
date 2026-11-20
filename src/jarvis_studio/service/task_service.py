@@ -63,6 +63,7 @@ class TaskService:
         priority: str = "NORMAL",
         initiator: str = "user",
         plan_json: str | None = None,
+        knowledge_scope: dict[str, Any] | Any | None = None,
         auto_start_run: bool = False,
         runtime_id: str | None = None,
     ) -> tuple[AgentTask, AgentRun | None]:
@@ -71,6 +72,20 @@ class TaskService:
         if not clean_query:
             raise ValueError("Task query cannot be empty")
 
+        scope_json: str | None = None
+        if knowledge_scope is not None:
+            import json
+            from jarvis_studio.core.tasks.models import KnowledgeScope
+
+            if isinstance(knowledge_scope, KnowledgeScope):
+                scope_obj = knowledge_scope
+            elif isinstance(knowledge_scope, dict):
+                scope_obj = KnowledgeScope(**knowledge_scope)
+            else:
+                raise ValueError("Invalid knowledge_scope format")
+            if scope_obj.collections or scope_obj.doc_ids:
+                scope_json = json.dumps(scope_obj.model_dump(), ensure_ascii=False)
+
         task = self.coordinator.create_task(
             session_id=session_id,
             query=clean_query,
@@ -78,6 +93,7 @@ class TaskService:
             assigned_agent_id=assigned_agent_id,
             priority=priority,
             plan_json=plan_json,
+            knowledge_scope_json=scope_json,
         )
 
         self.coordinator.record_event(

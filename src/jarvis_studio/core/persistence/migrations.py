@@ -24,7 +24,7 @@ from jarvis_studio.core.persistence.sqlite import (
     sync_transaction,
 )
 
-APP_SCHEMA_VERSION = 5
+APP_SCHEMA_VERSION = 6
 VEC_SCHEMA_VERSION = 1
 
 _logger = logging.getLogger(__name__)
@@ -872,6 +872,15 @@ def _run_migrations(
             return res
 
 
+def _migrate_agent_tasks_v6(conn: sqlite3.Connection) -> None:
+    """Idempotently add `knowledge_scope_json` column to `agent_tasks` for Sprint 3B."""
+    existing_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(agent_tasks)").fetchall()
+    }
+    if "knowledge_scope_json" not in existing_cols:
+        conn.execute("ALTER TABLE agent_tasks ADD COLUMN knowledge_scope_json TEXT")
+
+
 def run_app_migrations(
     db_path: str | Path,
     *,
@@ -887,8 +896,9 @@ def run_app_migrations(
             3: _APP_V3_STATEMENTS,
             4: _APP_V4_STATEMENTS,
             5: _APP_V5_STATEMENTS,
+            6: (),
         },
-        post_hooks={4: _migrate_traces_v4},
+        post_hooks={4: _migrate_traces_v4, 6: _migrate_agent_tasks_v6},
         enable_foreign_keys=False,
         enable_sqlite_vec=False,
         in_memory_conn=in_memory_conn,

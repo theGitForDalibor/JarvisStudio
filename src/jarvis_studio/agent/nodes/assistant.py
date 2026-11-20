@@ -45,11 +45,15 @@ def create_assistant_node(
         memory_context = memory_mgr.get_formatted_context()
         effective_system_prompt = system_prompt
         if task_id:
+            scope_line = ""
+            if run_context.get("knowledge_scope"):
+                scope_line = f"\n- knowledge_scope: {run_context.get('knowledge_scope')}"
             effective_system_prompt = (
                 f"{effective_system_prompt}\n\n"
                 f"[Execution Context]\n"
                 f"- task_id: {task_id}\n"
                 f"- run_id: {run_id}"
+                f"{scope_line}"
             )
         if memory_context:
             effective_system_prompt = f"{effective_system_prompt}\n{memory_context}"

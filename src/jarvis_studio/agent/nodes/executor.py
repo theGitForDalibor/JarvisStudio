@@ -263,10 +263,16 @@ def create_tool_executor_node(
 
             with timed_step(f"tool_exec_{tool_name}", tool_name=tool_name):
                 try:
-                    if hasattr(tool, "ainvoke"):
-                        result = await tool.ainvoke(effective_args)
-                    else:
-                        result = tool.invoke(effective_args)
+                    from jarvis_studio.tools.builtin.rag_tools import scoped_knowledge_context
+
+                    knowledge_scope = (
+                        run_ctx.get("knowledge_scope") if isinstance(run_ctx, dict) else None
+                    )
+                    with scoped_knowledge_context(knowledge_scope):
+                        if hasattr(tool, "ainvoke"):
+                            result = await tool.ainvoke(effective_args)
+                        else:
+                            result = tool.invoke(effective_args)
                     execution_output = str(result)
                     tool_succeeded = True
                 except asyncio.CancelledError:

@@ -130,6 +130,13 @@ class EventRecord(BaseModel):
             return {}
 
 
+class KnowledgeScope(BaseModel):
+    """Authorized Knowledge Base scope bound to a Task and inherited by all its Runs."""
+
+    collections: list[str] = Field(default_factory=list)
+    doc_ids: list[str] = Field(default_factory=list)
+
+
 class AgentTask(BaseModel):
     """A durable conversational or tool execution task."""
 
@@ -142,6 +149,7 @@ class AgentTask(BaseModel):
     assigned_agent_id: str = "general_agent"
     current_run_id: str | None = None
     plan_json: str | None = None
+    knowledge_scope_json: str | None = None
     priority: str = "NORMAL"
     result_summary: str | None = None
     created_at: float = Field(default_factory=time.time)
@@ -150,6 +158,22 @@ class AgentTask(BaseModel):
     archived_at: float | None = None
     runtime_id: str | None = None
     error_message: str | None = None
+
+    def get_knowledge_scope(self) -> dict[str, list[str]] | None:
+        """Return parsed knowledge scope if non-empty, else None."""
+        if not self.knowledge_scope_json:
+            return None
+        try:
+            raw = json.loads(self.knowledge_scope_json)
+        except Exception:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        cols = [str(c) for c in (raw.get("collections") or []) if str(c).strip()]
+        docs = [str(d) for d in (raw.get("doc_ids") or []) if str(d).strip()]
+        if not cols and not docs:
+            return None
+        return {"collections": cols, "doc_ids": docs}
 
 
 class AgentRun(BaseModel):
