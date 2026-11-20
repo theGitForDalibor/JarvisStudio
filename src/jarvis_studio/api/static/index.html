@@ -65,6 +65,9 @@
       <button onclick="switchTab('tasks')" id="tab-btn-tasks" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
         📋 任务 (Tasks)
       </button>
+      <button onclick="switchTab('deliverables')" id="tab-btn-deliverables" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        📄 交付物
+      </button>
       <button onclick="switchTab('approvals')" id="tab-btn-approvals" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white flex items-center gap-1.5">
         🛡️ 审批 <span id="pending-badge" class="hidden px-1.5 py-0.2 text-[10px] bg-red-500 text-white rounded-full">0</span>
       </button>
@@ -344,6 +347,80 @@
               <button onclick="appendTaskInstruction()" id="btn-task-append" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs rounded-lg font-medium transition">追加指令 (New Run)</button>
             </div>
           </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 1C. DELIVERABLES CENTER TAB (Sprint 2) -->
+    <div id="view-deliverables" class="hidden flex-1 flex h-full overflow-hidden">
+      <!-- Left: Global Deliverables List -->
+      <aside class="w-80 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0">
+        <div class="p-3 border-b border-slate-800 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-slate-200 uppercase tracking-wider">交付物中心</span>
+            <button onclick="loadDeliverables()" class="px-2 py-1 text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition" title="刷新列表">↻ 刷新</button>
+          </div>
+          <select id="deliverables-type-filter" onchange="loadDeliverables(0)" class="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-300 outline-none focus:border-blue-500">
+            <option value="">全部类型</option>
+            <option value="markdown_report">markdown_report (研究报告)</option>
+            <option value="file">file (普通文件)</option>
+            <option value="code_patch">code_patch (代码补丁)</option>
+            <option value="data_table">data_table (数据表)</option>
+            <option value="json_artifact">json_artifact (JSON 产物)</option>
+          </select>
+        </div>
+
+        <div id="deliverables-list-container" class="flex-1 overflow-y-auto p-2 space-y-1.5 text-xs">
+          <div class="p-4 text-center text-slate-500">加载交付物列表中...</div>
+        </div>
+
+        <div id="deliverables-pagination" class="p-2 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
+          <button onclick="prevDeliverablesPage()" id="btn-deliv-prev" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded">上一页</button>
+          <span id="deliv-page-info">0 / 0</span>
+          <button onclick="nextDeliverablesPage()" id="btn-deliv-next" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded">下一页</button>
+        </div>
+      </aside>
+
+      <!-- Right: Deliverable Preview & Provenance -->
+      <section class="flex-1 flex flex-col bg-slate-950 overflow-hidden">
+        <div id="deliverable-empty-state" class="flex-1 flex flex-col items-center justify-center text-center p-8 text-slate-500 space-y-2">
+          <div class="text-3xl">📄</div>
+          <div class="text-sm font-semibold text-slate-300">尚未选择交付物</div>
+          <p class="text-xs max-w-md">从左侧选择任意交付物，或从 Tasks 工作台点击交付物标签，即可在此预览全文、切换同一逻辑产物的历史 Run 版本、核对 Provenance 并下载原文件。</p>
+        </div>
+
+        <div id="deliverable-detail-workspace" class="hidden flex-1 flex flex-col overflow-hidden">
+          <div id="deliverable-error-banner" class="hidden mx-4 mt-3 px-3 py-2 rounded-lg border border-red-500/40 bg-red-500/10 text-red-300 text-xs flex items-center justify-between gap-2">
+            <span id="deliverable-error-text"></span>
+            <button onclick="document.getElementById('deliverable-error-banner').classList.add('hidden')" class="text-red-300 hover:text-white">✕</button>
+          </div>
+
+          <div class="p-4 border-b border-slate-800 bg-slate-900/50 space-y-2.5 shrink-0">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="space-y-1 min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span id="deliv-detail-id" class="font-mono text-[11px] text-slate-400"></span>
+                  <span id="deliv-detail-type-badge" class="px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-mono text-[10px]"></span>
+                  <span id="deliv-detail-run-badge" class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[10px]"></span>
+                </div>
+                <h2 id="deliv-detail-title" class="text-base font-semibold text-slate-100 break-words"></h2>
+                <div id="deliv-detail-meta" class="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 font-mono"></div>
+              </div>
+              <div class="flex flex-wrap items-center gap-2 shrink-0">
+                <button onclick="jumpToTaskFromDeliverable()" id="btn-deliv-jump-task" class="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded font-medium transition">↗ 跳转至任务</button>
+                <a id="btn-deliv-download" href="#" target="_blank" class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition">⬇ 下载原文件</a>
+              </div>
+            </div>
+
+            <!-- Same-Logical-Deliverable Version Switcher -->
+            <div id="deliv-versions-bar" class="hidden flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-800/80 text-xs"></div>
+          </div>
+
+          <!-- Provenance Strip -->
+          <div id="deliv-provenance-box" class="px-4 py-2.5 border-b border-slate-800 bg-slate-900/30 text-xs shrink-0"></div>
+
+          <!-- Content Preview -->
+          <div id="deliv-content-preview" class="flex-1 overflow-y-auto p-6 prose prose-invert prose-sm max-w-none text-slate-200"></div>
         </div>
       </section>
     </div>
@@ -650,7 +727,7 @@
 
     // --- Tab Switching ---
     function switchTab(tab) {
-      ['chat', 'tasks', 'approvals', 'memory', 'rag', 'traces', 'system'].forEach(t => {
+      ['chat', 'tasks', 'deliverables', 'approvals', 'memory', 'rag', 'traces', 'system'].forEach(t => {
         const viewEl = document.getElementById(`view-${t}`);
         const btn = document.getElementById(`tab-btn-${t}`);
         if (viewEl) viewEl.classList.add('hidden');
@@ -671,6 +748,7 @@
         closeTaskSSE();
       }
       if (tab === 'tasks') initTasksWorkbench();
+      if (tab === 'deliverables') initDeliverablesCenter();
       if (tab === 'approvals') loadApprovals();
       if (tab === 'memory') loadMemories();
       if (tab === 'rag') loadRagDocs();
@@ -1906,12 +1984,12 @@
           : `当前任务状态为 ${st}，等待当前执行停稳后可追加指令`;
       }
 
-      // Deliverables strip (Sprint 1 minimal summary; full preview/download in Sprint 2)
+      // Deliverables strip (reuses Deliverables Center preview pipeline)
       const delivStrip = document.getElementById('task-deliverables-strip');
       if (deliverables.length > 0) {
         delivStrip.classList.remove('hidden');
         delivStrip.innerHTML = `<span class="text-slate-400 font-medium">交付物 (${deliverables.length}):</span>` + deliverables.map(d =>
-          `<a href="/api/v1/deliverables/${encodeURIComponent(d.deliverable_id)}/download" target="_blank" class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition font-mono text-[11px]">📄 ${escapeHtml(d.title)} (${escapeHtml(d.deliverable_id)}) ↗</a>`
+          `<button onclick="openDeliverableInCenter('${escapeHtml(d.deliverable_id)}')" class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition font-mono text-[11px]">📄 ${escapeHtml(d.title)} (${escapeHtml(d.deliverable_id)})</button>`
         ).join('');
       } else {
         delivStrip.classList.add('hidden');
@@ -2072,6 +2150,223 @@
         await loadTaskApprovals();
       } finally {
         inFlightApprovalIds.delete(approvalId);
+      }
+    }
+
+    // --- Deliverables Center (Sprint 2) ---
+    let deliverablesPageOffset = 0;
+    const deliverablesPageLimit = 20;
+    let deliverablesTotal = 0;
+    let allDeliverableItems = [];
+    let activeDeliverableId = null;
+    let activeDeliverablePayload = null;
+
+    function sanitizeMarkdownToSafeHtml(markdownText) {
+      // Escape raw HTML tags first so untrusted inline HTML/scripts cannot execute, then parse Markdown
+      const escaped = String(markdownText || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      const rawHtml = (typeof marked !== 'undefined' && marked.parse) ? marked.parse(escaped) : `<pre>${escaped}</pre>`;
+      const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+      doc.querySelectorAll('script, iframe, object, embed, style, link').forEach(el => el.remove());
+      doc.querySelectorAll('*').forEach(el => {
+        for (const attr of Array.from(el.attributes)) {
+          const name = attr.name.toLowerCase();
+          const val = String(attr.value || '').trim().toLowerCase();
+          if (name.startsWith('on') || ((name === 'href' || name === 'src') && val.startsWith('javascript:'))) {
+            el.removeAttribute(attr.name);
+          }
+        }
+      });
+      return doc.body.innerHTML;
+    }
+
+    async function initDeliverablesCenter() {
+      await loadDeliverables(deliverablesPageOffset);
+      let savedId = null;
+      try { savedId = localStorage.getItem('jarvis_active_deliverable_id'); } catch (_) {}
+      const targetId = activeDeliverableId || (savedId && allDeliverableItems.some(i => i.deliverable.deliverable_id === savedId) ? savedId : (allDeliverableItems[0]?.deliverable?.deliverable_id || null));
+      if (targetId) {
+        await selectDeliverable(targetId);
+      }
+    }
+
+    function openDeliverableInCenter(deliverableId) {
+      activeDeliverableId = deliverableId;
+      try { localStorage.setItem('jarvis_active_deliverable_id', deliverableId); } catch (_) {}
+      switchTab('deliverables');
+    }
+
+    async function loadDeliverables(offset = deliverablesPageOffset) {
+      deliverablesPageOffset = Math.max(0, offset);
+      const container = document.getElementById('deliverables-list-container');
+      const dtype = document.getElementById('deliverables-type-filter')?.value || '';
+      if (container) container.innerHTML = '<div class="p-4 text-center text-slate-500">加载交付物中...</div>';
+      try {
+        const params = new URLSearchParams({
+          limit: String(deliverablesPageLimit),
+          offset: String(deliverablesPageOffset),
+        });
+        if (dtype) params.set('deliverable_type', dtype);
+        const res = await fetch(`/api/v1/deliverables?${params.toString()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        allDeliverableItems = data.items || [];
+        deliverablesTotal = data.total || 0;
+        renderDeliverablesList();
+      } catch (err) {
+        if (container) container.innerHTML = `<div class="p-4 text-red-400">加载失败: ${escapeHtml(err.message || err)}</div>`;
+      }
+    }
+
+    function renderDeliverablesList() {
+      const container = document.getElementById('deliverables-list-container');
+      const infoEl = document.getElementById('deliv-page-info');
+      const prevBtn = document.getElementById('btn-deliv-prev');
+      const nextBtn = document.getElementById('btn-deliv-next');
+      if (infoEl) {
+        const start = deliverablesTotal === 0 ? 0 : deliverablesPageOffset + 1;
+        const end = Math.min(deliverablesTotal, deliverablesPageOffset + allDeliverableItems.length);
+        infoEl.textContent = `${start}-${end} / ${deliverablesTotal}`;
+      }
+      if (prevBtn) prevBtn.disabled = deliverablesPageOffset <= 0;
+      if (nextBtn) nextBtn.disabled = deliverablesPageOffset + deliverablesPageLimit >= deliverablesTotal;
+
+      if (!container) return;
+      if (allDeliverableItems.length === 0) {
+        container.innerHTML = '<div class="p-6 text-center text-slate-500">暂无交付物。在任务中调用 publish_research_report 后将显示在此处。</div>';
+        return;
+      }
+      container.innerHTML = allDeliverableItems.map(item => {
+        const d = item.deliverable;
+        const selected = d.deliverable_id === activeDeliverableId;
+        const runLabel = item.run_seq ? `Run #${item.run_seq}` : (d.run_id || '-');
+        return `
+          <div onclick="selectDeliverable('${escapeHtml(d.deliverable_id)}')" class="p-2.5 rounded-lg border cursor-pointer transition ${selected ? 'bg-blue-600/15 border-blue-500/50' : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'}">
+            <div class="flex items-center justify-between gap-2 mb-1">
+              <span class="px-1.5 py-0.5 rounded bg-slate-800 text-blue-300 font-mono text-[10px]">${escapeHtml(runLabel)}</span>
+              <span class="text-[10px] text-slate-500 font-mono">${escapeHtml(formatRelativeTime(d.created_at))}</span>
+            </div>
+            <div class="text-xs text-slate-100 font-medium truncate">${escapeHtml(d.title)}</div>
+            <div class="text-[11px] text-slate-400 truncate mt-0.5">${escapeHtml(item.task_query || d.task_id)}</div>
+            <div class="mt-1 flex items-center justify-between text-[10px] font-mono text-slate-500">
+              <span>${escapeHtml(d.deliverable_type)}</span>
+              <span>${d.file_size_bytes} B</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function prevDeliverablesPage() {
+      if (deliverablesPageOffset > 0) loadDeliverables(Math.max(0, deliverablesPageOffset - deliverablesPageLimit));
+    }
+
+    function nextDeliverablesPage() {
+      if (deliverablesPageOffset + deliverablesPageLimit < deliverablesTotal) {
+        loadDeliverables(deliverablesPageOffset + deliverablesPageLimit);
+      }
+    }
+
+    async function selectDeliverable(deliverableId) {
+      if (!deliverableId) return;
+      activeDeliverableId = deliverableId;
+      try { localStorage.setItem('jarvis_active_deliverable_id', deliverableId); } catch (_) {}
+      renderDeliverablesList();
+
+      document.getElementById('deliverable-empty-state')?.classList.add('hidden');
+      document.getElementById('deliverable-detail-workspace')?.classList.remove('hidden');
+      document.getElementById('deliverable-error-banner')?.classList.add('hidden');
+      const previewEl = document.getElementById('deliv-content-preview');
+      if (previewEl) previewEl.innerHTML = '<div class="text-xs text-slate-500">正在加载正文与 Provenance...</div>';
+
+      try {
+        const res = await fetch(`/api/v1/deliverables/${encodeURIComponent(deliverableId)}/content`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        activeDeliverablePayload = data;
+        renderDeliverableDetail();
+      } catch (err) {
+        const banner = document.getElementById('deliverable-error-banner');
+        const text = document.getElementById('deliverable-error-text');
+        if (text) text.textContent = `加载交付物失败: ${err.message || err}`;
+        if (banner) banner.classList.remove('hidden');
+        if (previewEl) previewEl.innerHTML = '<div class="text-xs text-red-400">无法预览当前交付物（文件可能缺失、超限或为二进制格式，可尝试下载）。</div>';
+      }
+    }
+
+    function renderDeliverableDetail() {
+      const p = activeDeliverablePayload;
+      if (!p) return;
+      const d = p.deliverable;
+      document.getElementById('deliv-detail-id').textContent = d.deliverable_id;
+      document.getElementById('deliv-detail-type-badge').textContent = d.deliverable_type;
+      document.getElementById('deliv-detail-run-badge').textContent = p.run_seq ? `Run #${p.run_seq} (${d.run_id})` : (d.run_id || '-');
+      document.getElementById('deliv-detail-title').textContent = d.title;
+      document.getElementById('btn-deliv-download').href = `/api/v1/deliverables/${encodeURIComponent(d.deliverable_id)}/download`;
+
+      const createdText = d.created_at ? new Date(d.created_at * 1000).toLocaleString() : '-';
+      document.getElementById('deliv-detail-meta').innerHTML = [
+        `<span>Task: ${escapeHtml(d.task_id)}</span>`,
+        `<span>Logical: ${escapeHtml(p.logical_key)}</span>`,
+        `<span>Size: ${d.file_size_bytes} bytes</span>`,
+        `<span>SHA-256: ${escapeHtml((d.sha256_hash || '').slice(0, 12))}...</span>`,
+        `<span>Created: ${escapeHtml(createdText)}</span>`,
+      ].join('<span class="text-slate-700">|</span>');
+
+      // Same-logical-deliverable version switcher
+      const versionsBar = document.getElementById('deliv-versions-bar');
+      const versions = p.versions || [];
+      if (versions.length > 0) {
+        versionsBar.classList.remove('hidden');
+        versionsBar.innerHTML = `<span class="text-slate-400 font-medium">同逻辑交付物版本 (${versions.length}):</span>` + versions.map(v => {
+          const label = v.run_seq ? `Run #${v.run_seq}` : v.deliverable_id;
+          return `<button onclick="selectDeliverable('${escapeHtml(v.deliverable_id)}')" class="px-2 py-0.5 rounded font-mono text-[11px] border transition ${v.is_current ? 'bg-blue-600/25 border-blue-500/50 text-blue-200' : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'}">${escapeHtml(label)} (${escapeHtml(v.deliverable_id.slice(0, 10))})</button>`;
+        }).join('');
+      } else {
+        versionsBar.classList.add('hidden');
+      }
+
+      // Provenance status box (strictly Run-scoped)
+      const prov = p.provenance || {};
+      const provBox = document.getElementById('deliv-provenance-box');
+      if (prov.status === 'verified') {
+        const sources = [
+          ...(prov.verified_doc_ids || []).map(x => `<span class="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono">${escapeHtml(x)}</span>`),
+          ...(prov.verified_chunk_ids || []).map(x => `<span class="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-mono">${escapeHtml(x)}</span>`),
+          ...(prov.verified_urls || []).map(u => `<span class="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 font-mono">${escapeHtml(u)}</span>`),
+        ].join(' ');
+        provBox.innerHTML = `<div class="flex flex-wrap items-center gap-2"><span class="text-emerald-400 font-semibold">✓ Provenance 已核验 (${escapeHtml(prov.run_id || '')})</span> ${sources}</div>`;
+      } else if (prov.status === 'unavailable') {
+        provBox.innerHTML = `<span class="text-slate-400">ℹ 无法核验：产生该交付物的 Run (${escapeHtml(prov.run_id || '-')}) 无检索/网页抓取工具输出记录。</span>`;
+      } else {
+        const badList = (prov.unverified_citations || []).map(c => `${c.type}: ${c.value}`).join('; ');
+        provBox.innerHTML = `<span class="text-amber-300 font-semibold">⚠ 存在未核验引用 (${escapeHtml(prov.run_id || '')})</span> <span class="text-slate-400 font-mono">${escapeHtml(badList || '未检测到匹配来源引用')}</span>`;
+      }
+
+      // Safe content preview
+      const previewEl = document.getElementById('deliv-content-preview');
+      if (d.deliverable_type === 'markdown_report' || (d.file_path || '').endsWith('.md')) {
+        previewEl.innerHTML = sanitizeMarkdownToSafeHtml(p.content || '');
+      } else {
+        previewEl.innerHTML = `<pre class="p-4 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono text-slate-200 whitespace-pre-wrap break-words">${escapeHtml(p.content || '')}</pre>`;
+      }
+    }
+
+    async function jumpToTaskFromDeliverable() {
+      const p = activeDeliverablePayload;
+      if (!p || !p.deliverable?.task_id) return;
+      const tid = p.deliverable.task_id;
+      const rid = p.deliverable.run_id || null;
+      activeTaskId = tid;
+      try { localStorage.setItem('jarvis_active_task_id', tid); } catch (_) {}
+      switchTab('tasks');
+      if (rid) {
+        selectedRunFilterId = rid;
+        renderTaskDetail();
       }
     }
 
@@ -2863,7 +3158,7 @@
       let savedTab = '';
       try { savedTab = localStorage.getItem('jarvis_active_tab') || ''; } catch (_) {}
       const candidate = hashTab || savedTab;
-      if (['chat', 'tasks', 'approvals', 'memory', 'rag', 'traces', 'system'].includes(candidate) && candidate !== 'chat') {
+      if (['chat', 'tasks', 'deliverables', 'approvals', 'memory', 'rag', 'traces', 'system'].includes(candidate) && candidate !== 'chat') {
         switchTab(candidate);
       }
     })();

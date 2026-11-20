@@ -115,6 +115,31 @@ def _extract_summary_and_preview(text: str) -> tuple[str, str]:
     return summary, preview
 
 
+def _resolve_logical_key(
+    *,
+    deliverable_type: DeliverableType | str,
+    file_path: str | None,
+    title: str,
+    metadata_json: str | None,
+) -> str:
+    """Resolve stable logical deliverable identity within a task.
+
+    Uses explicit metadata['logical_key'] when present, otherwise derives from
+    (deliverable_type, normalized filename) so distinct deliverables in the same
+    Run or Task never merge into the same version sequence.
+    """
+    if metadata_json:
+        try:
+            meta = json.loads(metadata_json)
+            if isinstance(meta, dict) and isinstance(meta.get("logical_key"), str) and meta["logical_key"].strip():
+                return meta["logical_key"].strip()
+        except Exception:
+            pass
+    dtype = deliverable_type.value if isinstance(deliverable_type, DeliverableType) else str(deliverable_type)
+    base_name = Path(file_path).name if file_path else _sanitize_filename(title)
+    return f"{dtype}:{base_name.lower()}"
+
+
 def _row_to_deliverable(row: sqlite3.Row) -> DeliverableRecord:
     dtype_str = row["deliverable_type"]
     dtype = DeliverableType(dtype_str) if dtype_str in DeliverableType._value2member_map_ else DeliverableType.FILE
@@ -301,7 +326,10 @@ class DeliverableManager:
             summary = f"Binary deliverable ({dtype.value}, {size_bytes} bytes)"
             preview = f"[Binary data: {size_bytes} bytes, SHA-256: {sha256[:16]}...]"
 
-        meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
+        meta_dict: dict[str, Any] = dict(metadata) if isinstance(metadata, dict) else {}
+        if not meta_dict.get("logical_key"):
+            meta_dict["logical_key"] = f"{dtype.value}:{safe_name.lower()}"
+        meta_json = json.dumps(meta_dict, ensure_ascii=False)
         rel_dir = Path("deliverables") / task_id / f"run_{active_run_seq}"
 
         with _get_task_write_lock(task_id):
@@ -461,6 +489,148 @@ class DeliverableManager:
         """Read full raw content of a deliverable file."""
         path = self.get_deliverable_file_path(deliverable_id)
         return path.read_bytes()
+
+    def read_deliverable_preview_text(
+        self,
+        deliverable_id: str,
+        *,
+        max_bytes: int = 1_048_576,
+    ) -> tuple[DeliverableRecord, str]:
+        """Safely read UTF-8 text content of a deliverable within size and path bounds."""
+        record = self.get_deliverable(deliverable_id)
+        if record is None:
+            raise KeyError(f"Deliverable not found: {deliverable_id}")
+        path = self.get_deliverable_file_path(deliverable_id)
+        size = path.stat().st_size
+        if size > max_bytes:
+            raise ValueError(
+                f"Deliverable preview size ({size} bytes) exceeds limit ({max_bytes} bytes); use download instead"
+            )
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+        return record, text
+
+    def list_all_deliverables(
+        self,
+        *,
+        task_id: str | None = None,
+        deliverable_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List deliverables across tasks joined with real Task and Run metadata."""
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        if task_id:
+            where_clauses.append("d.task_id = ?")
+            params.append(task_id)
+        if deliverable_type:
+            where_clauses.append("d.deliverable_type = ?")
+            params.append(deliverable_type)
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        with self._read_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            total_row = conn.execute(
+                f"SELECT COUNT(*) FROM agent_deliverables d {where_sql}",
+                tuple(params),
+            ).fetchone()
+            total = int(total_row[0]) if total_row else 0
+
+            rows = conn.execute(
+                f"""
+                SELECT
+                    d.*,
+                    t.query AS task_query,
+                    t.status AS task_status,
+                    r.run_seq AS run_seq,
+                    r.status AS run_status,
+                    r.trigger_type AS run_trigger_type
+                FROM agent_deliverables d
+                LEFT JOIN agent_tasks t ON d.task_id = t.task_id
+                LEFT JOIN agent_runs r ON d.run_id = r.run_id
+                {where_sql}
+                ORDER BY d.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple([*params, max(1, min(200, limit)), max(0, offset)]),
+            ).fetchall()
+
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                rec = _row_to_deliverable(row)
+                items.append(
+                    {
+                        "deliverable": rec.model_dump(),
+                        "logical_key": _resolve_logical_key(
+                            deliverable_type=rec.deliverable_type,
+                            file_path=rec.file_path,
+                            title=rec.title,
+                            metadata_json=rec.metadata_json,
+                        ),
+                        "task_query": row["task_query"] or "",
+                        "task_status": row["task_status"] or "",
+                        "run_seq": int(row["run_seq"]) if row["run_seq"] is not None else None,
+                        "run_status": row["run_status"] or "",
+                        "run_trigger_type": row["run_trigger_type"] or "",
+                    }
+                )
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def list_logical_versions(self, deliverable_id: str) -> list[dict[str, Any]]:
+        """List all versions sharing the same logical_key within the owning Task, ordered by run_seq."""
+        target = self.get_deliverable(deliverable_id)
+        if target is None:
+            raise KeyError(f"Deliverable not found: {deliverable_id}")
+        target_key = _resolve_logical_key(
+            deliverable_type=target.deliverable_type,
+            file_path=target.file_path,
+            title=target.title,
+            metadata_json=target.metadata_json,
+        )
+
+        with self._read_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT
+                    d.*,
+                    r.run_seq AS run_seq,
+                    r.status AS run_status,
+                    r.trigger_type AS run_trigger_type
+                FROM agent_deliverables d
+                LEFT JOIN agent_runs r ON d.run_id = r.run_id
+                WHERE d.task_id = ?
+                ORDER BY COALESCE(r.run_seq, 0) ASC, d.created_at ASC
+                """,
+                (target.task_id,),
+            ).fetchall()
+
+        versions: list[dict[str, Any]] = []
+        for row in rows:
+            rec = _row_to_deliverable(row)
+            key = _resolve_logical_key(
+                deliverable_type=rec.deliverable_type,
+                file_path=rec.file_path,
+                title=rec.title,
+                metadata_json=rec.metadata_json,
+            )
+            if key == target_key:
+                versions.append(
+                    {
+                        "deliverable_id": rec.deliverable_id,
+                        "run_id": rec.run_id,
+                        "run_seq": int(row["run_seq"]) if row["run_seq"] is not None else None,
+                        "run_status": row["run_status"] or "",
+                        "run_trigger_type": row["run_trigger_type"] or "",
+                        "title": rec.title,
+                        "file_size_bytes": rec.file_size_bytes,
+                        "sha256_hash": rec.sha256_hash,
+                        "created_at": rec.created_at,
+                        "is_current": rec.deliverable_id == deliverable_id,
+                    }
+                )
+        return versions
 
     def _validate_task_dir(self, task_id: str) -> Path:
         """Validate task_id contains no path traversal and resolves inside deliverables_dir."""
