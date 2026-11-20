@@ -89,9 +89,10 @@ def test_schema_v5_migration_and_domain_enums(tmp_path: Path):
     finally:
         conn.close()
 
-    # 2. Run migrations to advance to V5
+    # 2. Run migrations to advance to latest schema (>= V5)
     migrated_ver = run_app_migrations(db_path)
-    assert migrated_ver == APP_SCHEMA_VERSION == 5
+    assert migrated_ver == APP_SCHEMA_VERSION
+    assert migrated_ver >= 5
 
     # 3. Verify existing data preserved
     with open_sync_connection(db_path) as verify_conn:
