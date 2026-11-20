@@ -256,7 +256,10 @@ class RAGEvalRunRequest(BaseModel):
 async def create_eval_case(payload: EvalCaseCreate) -> dict[str, Any]:
     """Create a labeled RAG evaluation test case."""
     evaluator = RAGEvaluator()
-    record = evaluator.add_case(payload)
+    try:
+        record = evaluator.add_case(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return record.model_dump()
 
 

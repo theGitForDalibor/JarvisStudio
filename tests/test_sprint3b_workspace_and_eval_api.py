@@ -97,6 +97,12 @@ async def test_rag_workspace_search_modes_and_eval_api(tmp_path: Path) -> None:
                     assert explain["vector_similarity"] is None
 
             # 6. Evaluation Cases + Run + History
+            bad_case_res = await client.post(
+                "/api/v1/rag/eval/cases",
+                json={"dataset_name": "sprint3b_smoke", "query": "missing targets"},
+            )
+            assert bad_case_res.status_code == 422
+
             case_res = await client.post(
                 "/api/v1/rag/eval/cases",
                 json={

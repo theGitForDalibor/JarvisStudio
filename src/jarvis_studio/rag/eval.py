@@ -177,7 +177,7 @@ class RAGEvaluator:
             expected_docs = set(case.expected_doc_ids)
             retrieved_docs = [h["doc_id"] for h in hits]
             relevant_hits = sum(1 for did in retrieved_docs if did in expected_docs)
-            recall = len(set(retrieved_docs) & expected_docs) / len(expected_docs)
+            recall = (len(set(retrieved_docs) & expected_docs) / len(expected_docs)) if expected_docs else 0.0
             precision = relevant_hits / len(retrieved_docs) if retrieved_docs else 0.0
 
         # Deterministic Citation Accuracy:
