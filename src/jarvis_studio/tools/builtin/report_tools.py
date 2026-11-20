@@ -56,6 +56,25 @@ def publish_research_report(
             deliverable_type=DeliverableType.MARKDOWN_REPORT,
             metadata={"source": "publish_research_report", "custom_summary": summary} if summary else None,
         )
+        try:
+            from jarvis_studio.core.tasks.coordinator import get_task_coordinator
+            from jarvis_studio.core.tasks.models import EventType
+
+            get_task_coordinator().record_event(
+                task_id=clean_task_id,
+                event_type=EventType.DELIVERABLE_CREATED,
+                run_id=record.run_id,
+                payload={
+                    "deliverable_id": record.deliverable_id,
+                    "title": record.title,
+                    "deliverable_type": record.deliverable_type.value,
+                    "file_path": record.file_path,
+                    "file_size_bytes": record.file_size_bytes,
+                },
+            )
+        except Exception as evt_exc:  # noqa: BLE001
+            _logger.debug("Failed to record DELIVERABLE_CREATED event: %s", evt_exc)
+
         return (
             f"Successfully published research deliverable!\n"
             f"- Deliverable ID: {record.deliverable_id}\n"

@@ -109,6 +109,22 @@ class ObservabilityConfig(BaseModel):
     langsmith_project: str = "jarvis-studio"
 
 
+class SearchConfig(BaseModel):
+    """Web search and research retrieval configuration."""
+
+    provider: str = Field(
+        default="auto",
+        description="Search provider: 'auto', 'tavily', 'duckduckgo', or 'local_kb'",
+    )
+    tavily_api_key: str | None = Field(
+        default=None,
+        description="Optional Tavily API key (falls back to TAVILY_API_KEY env var)",
+    )
+    timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    max_retries: int = Field(default=2, ge=0, le=5)
+    fetch_max_chars: int = Field(default=12000, ge=500, le=100000)
+
+
 class AppConfig(BaseModel):
     """Application metadata."""
 

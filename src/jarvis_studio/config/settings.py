@@ -13,6 +13,7 @@ from jarvis_studio.config.models import (
     LLMProviderType,
     ObservabilityConfig,
     RAGConfig,
+    SearchConfig,
     SecurityConfig,
     StorageConfig,
 )
@@ -29,6 +30,7 @@ class Settings(BaseSettings):
     security: SecurityConfig = SecurityConfig()
     storage: StorageConfig = StorageConfig()
     rag: RAGConfig = RAGConfig()
+    search: SearchConfig = SearchConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
 
     model_config = SettingsConfigDict(

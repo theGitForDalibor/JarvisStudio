@@ -17,6 +17,7 @@ from jarvis_studio.tools.builtin.rag_tools import (
 from jarvis_studio.tools.builtin.report_tools import publish_research_report
 from jarvis_studio.tools.builtin.search_tools import search_web
 from jarvis_studio.tools.builtin.shell_tools import execute_shell_command
+from jarvis_studio.tools.builtin.web_fetch_tools import fetch_web_page
 from jarvis_studio.tools.registry import ToolRegistry, get_default_registry
 
 _BUILTIN_TOOLS = (
@@ -30,6 +31,7 @@ _BUILTIN_TOOLS = (
     index_workspace_directory,
     list_indexed_documents,
     search_web,
+    fetch_web_page,
     publish_research_report,
 )
 
@@ -46,6 +48,7 @@ register_builtin_tools(get_default_registry())
 
 __all__ = [
     "execute_shell_command",
+    "fetch_web_page",
     "index_workspace_directory",
     "list_directory",
     "list_indexed_documents",
