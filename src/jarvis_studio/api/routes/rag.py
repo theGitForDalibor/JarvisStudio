@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.rag.embeddings import EmbeddingsFactory
+from jarvis_studio.rag.eval import EvalCaseCreate, RAGEvaluator
 from jarvis_studio.rag.indexer import DEFAULT_SUPPORTED_EXTENSIONS, WorkspaceIndexer
 from jarvis_studio.rag.store import SqliteVecStore
 
@@ -34,6 +35,9 @@ class RAGSearchRequest(BaseModel):
     )
     min_score: float = Field(
         default=0.0, ge=0.0, le=1.0, description="Minimum relevance score threshold"
+    )
+    search_mode: Literal["hybrid", "vector", "fts"] = Field(
+        default="hybrid", description="Retrieval mode: hybrid, vector, or fts"
     )
 
 
@@ -78,6 +82,7 @@ async def search_rag(payload: RAGSearchRequest) -> list[dict[str, Any]]:
         collection=payload.collection,
         doc_id=payload.doc_id,
         min_score=payload.min_score,
+        search_mode=payload.search_mode,
     )
 
 
@@ -204,3 +209,95 @@ async def delete_document(doc_id: str) -> dict[str, Any]:
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
     return {"status": "deleted", "doc_id": doc_id}
+
+
+@router.post("/documents/{doc_id}/reindex", response_model=dict[str, Any])
+async def reindex_document(doc_id: str) -> dict[str, Any]:
+    """Force re-indexing of an existing document from its source path."""
+    store = SqliteVecStore()
+    doc = store.get_document(doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+
+    ws_root = Path(get_settings().storage.workspace_root).resolve()
+    raw_path = Path(doc["doc_path"])
+    target = raw_path.resolve() if raw_path.is_absolute() else (ws_root / raw_path).resolve()
+    if not target.is_relative_to(ws_root):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: document path must reside within workspace_root",
+        )
+    if not target.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source file for document '{doc_id}' not found on disk: '{doc['doc_path']}'",
+        )
+
+    indexer = WorkspaceIndexer()
+    result = indexer.index_file(
+        target,
+        force=True,
+        collection=doc.get("collection") or "default",
+        title=doc.get("title"),
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=422, detail=result.get("error", "Re-index failed"))
+    return result
+
+
+class RAGEvalRunRequest(BaseModel):
+    dataset_name: str = Field(default="default", min_length=1)
+    top_k: int = Field(default=5, ge=1, le=20)
+    search_mode: Literal["hybrid", "vector", "fts"] = Field(default="hybrid")
+    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+@router.post("/eval/cases", response_model=dict[str, Any])
+async def create_eval_case(payload: EvalCaseCreate) -> dict[str, Any]:
+    """Create a labeled RAG evaluation test case."""
+    evaluator = RAGEvaluator()
+    record = evaluator.add_case(payload)
+    return record.model_dump()
+
+
+@router.get("/eval/cases", response_model=list[dict[str, Any]])
+async def list_eval_cases(
+    dataset_name: str | None = Query(default=None, description="Optional dataset filter"),
+) -> list[dict[str, Any]]:
+    """List labeled RAG evaluation cases."""
+    evaluator = RAGEvaluator()
+    return [c.model_dump() for c in evaluator.list_cases(dataset_name=dataset_name)]
+
+
+@router.delete("/eval/cases/{case_id}", response_model=dict[str, Any])
+async def delete_eval_case(case_id: str) -> dict[str, Any]:
+    """Delete a labeled RAG evaluation case."""
+    evaluator = RAGEvaluator()
+    if not evaluator.delete_case(case_id):
+        raise HTTPException(status_code=404, detail=f"Eval case '{case_id}' not found")
+    return {"status": "deleted", "case_id": case_id}
+
+
+@router.post("/eval/run", response_model=dict[str, Any])
+async def run_rag_evaluation(payload: RAGEvalRunRequest) -> dict[str, Any]:
+    """Run deterministic IR & Citation Accuracy evaluation for a dataset."""
+    evaluator = RAGEvaluator()
+    try:
+        return evaluator.run_evaluation(
+            dataset_name=payload.dataset_name,
+            top_k=payload.top_k,
+            search_mode=payload.search_mode,
+            min_score=payload.min_score,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/eval/runs", response_model=list[dict[str, Any]])
+async def list_rag_eval_runs(
+    dataset_name: str | None = Query(default=None, description="Optional dataset filter"),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[dict[str, Any]]:
+    """List recent RAG evaluation runs."""
+    evaluator = RAGEvaluator()
+    return evaluator.list_runs(dataset_name=dataset_name, limit=limit)

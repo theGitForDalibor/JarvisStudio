@@ -264,35 +264,124 @@
     </div>
 
     <!-- 4. RAG TAB -->
-    <div id="view-rag" class="hidden flex-1 p-6 overflow-y-auto max-w-5xl mx-auto w-full">
-      <div class="flex items-center justify-between mb-4">
+    <div id="view-rag" class="hidden flex-1 p-6 overflow-y-auto max-w-6xl mx-auto w-full space-y-6">
+      <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 class="text-lg font-bold">本地私有知识库 (Local RAG)</h2>
-          <p class="text-xs text-slate-400">基于 sqlite-vec 向量虚拟表与 SHA-256 增量文件哈希，提供本地无额外服务依赖的高效代码与文档索引检索。</p>
+          <h2 class="text-lg font-bold">知识工作台与 RAG 评估 (Knowledge Workspace)</h2>
+          <p class="text-xs text-slate-400">基于 SQLite + sqlite-vec + FTS5 混合检索，支持文档管理、检索可解释性实验与确定性 IR / 引用评估。</p>
         </div>
-        <button onclick="triggerIndexModal()" class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition">⚡ 扫描入库 (Index)</button>
+        <div class="flex gap-2">
+          <button onclick="triggerIndexModal()" class="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded font-medium transition">⚡ 目录增量扫描</button>
+        </div>
       </div>
 
-      <!-- Semantic Search Test Box -->
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 mb-6">
-        <h3 class="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">语义向量检索实验台</h3>
-        <div class="flex gap-2 mb-3">
-          <input type="text" id="rag-query-input" placeholder="输入自然语言或技术术语进行向量检索 (如: '如何配置 MCP 服务器')..." class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-blue-500">
-          <button onclick="testRagSearch()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg font-medium transition">向量搜索</button>
+      <!-- Section 1: Document Workspace -->
+      <section id="rag-workspace-section" class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <h3 class="text-xs font-semibold text-slate-200 uppercase tracking-wider">1. 文档工作台 (Document Workspace)</h3>
+          <div class="flex items-center gap-2">
+            <input type="text" id="rag-collection-filter" placeholder="按 Collection 过滤..." class="bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-xs text-slate-200 outline-none focus:border-blue-500 w-40">
+            <button onclick="loadRagDocs()" class="px-2.5 py-1 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition">刷新列表</button>
+          </div>
         </div>
-        <div id="rag-results" class="space-y-2 max-h-60 overflow-y-auto"></div>
-      </div>
 
-      <!-- Indexed Files List -->
-      <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-        <div class="p-3 border-b border-slate-800 flex justify-between items-center">
-          <span class="text-xs font-bold text-slate-300">已索引文档列表</span>
-          <button onclick="loadRagDocs()" class="text-xs text-slate-400 hover:text-white transition">刷新</button>
+        <!-- Upload Form -->
+        <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 flex flex-wrap items-end gap-2">
+          <div class="flex-1 min-w-[180px]">
+            <label class="block text-[11px] text-slate-400 mb-1">上传文档 (PDF / DOCX / MD / TXT / 代码)</label>
+            <input type="file" id="rag-upload-file" class="block w-full text-xs text-slate-300 file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-xs file:bg-blue-600/20 file:text-blue-400 hover:file:bg-blue-600/30">
+          </div>
+          <div class="w-36">
+            <label class="block text-[11px] text-slate-400 mb-1">Collection</label>
+            <input type="text" id="rag-upload-collection" value="default" class="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-xs text-slate-200 outline-none focus:border-blue-500">
+          </div>
+          <div class="w-44">
+            <label class="block text-[11px] text-slate-400 mb-1">标题 (可选)</label>
+            <input type="text" id="rag-upload-title" placeholder="自定义文档标题" class="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-xs text-slate-200 outline-none focus:border-blue-500">
+          </div>
+          <button onclick="uploadRagDoc()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded font-medium transition">上传并入库</button>
         </div>
-        <div id="rag-files-table" class="overflow-x-auto text-xs">
+
+        <div id="rag-upload-status" class="hidden text-xs px-3 py-2 rounded border"></div>
+
+        <div id="rag-files-table" class="overflow-x-auto text-xs border border-slate-800 rounded-lg">
           <!-- Rendered by JS -->
         </div>
-      </div>
+
+        <div id="rag-doc-detail" class="hidden bg-slate-950 border border-slate-700 rounded-lg p-3 text-xs space-y-1.5">
+          <!-- Rendered by JS -->
+        </div>
+      </section>
+
+      <!-- Section 2: Retrieval Playground -->
+      <section id="rag-playground-section" class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs font-semibold text-slate-200 uppercase tracking-wider">2. 检索实验台与可解释性 (Retrieval Playground)</h3>
+          <span class="text-[11px] text-slate-500">Vector Cosine / FTS5 BM25 / RRF 分项展示（不混用异构量纲）</span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-6 gap-2">
+          <input type="text" id="rag-query-input" placeholder="输入检索 Query..." class="md:col-span-2 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-blue-500">
+          <select id="rag-search-mode" class="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-blue-500">
+            <option value="hybrid">Hybrid (RRF)</option>
+            <option value="vector">Vector Only</option>
+            <option value="fts">FTS5 BM25 Only</option>
+          </select>
+          <input type="text" id="rag-search-collection" placeholder="Collection (可选)" class="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-blue-500">
+          <div class="flex gap-1.5">
+            <input type="number" id="rag-search-topk" value="5" min="1" max="20" title="Top K" class="w-16 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200 outline-none focus:border-blue-500">
+            <input type="number" id="rag-search-minscore" value="0" min="0" max="1" step="0.05" title="Min Score" class="w-20 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200 outline-none focus:border-blue-500">
+          </div>
+          <button onclick="testRagSearch()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg font-medium transition">执行检索</button>
+        </div>
+        <div id="rag-results" class="space-y-2.5 max-h-96 overflow-y-auto"></div>
+      </section>
+
+      <!-- Section 3: RAG Evaluation -->
+      <section id="rag-eval-section" class="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 class="text-xs font-semibold text-slate-200 uppercase tracking-wider">3. RAG 评估面板 (Evaluation)</h3>
+            <p class="text-[11px] text-slate-500">基于明确标注的 Expected Doc/Chunk/Page 计算 Recall@K、Precision@K 与确定性 Citation Accuracy；Groundedness 独立标识。</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="text" id="eval-run-dataset" value="default" placeholder="Dataset" class="w-28 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200">
+            <select id="eval-run-mode" class="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200">
+              <option value="hybrid">hybrid</option>
+              <option value="vector">vector</option>
+              <option value="fts">fts</option>
+            </select>
+            <input type="number" id="eval-run-topk" value="5" min="1" max="20" class="w-14 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200">
+            <button onclick="runRagEval()" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-medium transition">▶ 运行评估</button>
+          </div>
+        </div>
+
+        <!-- Add Eval Case Form -->
+        <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 grid grid-cols-1 md:grid-cols-6 gap-2 items-end">
+          <div>
+            <label class="block text-[11px] text-slate-400 mb-1">Dataset</label>
+            <input type="text" id="eval-case-dataset" value="default" class="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200">
+          </div>
+          <div class="md:col-span-2">
+            <label class="block text-[11px] text-slate-400 mb-1">Query</label>
+            <input type="text" id="eval-case-query" placeholder="测试问题..." class="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200">
+          </div>
+          <div>
+            <label class="block text-[11px] text-slate-400 mb-1">Expected Doc IDs (逗号分隔)</label>
+            <input type="text" id="eval-case-docids" placeholder="doc_abc,doc_def" class="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200">
+          </div>
+          <div>
+            <label class="block text-[11px] text-slate-400 mb-1">Expected Pages / Collection</label>
+            <div class="flex gap-1">
+              <input type="text" id="eval-case-pages" placeholder="1,2" class="w-1/2 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200">
+              <input type="text" id="eval-case-collection" placeholder="col" class="w-1/2 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200">
+            </div>
+          </div>
+          <button onclick="addRagEvalCase()" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded font-medium transition">+ 添加用例</button>
+        </div>
+
+        <div id="rag-eval-summary" class="hidden"></div>
+        <div id="rag-eval-cases" class="overflow-x-auto text-xs border border-slate-800 rounded-lg"></div>
+      </section>
     </div>
 
     <!-- 5. SYSTEM TAB -->
@@ -1286,86 +1375,390 @@
     }
 
     // --- RAG ---
+    function ragEscape(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function ragStatusBadge(status) {
+      const s = (status || 'READY').toUpperCase();
+      if (s === 'READY') return '<span class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">READY</span>';
+      if (s === 'INDEXING') return '<span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold">INDEXING</span>';
+      return `<span class="px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-500/30 font-semibold">${ragEscape(s)}</span>`;
+    }
+
     async function loadRagDocs() {
       const table = document.getElementById('rag-files-table');
+      const colFilter = (document.getElementById('rag-collection-filter')?.value || '').trim();
       table.innerHTML = '<div class="p-4 text-slate-500">加载中...</div>';
       try {
-        const res = await fetch('/api/v1/rag/documents');
+        const qs = colFilter ? `?collection=${encodeURIComponent(colFilter)}` : '';
+        const res = await fetch(`/api/v1/rag/documents${qs}`);
         const docs = await res.json();
-        if (docs.length === 0) {
-          table.innerHTML = '<div class="p-6 text-center text-slate-500">知识库中暂无已索引文档。点击右上角“扫描入库”将代码或 Markdown 文件构建为向量索引。</div>';
-          return;
-        }
-        table.innerHTML = `
-          <table class="w-full text-left border-collapse">
-            <thead>
-              <tr class="border-b border-slate-800 text-slate-400 bg-slate-950/40">
-                <th class="p-2.5 font-medium">文件路径</th>
-                <th class="p-2.5 font-medium">切片分块</th>
-                <th class="p-2.5 font-medium">内容哈希</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-800">
-              ${docs.map(d => `
-                <tr class="hover:bg-slate-800/40 transition">
-                  <td class="p-2.5 font-mono text-slate-300">${d.doc_path}</td>
-                  <td class="p-2.5 text-blue-400">${d.chunk_count}</td>
-                  <td class="p-2.5 text-slate-500 font-mono">${d.file_hash.substring(0, 10)}...</td>
+        if (!Array.isArray(docs) || docs.length === 0) {
+          table.innerHTML = '<div class="p-6 text-center text-slate-500">知识库中暂无匹配文档。可通过上方上传表单或“目录增量扫描”添加文档。</div>';
+        } else {
+          table.innerHTML = `
+            <table class="w-full text-left border-collapse">
+              <thead>
+                <tr class="border-b border-slate-800 text-slate-400 bg-slate-950/60">
+                  <th class="p-2.5 font-medium">标题 / 路径</th>
+                  <th class="p-2.5 font-medium">Doc ID</th>
+                  <th class="p-2.5 font-medium">Collection</th>
+                  <th class="p-2.5 font-medium">类型</th>
+                  <th class="p-2.5 font-medium">状态</th>
+                  <th class="p-2.5 font-medium">分块</th>
+                  <th class="p-2.5 font-medium text-right">操作</th>
                 </tr>
-              `).join('')}
-            </tbody>
-          </table>
+              </thead>
+              <tbody class="divide-y divide-slate-800">
+                ${docs.map(d => `
+                  <tr class="hover:bg-slate-800/40 transition">
+                    <td class="p-2.5">
+                      <div class="font-medium text-slate-200">${ragEscape(d.title || d.doc_path)}</div>
+                      <div class="font-mono text-[11px] text-slate-500">${ragEscape(d.doc_path)}</div>
+                    </td>
+                    <td class="p-2.5 font-mono text-[11px] text-slate-400">${ragEscape(d.doc_id || '-')}</td>
+                    <td class="p-2.5"><span class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">${ragEscape(d.collection || 'default')}</span></td>
+                    <td class="p-2.5 text-slate-400 font-mono">${ragEscape(d.file_type || '-')}</td>
+                    <td class="p-2.5">${ragStatusBadge(d.status)}</td>
+                    <td class="p-2.5 text-blue-400 font-mono">${d.chunk_count ?? 0}</td>
+                    <td class="p-2.5 text-right space-x-1 whitespace-nowrap">
+                      <button onclick="inspectRagDoc('${ragEscape(d.doc_id)}')" class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded">详情</button>
+                      <button onclick="reindexRagDoc('${ragEscape(d.doc_id)}')" class="px-2 py-0.5 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 rounded">重建</button>
+                      <button onclick="deleteRagDoc('${ragEscape(d.doc_id)}')" class="px-2 py-0.5 bg-red-600/20 hover:bg-red-600/40 text-red-300 rounded">删除</button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          `;
+        }
+      } catch (e) {
+        table.innerHTML = `<div class="p-4 text-red-400">加载错误: ${ragEscape(e)}</div>`;
+      }
+      loadRagEvalCases();
+    }
+
+    async function uploadRagDoc() {
+      const fileInput = document.getElementById('rag-upload-file');
+      const statusEl = document.getElementById('rag-upload-status');
+      const file = fileInput?.files?.[0];
+      if (!file) {
+        alert('请先选择要上传的文件');
+        return;
+      }
+      const collection = (document.getElementById('rag-upload-collection')?.value || 'default').trim() || 'default';
+      const title = (document.getElementById('rag-upload-title')?.value || '').trim();
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('collection', collection);
+      if (title) fd.append('title', title);
+
+      statusEl.className = 'text-xs px-3 py-2 rounded border border-blue-500/30 bg-blue-500/10 text-blue-300';
+      statusEl.textContent = `正在上传并索引 ${file.name}...`;
+      statusEl.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/v1/rag/documents/upload', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || JSON.stringify(data));
+        }
+        statusEl.className = 'text-xs px-3 py-2 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+        statusEl.textContent = `入库成功: ${data.title || file.name} (doc_id=${data.doc_id}, status=${data.status}, chunks=${data.chunks_added})`;
+        fileInput.value = '';
+        loadRagDocs();
+      } catch (e) {
+        statusEl.className = 'text-xs px-3 py-2 rounded border border-red-500/30 bg-red-500/10 text-red-300';
+        statusEl.textContent = `上传失败: ${e.message || e}`;
+      }
+    }
+
+    async function inspectRagDoc(docId) {
+      const detailEl = document.getElementById('rag-doc-detail');
+      detailEl.classList.remove('hidden');
+      detailEl.innerHTML = '<div class="text-slate-400">正在加载文档详情...</div>';
+      try {
+        const res = await fetch(`/api/v1/rag/documents/${encodeURIComponent(docId)}`);
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.detail || 'Not found');
+        detailEl.innerHTML = `
+          <div class="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-2">
+            <span class="font-semibold text-slate-200">文档详情: ${ragEscape(d.title || d.doc_path)}</span>
+            <button onclick="document.getElementById('rag-doc-detail').classList.add('hidden')" class="text-slate-400 hover:text-white">关闭</button>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-[11px]">
+            <div><span class="text-slate-500">Doc ID:</span> <span class="font-mono text-slate-200">${ragEscape(d.doc_id)}</span></div>
+            <div><span class="text-slate-500">Collection:</span> <span class="text-slate-200">${ragEscape(d.collection)}</span></div>
+            <div><span class="text-slate-500">Status:</span> ${ragStatusBadge(d.status)}</div>
+            <div><span class="text-slate-500">File Type:</span> <span class="font-mono text-slate-200">${ragEscape(d.file_type)}</span></div>
+            <div><span class="text-slate-500">Chunks:</span> <span class="text-blue-400">${d.chunk_count}</span></div>
+            <div><span class="text-slate-500">Hash:</span> <span class="font-mono text-slate-400">${ragEscape((d.file_hash || '').substring(0, 16))}...</span></div>
+          </div>
+          <div class="text-[11px] text-slate-400 font-mono break-all">Path: ${ragEscape(d.doc_path)}</div>
+          ${d.error_message ? `<div class="text-[11px] text-red-400">Error: ${ragEscape(d.error_message)}</div>` : ''}
         `;
       } catch (e) {
-        table.innerHTML = `<div class="p-4 text-red-400">加载错误: ${e}</div>`;
+        detailEl.innerHTML = `<div class="text-red-400">读取失败: ${ragEscape(e.message || e)}</div>`;
+      }
+    }
+
+    async function reindexRagDoc(docId) {
+      try {
+        const res = await fetch(`/api/v1/rag/documents/${encodeURIComponent(docId)}/reindex`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Reindex failed');
+        alert(`重建索引完成: ${data.doc_id} (chunks=${data.chunks_added})`);
+        loadRagDocs();
+      } catch (e) {
+        alert(`重建索引失败: ${e.message || e}`);
+      }
+    }
+
+    async function deleteRagDoc(docId) {
+      if (!confirm(`确认删除文档 ${docId} 及其全部向量与 FTS 索引？`)) return;
+      try {
+        const res = await fetch(`/api/v1/rag/documents/${encodeURIComponent(docId)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Delete failed');
+        document.getElementById('rag-doc-detail').classList.add('hidden');
+        loadRagDocs();
+      } catch (e) {
+        alert(`删除失败: ${e.message || e}`);
       }
     }
 
     async function triggerIndexModal() {
-      const dir = prompt("请输入要扫描索引的目录路径 (留空默认使用 docs):", "docs");
+      const dir = prompt("请输入要扫描索引的目录路径 (留空默认使用 workspace_root):", "");
       if (dir === null) return;
-      alert("正在后台执行增量扫描与向量嵌入，请稍候查看通知...");
       try {
         const res = await fetch('/api/v1/rag/index', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ directory_path: dir })
+          body: JSON.stringify({ directory_path: dir.trim() || null })
         });
         const summary = await res.json();
+        if (!res.ok) throw new Error(summary.detail || 'Index failed');
         alert(`索引完成！\n扫描文件: ${summary.scanned}\n新入库文件: ${summary.indexed}\n跳过未变动: ${summary.skipped}\n添加向量块: ${summary.chunks_added}`);
         loadRagDocs();
       } catch (e) {
-        alert("索引失败: " + e);
+        alert("索引失败: " + (e.message || e));
       }
     }
 
     async function testRagSearch() {
       const q = document.getElementById('rag-query-input').value.trim();
       if (!q) return;
+      const mode = document.getElementById('rag-search-mode')?.value || 'hybrid';
+      const collection = (document.getElementById('rag-search-collection')?.value || '').trim() || null;
+      const topK = parseInt(document.getElementById('rag-search-topk')?.value || '5', 10) || 5;
+      const minScore = parseFloat(document.getElementById('rag-search-minscore')?.value || '0') || 0.0;
+
       const resContainer = document.getElementById('rag-results');
-      resContainer.innerHTML = '<div class="text-xs text-slate-500">向量检索中...</div>';
+      resContainer.innerHTML = '<div class="text-xs text-slate-500">检索执行中...</div>';
       try {
         const res = await fetch('/api/v1/rag/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: q, top_k: 3 })
+          body: JSON.stringify({ query: q, top_k: topK, search_mode: mode, collection, min_score: minScore })
         });
         const matches = await res.json();
-        if (matches.length === 0) {
-          resContainer.innerHTML = '<div class="text-xs text-slate-500">未检索到相关内容</div>';
+        if (!Array.isArray(matches) || matches.length === 0) {
+          resContainer.innerHTML = '<div class="text-xs text-slate-500">未检索到符合条件的片段</div>';
           return;
         }
-        resContainer.innerHTML = matches.map((m, idx) => `
-          <div class="bg-slate-950 border border-slate-800 p-2.5 rounded text-xs font-mono">
-            <div class="flex items-center justify-between text-blue-400 font-semibold mb-1">
-              <span>#${idx+1} ${m.doc_path} (分块 ${m.chunk_index})</span>
-              <span class="text-emerald-400">相似度: ${(m.score * 100).toFixed(1)}%</span>
+        resContainer.innerHTML = matches.map((m) => {
+          const ex = m.explain || {};
+          const meta = m.metadata || {};
+          const vecSim = ex.vector_similarity !== null && ex.vector_similarity !== undefined ? Number(ex.vector_similarity).toFixed(4) : 'N/A';
+          const ftsBm25 = ex.fts_bm25 !== null && ex.fts_bm25 !== undefined ? Number(ex.fts_bm25).toFixed(4) : 'N/A';
+          const ftsRank = ex.fts_rank !== null && ex.fts_rank !== undefined ? `#${ex.fts_rank}` : 'N/A';
+          const rrf = ex.rrf_score !== null && ex.rrf_score !== undefined ? Number(ex.rrf_score).toFixed(4) : 'N/A';
+          const finalRank = ex.final_rank ?? '-';
+          const pageText = meta.page_number !== undefined && meta.page_number !== null ? `Page ${meta.page_number}` : '';
+          const secText = meta.section_title ? `Sec: ${meta.section_title}` : '';
+          return `
+            <div class="bg-slate-950 border border-slate-800 p-3 rounded-lg text-xs space-y-2">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="font-semibold text-blue-400">
+                  <span>#${finalRank} ${ragEscape(m.title || m.doc_path)}</span>
+                  <span class="text-slate-500 font-mono text-[11px] ml-1">(${ragEscape(m.doc_id || '')} | Chunk #${m.chunk_index}${pageText ? ' | ' + ragEscape(pageText) : ''}${secText ? ' | ' + ragEscape(secText) : ''})</span>
+                </div>
+                <span class="text-slate-400 font-mono text-[11px]">${ragEscape(m.collection || 'default')}</span>
+              </div>
+              <div class="flex flex-wrap gap-1.5 text-[11px] font-mono">
+                <span class="px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">Vector Sim: ${vecSim}</span>
+                <span class="px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">FTS5 BM25: ${ftsBm25} (${ftsRank})</span>
+                <span class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">RRF: ${rrf}</span>
+                <span class="px-2 py-0.5 rounded bg-slate-800 text-slate-300">Mode: ${ragEscape(ex.search_mode || mode)}</span>
+              </div>
+              <p class="text-slate-300 whitespace-pre-wrap font-mono text-[11px] leading-relaxed">${ragEscape(m.content)}</p>
             </div>
-            <p class="text-slate-300 whitespace-pre-wrap">${m.content}</p>
-          </div>
-        `).join('');
+          `;
+        }).join('');
       } catch (e) {
-        resContainer.innerHTML = `<div class="text-xs text-red-400">搜索失败: ${e}</div>`;
+        resContainer.innerHTML = `<div class="text-xs text-red-400">搜索失败: ${ragEscape(e.message || e)}</div>`;
+      }
+    }
+
+    async function loadRagEvalCases() {
+      const container = document.getElementById('rag-eval-cases');
+      if (!container) return;
+      try {
+        const res = await fetch('/api/v1/rag/eval/cases');
+        const cases = await res.json();
+        if (!Array.isArray(cases) || cases.length === 0) {
+          container.innerHTML = '<div class="p-4 text-center text-slate-500">暂无评估用例。请在上方添加 Query 与预期 Doc ID / Page 标注。</div>';
+          return;
+        }
+        container.innerHTML = `
+          <table class="w-full text-left border-collapse">
+            <thead>
+              <tr class="border-b border-slate-800 text-slate-400 bg-slate-950/60">
+                <th class="p-2 font-medium">Dataset</th>
+                <th class="p-2 font-medium">Query</th>
+                <th class="p-2 font-medium">Expected Docs</th>
+                <th class="p-2 font-medium">Expected Pages</th>
+                <th class="p-2 font-medium">Collection</th>
+                <th class="p-2 font-medium text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800">
+              ${cases.map(c => `
+                <tr class="hover:bg-slate-800/30">
+                  <td class="p-2 font-mono text-slate-300">${ragEscape(c.dataset_name)}</td>
+                  <td class="p-2 text-slate-200">${ragEscape(c.query)}</td>
+                  <td class="p-2 font-mono text-[11px] text-blue-300">${ragEscape((c.expected_doc_ids || []).join(', ') || '-')}</td>
+                  <td class="p-2 font-mono text-[11px] text-slate-400">${ragEscape((c.expected_page_numbers || []).join(', ') || '-')}</td>
+                  <td class="p-2 text-slate-400">${ragEscape(c.collection || '-')}</td>
+                  <td class="p-2 text-right">
+                    <button onclick="deleteRagEvalCase('${ragEscape(c.case_id)}')" class="px-2 py-0.5 bg-red-600/20 hover:bg-red-600/40 text-red-300 rounded">删除</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } catch (e) {
+        container.innerHTML = `<div class="p-3 text-red-400">加载评估用例失败: ${ragEscape(e)}</div>`;
+      }
+    }
+
+    async function addRagEvalCase() {
+      const dataset_name = (document.getElementById('eval-case-dataset')?.value || 'default').trim() || 'default';
+      const query = (document.getElementById('eval-case-query')?.value || '').trim();
+      const docIdsRaw = (document.getElementById('eval-case-docids')?.value || '').trim();
+      const pagesRaw = (document.getElementById('eval-case-pages')?.value || '').trim();
+      const collection = (document.getElementById('eval-case-collection')?.value || '').trim() || null;
+
+      if (!query) {
+        alert('请输入评估 Query');
+        return;
+      }
+      const expected_doc_ids = docIdsRaw ? docIdsRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+      const expected_page_numbers = pagesRaw ? pagesRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n)) : [];
+
+      try {
+        const res = await fetch('/api/v1/rag/eval/cases', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dataset_name, query, expected_doc_ids, expected_page_numbers, collection })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Create failed');
+        document.getElementById('eval-case-query').value = '';
+        loadRagEvalCases();
+      } catch (e) {
+        alert(`添加用例失败: ${e.message || e}`);
+      }
+    }
+
+    async function deleteRagEvalCase(caseId) {
+      try {
+        const res = await fetch(`/api/v1/rag/eval/cases/${encodeURIComponent(caseId)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Delete failed');
+        loadRagEvalCases();
+      } catch (e) {
+        alert(`删除失败: ${e.message || e}`);
+      }
+    }
+
+    async function runRagEval() {
+      const dataset_name = (document.getElementById('eval-run-dataset')?.value || 'default').trim() || 'default';
+      const search_mode = document.getElementById('eval-run-mode')?.value || 'hybrid';
+      const top_k = parseInt(document.getElementById('eval-run-topk')?.value || '5', 10) || 5;
+      const summaryEl = document.getElementById('rag-eval-summary');
+      summaryEl.classList.remove('hidden');
+      summaryEl.innerHTML = '<div class="text-xs text-slate-400">正在运行评估...</div>';
+      try {
+        const res = await fetch('/api/v1/rag/eval/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dataset_name, search_mode, top_k })
+        });
+        const run = await res.json();
+        if (!res.ok) throw new Error(run.detail || 'Eval run failed');
+        const pct = v => `${(Number(v || 0) * 100).toFixed(1)}%`;
+        summaryEl.innerHTML = `
+          <div class="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-3">
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+              <div class="p-2 rounded bg-slate-900 border border-slate-800">
+                <div class="text-[11px] text-slate-400">Recall@${run.top_k}</div>
+                <div class="text-base font-bold text-emerald-400">${pct(run.avg_recall_at_k)}</div>
+              </div>
+              <div class="p-2 rounded bg-slate-900 border border-slate-800">
+                <div class="text-[11px] text-slate-400">Precision@${run.top_k}</div>
+                <div class="text-base font-bold text-blue-400">${pct(run.avg_precision_at_k)}</div>
+              </div>
+              <div class="p-2 rounded bg-slate-900 border border-slate-800">
+                <div class="text-[11px] text-slate-400">Citation Accuracy (确定性)</div>
+                <div class="text-base font-bold text-purple-400">${pct(run.avg_citation_accuracy)}</div>
+              </div>
+              <div class="p-2 rounded bg-slate-900 border border-slate-800">
+                <div class="text-[11px] text-slate-400">Groundedness (独立指标)</div>
+                <div class="text-sm font-semibold text-slate-400">${ragEscape(run.groundedness_method || 'not_run')}</div>
+              </div>
+              <div class="p-2 rounded bg-slate-900 border border-slate-800">
+                <div class="text-[11px] text-slate-400">用例数 / 模式</div>
+                <div class="text-sm font-mono text-slate-200">${run.total_cases} / ${ragEscape(run.search_mode)}</div>
+              </div>
+            </div>
+            ${Array.isArray(run.results) && run.results.length > 0 ? `
+              <div class="overflow-x-auto text-[11px]">
+                <table class="w-full text-left border-collapse">
+                  <thead>
+                    <tr class="border-b border-slate-800 text-slate-400">
+                      <th class="p-1.5">Query</th>
+                      <th class="p-1.5">Recall@K</th>
+                      <th class="p-1.5">Precision@K</th>
+                      <th class="p-1.5">Citation Acc</th>
+                      <th class="p-1.5">Retrieved Docs</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-800">
+                    ${run.results.map(r => `
+                      <tr>
+                        <td class="p-1.5 text-slate-200">${ragEscape(r.query)}</td>
+                        <td class="p-1.5 font-mono text-emerald-300">${pct(r.recall_at_k)}</td>
+                        <td class="p-1.5 font-mono text-blue-300">${pct(r.precision_at_k)}</td>
+                        <td class="p-1.5 font-mono text-purple-300">${pct(r.citation_accuracy)}</td>
+                        <td class="p-1.5 font-mono text-slate-400">${ragEscape((r.retrieved_doc_ids || []).join(', ') || '-')}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      } catch (e) {
+        summaryEl.innerHTML = `<div class="text-xs text-red-400">评估失败: ${ragEscape(e.message || e)}</div>`;
       }
     }
 
