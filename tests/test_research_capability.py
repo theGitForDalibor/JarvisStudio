@@ -282,15 +282,21 @@ def test_fetch_web_page_extraction_and_ssrf_defense() -> None:
     assert "color: red" not in text
 
     mock_resp = MagicMock()
-    mock_resp.content = raw_html.encode("utf-8")
+    mock_resp.status_code = 200
+    mock_resp.extensions = {}
+    mock_resp.iter_bytes.return_value = [raw_html.encode("utf-8")]
     mock_resp.encoding = "utf-8"
     mock_resp.headers = {"content-type": "text/html; charset=utf-8"}
     mock_resp.url = "https://93.184.216.34/guide"
     mock_resp.raise_for_status.return_value = None
 
+    stream_ctx = MagicMock()
+    stream_ctx.__enter__.return_value = mock_resp
+    stream_ctx.__exit__.return_value = False
+
     with patch("jarvis_studio.tools.builtin.web_fetch_tools.httpx.Client") as mock_client_cls:
         mock_client = mock_client_cls.return_value.__enter__.return_value
-        mock_client.get.return_value = mock_resp
+        mock_client.stream.return_value = stream_ctx
         out = fetch_web_page.invoke({"url": "https://93.184.216.34/guide", "max_chars": 500})
         assert "Title: Agent Architecture Guide" in out
         assert "Supports multi-file editing & autonomous tool calling." in out
@@ -364,15 +370,21 @@ async def test_e2e_research_and_analysis_loop_with_deliverable_and_events(tmp_pa
 
         def _make_fake_fetch(url: str) -> MagicMock:
             resp = MagicMock()
+            resp.status_code = 200
+            resp.extensions = {}
             resp.headers = {"content-type": "text/html"}
             resp.encoding = "utf-8"
             resp.url = url
             resp.raise_for_status.return_value = None
             if "cursor" in url:
-                resp.content = b"<html><title>Cursor Docs</title><body><p>Cursor supports multi-file Composer and Pro subscription.</p></body></html>"
+                body = b"<html><title>Cursor Docs</title><body><p>Cursor supports multi-file Composer and Pro subscription.</p></body></html>"
             else:
-                resp.content = b"<html><title>Copilot Docs</title><body><p>GitHub Copilot integrates deeply with PRs and seat-based billing.</p></body></html>"
-            return resp
+                body = b"<html><title>Copilot Docs</title><body><p>GitHub Copilot integrates deeply with PRs and seat-based billing.</p></body></html>"
+            resp.iter_bytes.return_value = [body]
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            ctx.__exit__.return_value = False
+            return ctx
 
         with (
             patch(
@@ -390,7 +402,7 @@ async def test_e2e_research_and_analysis_loop_with_deliverable_and_events(tmp_pa
             patch("jarvis_studio.tools.builtin.web_fetch_tools.httpx.Client") as mock_http_cls,
         ):
             mock_client = mock_http_cls.return_value.__enter__.return_value
-            mock_client.get.side_effect = lambda u, **kw: _make_fake_fetch(u)
+            mock_client.stream.side_effect = lambda method, u, **kw: _make_fake_fetch(u)
 
             task = coord.create_task(
                 query="研究当前主流 AI Coding Agent 的产品定位、核心能力、技术路线和商业模式，并形成对比分析报告。"
