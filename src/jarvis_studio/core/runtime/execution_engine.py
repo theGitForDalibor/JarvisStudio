@@ -268,6 +268,7 @@ class ExecutionEngine:
             # 2. Check if currently running in a worker
             if task_id in self._running_tasks:
                 handle, req = self._running_tasks[task_id]
+                req.is_pause = False
                 self.coordinator.mark_cancelling(task_id, req.run_id)
                 self.coordinator.record_event(
                     task_id=task_id,
@@ -319,13 +320,15 @@ class ExecutionEngine:
                     req.future.cancel()
                 return self.coordinator.get_task(task_id)  # type: ignore[return-value]
 
-            # 2. If running, signal pause and cancel coroutine gracefully
+            # 2. If running, signal cooperative pause (do NOT force-cancel in-flight tools)
             if task_id in self._running_tasks:
                 handle, req = self._running_tasks[task_id]
-                req.is_pause = True
-                handle.cancel()
-                # Return current task state (will converge to PAUSED in worker)
                 task = self.coordinator.get_task(task_id)
+                if task is not None and task.status == TaskStatus.WAITING_APPROVAL:
+                    raise ValueError(
+                        f"Task '{task_id}' is waiting for HITL approval and cannot be paused"
+                    )
+                req.is_pause = True
                 return task  # type: ignore[return-value]
 
         task = self.coordinator.get_task(task_id)
@@ -342,7 +345,10 @@ class ExecutionEngine:
                 run_id=task.current_run_id,
                 payload={"reason": reason},
             )
-        return self.coordinator.get_task(task_id) or task
+            return self.coordinator.get_task(task_id) or task
+        raise ValueError(
+            f"Task '{task_id}' cannot be paused while in state '{task.status.value}'"
+        )
 
     async def resume_task(self, task_id: str, *, checkpoint_id: str | None = None) -> AgentRun:
         """Resume a paused or interrupted task with a new run inheriting the checkpoint."""
@@ -431,29 +437,22 @@ class ExecutionEngine:
                         checkpoint_id=req.checkpoint_id,
                         fresh_checkpoint=req.fresh_checkpoint,
                         allow_queued=True,
+                        pause_checker=lambda r=req: r.is_pause,
                     )
                     if req.future and not req.future.done():
                         req.future.set_result(result)
                 except asyncio.CancelledError:
-                    if req.is_pause:
-                        self.coordinator.pause_task_and_run(
-                            task_id, req.run_id, checkpoint_id=req.checkpoint_id
-                        )
+                    events = self.coordinator.list_events_for_task(task_id, limit=500)
+                    if not any(
+                        e.event_type == EventType.TASK_CANCELLED and e.run_id == req.run_id
+                        for e in events
+                    ):
                         self.coordinator.record_event(
                             task_id=task_id,
-                            event_type=EventType.TASK_PAUSED,
+                            event_type=EventType.TASK_CANCELLED,
                             run_id=req.run_id,
-                            payload={"reason": "Paused by user"},
+                            payload={"reason": "Cancelled"},
                         )
-                    else:
-                        events = self.coordinator.list_events_for_task(task_id, limit=5)
-                        if not any(e.event_type == EventType.TASK_CANCELLED for e in events):
-                            self.coordinator.record_event(
-                                task_id=task_id,
-                                event_type=EventType.TASK_CANCELLED,
-                                run_id=req.run_id,
-                                payload={"reason": "Cancelled"},
-                            )
                     if req.future and not req.future.done():
                         req.future.cancel()
                 except Exception as exc:  # noqa: BLE001

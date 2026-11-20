@@ -93,6 +93,7 @@ class TaskCoordinator:
             if self._is_memory
             else None
         )
+        self._event_lock = threading.Lock()
         self._init_db()
 
     def _init_db(self) -> None:
@@ -245,9 +246,35 @@ class TaskCoordinator:
         run_id: str | None = None,
         checkpoint_id: str | None = None,
     ) -> AgentRun:
-        """Create and queue a run in QUEUED status under task_id."""
+        """Create and queue a run in QUEUED status under task_id with atomic DB single-flight guard."""
         now = time.time()
         with self._tx() as conn:
+            t_row = conn.execute(
+                "SELECT status, archived_at FROM agent_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if t_row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            t_status, t_archived = t_row[0], t_row[1]
+            if t_archived is not None:
+                raise ValueError(f"Task '{task_id}' is archived and cannot be executed")
+            if t_status == TaskStatus.UNKNOWN.value:
+                raise RuntimeError(
+                    f"Task '{task_id}' is in UNKNOWN state due to uncertain external side effects "
+                    "and cannot be automatically re-executed."
+                )
+            blocked_statuses = {
+                TaskStatus.QUEUED.value,
+                TaskStatus.RUNNING.value,
+                TaskStatus.EXECUTING_TOOL.value,
+                TaskStatus.WAITING_APPROVAL.value,
+                TaskStatus.CANCELLING.value,
+            }
+            if trigger_type not in (RunTriggerType.USER_INPUT, RunTriggerType.RESUME):
+                blocked_statuses.add(TaskStatus.COMPLETED.value)
+            if t_status in blocked_statuses:
+                raise ValueError(f"Task '{task_id}' cannot be queued while in state '{t_status}'")
+
             row = conn.execute(
                 "SELECT COALESCE(MAX(run_seq), 0) FROM agent_runs WHERE task_id = ?",
                 (task_id,),
@@ -300,6 +327,7 @@ class TaskCoordinator:
         trigger_type: RunTriggerType = RunTriggerType.INITIAL,
         run_id: str | None = None,
         checkpoint_id: str | None = None,
+        enforce_single_flight: bool = False,
     ) -> AgentRun:
         """Create and start a new run under the given task, or transition an existing QUEUED run to RUNNING."""
         now = time.time()
@@ -315,6 +343,10 @@ class TaskCoordinator:
                     existing = _row_to_run(existing_row)
 
             if existing is not None:
+                if existing.status != RunStatus.QUEUED:
+                    raise ValueError(
+                        f"Queued run '{run_id}' cannot start from status '{existing.status.value}'"
+                    )
                 conn.execute(
                     """
                     UPDATE agent_runs
@@ -338,6 +370,28 @@ class TaskCoordinator:
                 if checkpoint_id:
                     existing.checkpoint_id = checkpoint_id
                 return existing
+
+            t_row = conn.execute(
+                "SELECT status, archived_at FROM agent_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if t_row is not None:
+                t_status, t_archived = t_row[0], t_row[1]
+                if t_archived is not None:
+                    raise ValueError(f"Task '{task_id}' is archived and cannot be executed")
+                if enforce_single_flight:
+                    blocked_statuses = {
+                        TaskStatus.QUEUED.value,
+                        TaskStatus.RUNNING.value,
+                        TaskStatus.EXECUTING_TOOL.value,
+                        TaskStatus.CANCELLING.value,
+                    }
+                    if trigger_type != RunTriggerType.HITL_RESUME:
+                        blocked_statuses.add(TaskStatus.WAITING_APPROVAL.value)
+                    if t_status in blocked_statuses:
+                        raise ValueError(
+                            f"Task '{task_id}' cannot start a new run while in state '{t_status}'"
+                        )
 
             row = conn.execute(
                 "SELECT COALESCE(MAX(run_seq), 0) FROM agent_runs WHERE task_id = ?",
@@ -745,9 +799,21 @@ class TaskCoordinator:
         atomically so DB state and external side effects remain consistent.
         """
         with self._tx() as conn:
-            row = conn.execute("SELECT 1 FROM agent_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            row = conn.execute(
+                "SELECT status FROM agent_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
             if row is None:
                 return False
+            if row[0] in (
+                TaskStatus.QUEUED.value,
+                TaskStatus.RUNNING.value,
+                TaskStatus.EXECUTING_TOOL.value,
+                TaskStatus.WAITING_APPROVAL.value,
+                TaskStatus.CANCELLING.value,
+            ):
+                raise ValueError(
+                    f"Task '{task_id}' cannot be purged while in active state '{row[0]}'"
+                )
             # Cascade delete in proper child-to-parent order
             conn.execute("DELETE FROM agent_deliverables WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM agent_events WHERE task_id = ?", (task_id,))
@@ -788,36 +854,37 @@ class TaskCoordinator:
         payload_json = json.dumps(payload_data, ensure_ascii=False)
         e_id = event_id or f"evt_{uuid.uuid4().hex[:12]}"
 
-        with self._tx() as conn:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) FROM agent_events WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            next_seq = int(row[0]) + 1 if row is not None and row[0] is not None else 1
+        with self._event_lock:
+            with self._tx() as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) FROM agent_events WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                next_seq = int(row[0]) + 1 if row is not None and row[0] is not None else 1
 
-            conn.execute(
-                """
-                INSERT INTO agent_events (
-                    event_id, task_id, run_id, seq, event_type, timestamp, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (e_id, task_id, run_id, next_seq, evt_type.value, now, payload_json),
+                conn.execute(
+                    """
+                    INSERT INTO agent_events (
+                        event_id, task_id, run_id, seq, event_type, timestamp, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (e_id, task_id, run_id, next_seq, evt_type.value, now, payload_json),
+                )
+            record = EventRecord(
+                event_id=e_id,
+                task_id=task_id,
+                run_id=run_id,
+                seq=next_seq,
+                event_type=evt_type,
+                timestamp=now,
+                payload_json=payload_json,
             )
-        record = EventRecord(
-            event_id=e_id,
-            task_id=task_id,
-            run_id=run_id,
-            seq=next_seq,
-            event_type=evt_type,
-            timestamp=now,
-            payload_json=payload_json,
-        )
-        try:
-            from jarvis_studio.core.observability.event_broadcaster import get_event_broadcaster
+            try:
+                from jarvis_studio.core.observability.event_broadcaster import get_event_broadcaster
 
-            get_event_broadcaster().broadcast(record)
-        except Exception as b_exc:  # noqa: BLE001
-            _logger.debug("Failed to broadcast event %s: %s", e_id, b_exc)
+                get_event_broadcaster().broadcast(record)
+            except Exception as b_exc:  # noqa: BLE001
+                _logger.debug("Failed to broadcast event %s: %s", e_id, b_exc)
         return record
 
     def list_events_for_task(

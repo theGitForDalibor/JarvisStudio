@@ -323,46 +323,83 @@ async def stream_task_events(
 
         broadcaster = get_event_broadcaster()
         async with broadcaster.subscribe(task_id) as queue:
-            # 1. Replay historical events strictly after effective_since
-            historical = task_service.list_events(task_id, since_seq=effective_since, limit=1000)
+            # 1. Paginated replay of all historical events strictly after effective_since
             last_seq = effective_since
-            for ev in historical:
-                if ev.seq > last_seq:
-                    last_seq = ev.seq
-                    yield {
-                        "event": ev.event_type.value,
-                        "id": str(ev.seq),
-                        "data": json.dumps(ev.model_dump(mode="json"), ensure_ascii=False),
-                    }
+            batch_limit = 500
+            while True:
+                batch = task_service.list_events(task_id, since_seq=last_seq, limit=batch_limit)
+                if not batch:
+                    break
+                for ev in batch:
+                    if ev.seq > last_seq:
+                        last_seq = ev.seq
+                        yield {
+                            "event": ev.event_type.value,
+                            "id": str(ev.seq),
+                            "data": json.dumps(ev.model_dump(mode="json"), ensure_ascii=False),
+                        }
+                if len(batch) < batch_limit:
+                    break
 
             # 2. Check if task was already terminal before listening
             current_task = task_service.get_task(task_id)
             if (
                 current_task is not None
-                and current_task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+                and current_task.status
+                in (
+                    TaskStatus.COMPLETED,
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELLED,
+                    TaskStatus.UNKNOWN,
+                    TaskStatus.TIMEOUT,
+                )
                 and queue.empty()
             ):
                 return
 
-            # 3. Stream live events as they arrive
+            # 3. Stream live events as they arrive (with gap-catchup safety net)
+            terminal_events = (
+                EventType.TASK_COMPLETED,
+                EventType.TASK_CANCELLED,
+                EventType.RUN_FAILED,
+            )
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     record = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    if record.seq > last_seq:
-                        last_seq = record.seq
-                        yield {
-                            "event": record.event_type.value,
-                            "id": str(record.seq),
-                            "data": json.dumps(record.model_dump(mode="json"), ensure_ascii=False),
-                        }
-                        if record.event_type in (
-                            EventType.TASK_COMPLETED,
-                            EventType.TASK_CANCELLED,
-                            EventType.RUN_FAILED,
-                        ):
+                    if record.seq <= last_seq:
+                        continue
+                    # If a sequence gap is detected, catch up from SQLite in strict seq order
+                    if record.seq > last_seq + 1:
+                        gap_events = task_service.list_events(
+                            task_id, since_seq=last_seq, limit=500
+                        )
+                        hit_terminal = False
+                        for gev in gap_events:
+                            if gev.seq > last_seq:
+                                last_seq = gev.seq
+                                yield {
+                                    "event": gev.event_type.value,
+                                    "id": str(gev.seq),
+                                    "data": json.dumps(gev.model_dump(mode="json"), ensure_ascii=False),
+                                }
+                                if gev.event_type in terminal_events:
+                                    hit_terminal = True
+                                    break
+                        if hit_terminal:
                             break
+                        if record.seq <= last_seq:
+                            continue
+
+                    last_seq = record.seq
+                    yield {
+                        "event": record.event_type.value,
+                        "id": str(record.seq),
+                        "data": json.dumps(record.model_dump(mode="json"), ensure_ascii=False),
+                    }
+                    if record.event_type in terminal_events:
+                        break
                 except asyncio.TimeoutError:
                     yield {"comment": "ping"}
 

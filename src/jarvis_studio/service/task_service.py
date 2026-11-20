@@ -237,9 +237,11 @@ class TaskService:
             return None
 
         if task.status in (
+            TaskStatus.QUEUED,
             TaskStatus.RUNNING,
             TaskStatus.EXECUTING_TOOL,
             TaskStatus.WAITING_APPROVAL,
+            TaskStatus.CANCELLING,
         ):
             raise ValueError(
                 f"Task '{task_id}' cannot be archived while in active state '{task.status.value}'"
@@ -277,9 +279,11 @@ class TaskService:
             return False
 
         if task.status in (
+            TaskStatus.QUEUED,
             TaskStatus.RUNNING,
             TaskStatus.EXECUTING_TOOL,
             TaskStatus.WAITING_APPROVAL,
+            TaskStatus.CANCELLING,
         ):
             raise ValueError(
                 f"Task '{task_id}' cannot be purged while in active state '{task.status.value}'"

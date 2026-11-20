@@ -355,6 +355,7 @@ class AgentService:
         checkpoint_id: str | None = None,
         fresh_checkpoint: bool = False,
         allow_queued: bool = False,
+        pause_checker: Callable[[], bool] | None = None,
     ) -> AgentExecutionResult:
         """Execute an existing standalone or session-linked Task on its isolated thread_id."""
         self._verify_event_loop()
@@ -376,6 +377,7 @@ class AgentService:
                     trigger_type=trigger_type,
                     checkpoint_id=checkpoint_id,
                     fresh_checkpoint=fresh_checkpoint,
+                    pause_checker=pause_checker,
                 )
         finally:
             self._end_runtime_run(task_token)
@@ -390,6 +392,7 @@ class AgentService:
         trigger_type: RunTriggerType = RunTriggerType.INITIAL,
         checkpoint_id: str | None = None,
         fresh_checkpoint: bool = False,
+        pause_checker: Callable[[], bool] | None = None,
     ) -> AgentExecutionResult:
         """Internal invoke implementation executed under the per-thread lock."""
         effective_session_id = (
@@ -428,6 +431,9 @@ class AgentService:
             trigger_type=trigger_type,
             run_id=effective_run_id,
             checkpoint_id=None if fresh_checkpoint else checkpoint_id,
+            enforce_single_flight=(
+                existing_task is not None and trigger_type != RunTriggerType.HITL_RESUME
+            ),
         )
         self._safe_record_event(
             task.task_id,
@@ -565,14 +571,57 @@ class AgentService:
                 "task_id": task.task_id,
             },
         }
+        is_checkpoint_resume = (
+            trigger_type == RunTriggerType.RESUME
+            and not fresh_checkpoint
+            and bool(state_snapshot.next)
+            and not any(getattr(t, "interrupts", None) for t in (state_snapshot.tasks or ()))
+        )
+        graph_input: dict[str, Any] | None = None if is_checkpoint_resume else input_state
 
+        paused_mid_run = False
+        final_state: dict[str, Any] = {}
         try:
             with timed_step("agent_run", thread_id=effective_thread_id, run_id=effective_run_id):
-                final_state = await self.graph.ainvoke(input_state, config=config)
+                if hasattr(self.graph, "astream"):
+                    async for chunk in self.graph.astream(
+                        graph_input, config=config, stream_mode="values"
+                    ):
+                        if isinstance(chunk, dict):
+                            final_state = chunk
+                        if pause_checker is not None and pause_checker():
+                            snap_check = await self.graph.aget_state(config)
+                            if snap_check.next:
+                                paused_mid_run = True
+                                break
+                else:
+                    final_state = await self.graph.ainvoke(graph_input, config=config)
 
-            # Check if execution paused on an interrupt
+            # Check if execution paused cooperatively or on an HITL interrupt
             state_snapshot = await self.graph.aget_state(config)
             cp_id = _extract_checkpoint_id(state_snapshot)
+            if paused_mid_run:
+                self.task_coordinator.pause_task_and_run(
+                    task.task_id, run.run_id, checkpoint_id=cp_id
+                )
+                self._safe_record_event(
+                    task.task_id,
+                    EventType.TASK_PAUSED,
+                    run_id=run.run_id,
+                    payload={"reason": "Paused by user", "checkpoint_id": cp_id},
+                )
+                trace.finish(output="[Paused by user]", status="paused")
+                trace_store.save_trace(trace)
+                trace_store.prune_old_traces()
+
+                return AgentExecutionResult(
+                    thread_id=effective_thread_id,
+                    run_id=effective_run_id,
+                    task_id=task.task_id,
+                    status="paused",
+                    output_text="",
+                )
+
             if state_snapshot.next:
                 tasks = state_snapshot.tasks
                 interrupt_val = None

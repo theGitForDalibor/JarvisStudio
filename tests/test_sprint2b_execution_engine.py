@@ -207,8 +207,18 @@ async def test_pause_and_resume_lifecycle(tmp_path: Path):
         async def execute_task(self, task_id, **kwargs):
             self.iteration += 1
             if self.iteration == 1:
-                # First run will be paused while sleeping
-                await asyncio.sleep(5.0)
+                pause_checker = kwargs.get("pause_checker")
+                for _ in range(50):
+                    if pause_checker and pause_checker():
+                        coordinator.pause_task_and_run(task_id, kwargs.get("run_id", "run_1"))
+                        coordinator.record_event(
+                            task_id,
+                            EventType.TASK_PAUSED,
+                            run_id=kwargs.get("run_id", "run_1"),
+                            payload={"reason": "Paused cooperatively"},
+                        )
+                        return AgentExecutionResult(thread_id=task_id, run_id="run_1", task_id=task_id, status="paused")
+                    await asyncio.sleep(0.01)
             else:
                 # Resumed run completes quickly
                 await asyncio.sleep(0.05)
