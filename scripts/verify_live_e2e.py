@@ -557,7 +557,7 @@ async def run_live_e2e(
                         cfg_r = Settings(
                             storage=StorageConfig(
                                 checkpoint_backend="sqlite",
-                                sqlite_path=str(tmp_path / "live_research.db"),
+                                sqlite_path=app_db,
                                 workspace_root=str(ws_dir),
                             ),
                             rag=RAGConfig(enabled=False, vector_db_path=vec_db),
@@ -625,7 +625,7 @@ async def run_live_e2e(
                     cfg_r = Settings(
                         storage=StorageConfig(
                             checkpoint_backend="sqlite",
-                            sqlite_path=str(tmp_path / "live_research.db"),
+                            sqlite_path=app_db,
                             workspace_root=str(ws_dir),
                         ),
                         rag=RAGConfig(enabled=False, vector_db_path=vec_db),
