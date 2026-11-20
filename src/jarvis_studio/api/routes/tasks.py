@@ -98,8 +98,13 @@ async def create_task(request: CreateTaskRequest) -> AgentTask:
             priority=request.priority,
             plan_json=request.plan_json,
             knowledge_scope=request.knowledge_scope,
-            auto_start_run=request.auto_start_run,
+            auto_start_run=False,
         )
+        if request.auto_start_run:
+            await task_service.submit_task(task.task_id)
+            refreshed = task_service.get_task(task.task_id)
+            if refreshed is not None:
+                task = refreshed
         return task
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err)) from err

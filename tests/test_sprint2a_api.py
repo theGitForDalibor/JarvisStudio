@@ -125,7 +125,7 @@ def test_api_cancel_task(client: TestClient):
     """POST /api/v1/tasks/{id}/cancel stops task and its run."""
     resp = client.post(
         "/api/v1/tasks",
-        json={"query": "To be cancelled", "auto_start_run": True},
+        json={"query": "To be cancelled", "auto_start_run": False},
     )
     task_id = resp.json()["task_id"]
 

@@ -134,6 +134,15 @@ def create_tool_executor_node(
             else "run_unknown"
         )
         task_id = run_ctx.get("task_id") if isinstance(run_ctx, dict) else None
+        if task_id:
+            try:
+                from jarvis_studio.core.tasks.coordinator import get_task_coordinator
+
+                live_task = get_task_coordinator().get_task(task_id)
+                if live_task and live_task.current_run_id:
+                    run_id = live_task.current_run_id
+            except Exception:  # noqa: BLE001
+                pass
 
         for call in last_message.tool_calls:
             tool_name = call.get("name", "")

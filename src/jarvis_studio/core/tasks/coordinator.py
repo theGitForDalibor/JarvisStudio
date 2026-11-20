@@ -394,7 +394,7 @@ class TaskCoordinator:
                 conn.execute(
                     """
                     UPDATE agent_tasks
-                    SET current_run_id = ?, status = ?, runtime_id = ?, updated_at = ?
+                    SET current_run_id = ?, status = ?, runtime_id = ?, updated_at = ?, error_message = NULL
                     WHERE task_id = ?
                     """,
                     (run_id, TaskStatus.RUNNING.value, runtime_id, now, task_id),
@@ -576,7 +576,7 @@ class TaskCoordinator:
             conn.execute(
                 """
                 UPDATE agent_tasks
-                SET status = ?, updated_at = ?, completed_at = ?
+                SET status = ?, updated_at = ?, completed_at = ?, error_message = NULL
                 WHERE task_id = ?
                 """,
                 (TaskStatus.COMPLETED.value, now, now, task_id),
