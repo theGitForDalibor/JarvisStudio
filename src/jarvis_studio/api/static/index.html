@@ -58,24 +58,27 @@
     </div>
 
     <!-- Active Navigation Tabs -->
-    <nav class="flex items-center space-x-1 bg-slate-800/60 p-1 rounded-lg border border-slate-700/50 text-xs font-medium">
-      <button onclick="switchTab('chat')" id="tab-btn-chat" class="px-3 py-1.5 rounded-md transition bg-blue-600 text-white shadow">
-        💬 对话终端
+    <nav class="flex items-center space-x-1 bg-slate-800/60 p-1 rounded-lg border border-slate-700/50 text-xs font-medium whitespace-nowrap overflow-x-auto">
+      <button onclick="switchTab('chat')" id="tab-btn-chat" class="px-2.5 py-1.5 rounded-md transition bg-blue-600 text-white shadow">
+        💬 对话
       </button>
-      <button onclick="switchTab('approvals')" id="tab-btn-approvals" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white flex items-center gap-1.5">
-        🛡️ HITL 审批 <span id="pending-badge" class="hidden px-1.5 py-0.2 text-[10px] bg-red-500 text-white rounded-full">0</span>
+      <button onclick="switchTab('tasks')" id="tab-btn-tasks" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        📋 任务 (Tasks)
       </button>
-      <button onclick="switchTab('memory')" id="tab-btn-memory" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        🧠 长期记忆 (LTM)
+      <button onclick="switchTab('approvals')" id="tab-btn-approvals" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white flex items-center gap-1.5">
+        🛡️ 审批 <span id="pending-badge" class="hidden px-1.5 py-0.2 text-[10px] bg-red-500 text-white rounded-full">0</span>
       </button>
-      <button onclick="switchTab('rag')" id="tab-btn-rag" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        📚 本地知识库 (RAG)
+      <button onclick="switchTab('memory')" id="tab-btn-memory" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        🧠 记忆
       </button>
-      <button onclick="switchTab('traces')" id="tab-btn-traces" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        ⚡ 链路追踪 (Traces)
+      <button onclick="switchTab('rag')" id="tab-btn-rag" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        📚 知识库
       </button>
-      <button onclick="switchTab('system')" id="tab-btn-system" class="px-3 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        ⚙️ 系统工具
+      <button onclick="switchTab('traces')" id="tab-btn-traces" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        ⚡ 追踪
+      </button>
+      <button onclick="switchTab('system')" id="tab-btn-system" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
+        ⚙️ 系统
       </button>
     </nav>
 
@@ -225,6 +228,124 @@
         </div>
 
       </div>
+    </div>
+
+    <!-- 1B. TASKS WORKBENCH TAB -->
+    <div id="view-tasks" class="hidden flex-1 flex h-full overflow-hidden">
+      <!-- Left: Task List & Create Form -->
+      <aside class="w-80 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0">
+        <div class="p-3 border-b border-slate-800 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-slate-200 uppercase tracking-wider">任务列表</span>
+            <div class="flex items-center gap-1.5">
+              <button onclick="loadTasks()" class="px-2 py-1 text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition" title="刷新列表">↻</button>
+              <button onclick="toggleCreateTaskPanel()" id="btn-toggle-create-task" class="px-2.5 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition">+ 新建任务</button>
+            </div>
+          </div>
+          <select id="tasks-status-filter" onchange="loadTasks()" class="w-full bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-300 outline-none focus:border-blue-500">
+            <option value="">全部状态</option>
+            <option value="RUNNING">RUNNING (执行中)</option>
+            <option value="QUEUED">QUEUED (排队中)</option>
+            <option value="WAITING_APPROVAL">WAITING_APPROVAL (待审批)</option>
+            <option value="PAUSED">PAUSED (已暂停)</option>
+            <option value="COMPLETED">COMPLETED (已完成)</option>
+            <option value="FAILED">FAILED (失败)</option>
+            <option value="CANCELLED">CANCELLED (已取消)</option>
+          </select>
+        </div>
+
+        <!-- Collapsible Create Task Form -->
+        <div id="create-task-panel" class="hidden p-3 border-b border-slate-800 bg-slate-950/60 space-y-2.5 text-xs">
+          <div>
+            <label class="block text-[11px] text-slate-400 mb-1">任务目标 (Query)</label>
+            <textarea id="new-task-query" rows="3" placeholder="例如：检索项目架构文档并生成总结报告..." class="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-200 outline-none focus:border-blue-500 resize-none"></textarea>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-1">
+              <label class="text-[11px] text-slate-400">Knowledge Scope (可选)</label>
+              <button type="button" onclick="loadTaskScopeOptions()" class="text-[11px] text-blue-400 hover:underline">刷新可用库</button>
+            </div>
+            <div class="space-y-1.5">
+              <select id="new-task-scope-collections" multiple size="2" class="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 outline-none focus:border-blue-500"></select>
+              <select id="new-task-scope-docs" multiple size="2" class="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-300 outline-none focus:border-blue-500"></select>
+              <p class="text-[10px] text-slate-500">不选表示默认全库访问；按住 Ctrl/Cmd 可多选。</p>
+            </div>
+          </div>
+          <label class="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer select-none">
+            <input type="checkbox" id="new-task-autostart" checked class="rounded bg-slate-950 border-slate-700 text-blue-600">
+            <span>创建后立即后台执行</span>
+          </label>
+          <div class="flex gap-2">
+            <button onclick="createTaskFromForm()" id="btn-submit-create-task" class="flex-1 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition">创建任务</button>
+            <button onclick="toggleCreateTaskPanel(false)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition">取消</button>
+          </div>
+        </div>
+
+        <div id="tasks-list-container" class="flex-1 overflow-y-auto p-2 space-y-1.5 text-xs">
+          <div class="p-4 text-center text-slate-500">加载任务列表中...</div>
+        </div>
+      </aside>
+
+      <!-- Right: Active Task Workspace -->
+      <section class="flex-1 flex flex-col bg-slate-950 overflow-hidden">
+        <!-- Empty State -->
+        <div id="task-empty-state" class="flex-1 flex flex-col items-center justify-center text-center p-8 text-slate-500 space-y-3">
+          <div class="text-3xl">📋</div>
+          <div class="text-sm font-semibold text-slate-300">尚未选择任务</div>
+          <p class="text-xs max-w-md">从左侧选择一个已有任务，或点击「+ 新建任务」创建并后台运行一个新的 Agent 任务。</p>
+          <button onclick="toggleCreateTaskPanel(true)" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg font-medium transition">+ 新建任务</button>
+        </div>
+
+        <!-- Active Task Detail -->
+        <div id="task-detail-workspace" class="hidden flex-1 flex flex-col overflow-hidden">
+          <!-- Error Banner -->
+          <div id="task-error-banner" class="hidden mx-4 mt-3 px-3 py-2 rounded-lg border border-red-500/40 bg-red-500/10 text-red-300 text-xs flex items-center justify-between gap-2">
+            <span id="task-error-text"></span>
+            <button onclick="document.getElementById('task-error-banner').classList.add('hidden')" class="text-red-300 hover:text-white">✕</button>
+          </div>
+
+          <!-- Header -->
+          <div class="p-4 border-b border-slate-800 bg-slate-900/50 space-y-3 shrink-0">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="space-y-1 min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span id="task-detail-id" class="font-mono text-[11px] text-slate-400"></span>
+                  <span id="task-detail-status-badge"></span>
+                  <span id="task-sse-badge" class="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400">SSE: IDLE</span>
+                </div>
+                <h2 id="task-detail-query" class="text-sm font-semibold text-slate-100 break-words"></h2>
+                <div id="task-detail-meta" class="flex flex-wrap items-center gap-2 text-[11px] text-slate-400"></div>
+              </div>
+              <div id="task-control-buttons" class="flex flex-wrap items-center gap-1.5 shrink-0"></div>
+            </div>
+
+            <!-- Run Switcher -->
+            <div class="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80">
+              <div id="task-runs-bar" class="flex flex-wrap items-center gap-1.5 text-xs"></div>
+              <button onclick="refreshActiveTaskDetail(true)" class="px-2 py-1 text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition">↻ 同步状态</button>
+            </div>
+          </div>
+
+          <!-- HITL Pending Approvals Inline Banner -->
+          <div id="task-hitl-container" class="hidden px-4 pt-3 space-y-2 shrink-0"></div>
+
+          <!-- Execution Timeline -->
+          <div id="task-timeline-container" class="flex-1 overflow-y-auto p-4 space-y-2.5 text-xs">
+            <!-- Rendered by JS -->
+          </div>
+
+          <!-- Deliverable Summary Strip (Sprint 1 minimal link; full preview in Sprint 2) -->
+          <div id="task-deliverables-strip" class="hidden px-4 py-2 border-t border-slate-800 bg-slate-900/60 text-xs flex flex-wrap items-center gap-2 shrink-0"></div>
+
+          <!-- Append Instruction Bar -->
+          <div class="p-3 border-t border-slate-800 bg-slate-900/70 shrink-0">
+            <div class="flex gap-2 items-end">
+              <textarea id="task-append-input" rows="2" placeholder="追加指令以创建下一个 Run（自动继承当前 Task Knowledge Scope）..." class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-blue-500 resize-none"></textarea>
+              <button onclick="appendTaskInstruction()" id="btn-task-append" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs rounded-lg font-medium transition">追加指令 (New Run)</button>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <!-- 2. APPROVALS TAB -->
@@ -529,11 +650,14 @@
 
     // --- Tab Switching ---
     function switchTab(tab) {
-      ['chat', 'approvals', 'memory', 'rag', 'traces', 'system'].forEach(t => {
-        document.getElementById(`view-${t}`).classList.add('hidden');
+      ['chat', 'tasks', 'approvals', 'memory', 'rag', 'traces', 'system'].forEach(t => {
+        const viewEl = document.getElementById(`view-${t}`);
         const btn = document.getElementById(`tab-btn-${t}`);
-        btn.classList.remove('bg-blue-600', 'text-white', 'shadow');
-        btn.classList.add('text-slate-400');
+        if (viewEl) viewEl.classList.add('hidden');
+        if (btn) {
+          btn.classList.remove('bg-blue-600', 'text-white', 'shadow');
+          btn.classList.add('text-slate-400');
+        }
       });
 
       document.getElementById(`view-${tab}`).classList.remove('hidden');
@@ -541,7 +665,12 @@
       activeBtn.classList.remove('text-slate-400');
       activeBtn.classList.add('bg-blue-600', 'text-white', 'shadow');
       activeTab = tab;
+      try { localStorage.setItem('jarvis_active_tab', tab); } catch (_) {}
 
+      if (tab !== 'tasks') {
+        closeTaskSSE();
+      }
+      if (tab === 'tasks') initTasksWorkbench();
       if (tab === 'approvals') loadApprovals();
       if (tab === 'memory') loadMemories();
       if (tab === 'rag') loadRagDocs();
@@ -1374,6 +1503,578 @@
       loadMemories();
     }
 
+    // --- Tasks Workbench (Sprint 1) ---
+    const TASK_TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'UNKNOWN']);
+    const TASK_EVENT_TYPES = [
+      'task_created', 'task_queued', 'run_started', 'plan_updated', 'agent_delegated',
+      'tool_started', 'tool_completed', 'approval_required', 'approval_resolved',
+      'run_paused', 'run_resumed', 'run_failed', 'task_paused', 'task_resumed',
+      'task_cancelling', 'task_cancelled', 'instruction_appended', 'deliverable_created',
+      'task_completed', 'task_archived'
+    ];
+    let allTasks = [];
+    let activeTaskId = null;
+    let activeTaskDetail = null;
+    let activeTaskEventsMap = new Map();
+    let lastTaskEventSeq = 0;
+    let selectedRunFilterId = null; // null = All Runs
+    let taskEventSource = null;
+    let taskSseReconnectTimer = null;
+    let taskSseRetryCount = 0;
+    let inFlightApprovalIds = new Set();
+
+    function taskStatusBadgeHtml(status) {
+      const s = String(status || 'UNKNOWN');
+      const styles = {
+        CREATED: 'bg-slate-800 text-slate-300 border-slate-700',
+        QUEUED: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+        RUNNING: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
+        EXECUTING_TOOL: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40',
+        WAITING_APPROVAL: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+        PAUSED: 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30',
+        CANCELLING: 'bg-orange-500/20 text-orange-300 border-orange-500/40',
+        COMPLETED: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+        FAILED: 'bg-red-500/15 text-red-300 border-red-500/30',
+        CANCELLED: 'bg-slate-800 text-slate-400 border-slate-700',
+        TIMEOUT: 'bg-red-500/15 text-red-300 border-red-500/30',
+        UNKNOWN: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+        INTERRUPTED: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+      };
+      const cls = styles[s] || styles.UNKNOWN;
+      return `<span class="px-2 py-0.5 rounded border text-[10px] font-mono font-semibold ${cls}">${escapeHtml(s)}</span>`;
+    }
+
+    function showTaskError(msg) {
+      const banner = document.getElementById('task-error-banner');
+      const text = document.getElementById('task-error-text');
+      if (!banner || !text) return;
+      text.textContent = String(msg || '操作失败');
+      banner.classList.remove('hidden');
+    }
+
+    function clearTaskError() {
+      const banner = document.getElementById('task-error-banner');
+      if (banner) banner.classList.add('hidden');
+    }
+
+    function setTaskSseBadge(stateText, tone = 'slate') {
+      const el = document.getElementById('task-sse-badge');
+      if (!el) return;
+      const toneMap = {
+        emerald: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30',
+        amber: 'bg-amber-500/15 text-amber-300 border border-amber-500/30',
+        red: 'bg-red-500/15 text-red-300 border border-red-500/30',
+        slate: 'bg-slate-800 text-slate-400 border border-slate-700',
+      };
+      el.className = `px-2 py-0.5 rounded text-[10px] font-mono ${toneMap[tone] || toneMap.slate}`;
+      el.textContent = stateText;
+    }
+
+    function closeTaskSSE() {
+      if (taskSseReconnectTimer) {
+        clearTimeout(taskSseReconnectTimer);
+        taskSseReconnectTimer = null;
+      }
+      if (taskEventSource) {
+        taskEventSource.close();
+        taskEventSource = null;
+      }
+    }
+
+    async function initTasksWorkbench() {
+      await loadTaskScopeOptions();
+      await loadTasks();
+      let savedId = null;
+      try { savedId = localStorage.getItem('jarvis_active_task_id'); } catch (_) {}
+      const targetId = activeTaskId || (savedId && allTasks.some(t => t.task_id === savedId) ? savedId : (allTasks[0]?.task_id || null));
+      if (targetId) {
+        await selectTask(targetId);
+      }
+    }
+
+    function toggleCreateTaskPanel(forceState = null) {
+      const panel = document.getElementById('create-task-panel');
+      if (!panel) return;
+      const shouldOpen = forceState !== null ? forceState : panel.classList.contains('hidden');
+      if (shouldOpen) {
+        panel.classList.remove('hidden');
+        loadTaskScopeOptions();
+      } else {
+        panel.classList.add('hidden');
+      }
+    }
+
+    async function loadTaskScopeOptions() {
+      const colSel = document.getElementById('new-task-scope-collections');
+      const docSel = document.getElementById('new-task-scope-docs');
+      if (!colSel || !docSel) return;
+      try {
+        const res = await fetch('/api/v1/rag/documents');
+        if (!res.ok) return;
+        const docs = await res.json();
+        const cols = Array.from(new Set(docs.map(d => d.collection || 'default'))).sort();
+        colSel.innerHTML = cols.map(c => `<option value="${escapeHtml(c)}">Collection: ${escapeHtml(c)}</option>`).join('');
+        docSel.innerHTML = docs.map(d => `<option value="${escapeHtml(d.doc_id)}">${escapeHtml(d.title || d.doc_path)} (${escapeHtml(d.doc_id)})</option>`).join('');
+      } catch (_) {}
+    }
+
+    async function loadTasks() {
+      const container = document.getElementById('tasks-list-container');
+      const statusFilter = document.getElementById('tasks-status-filter')?.value || '';
+      try {
+        const qs = statusFilter ? `?status=${encodeURIComponent(statusFilter)}&limit=50` : '?limit=50';
+        const res = await fetch(`/api/v1/tasks${qs}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        allTasks = await res.json();
+        renderTasksList();
+      } catch (err) {
+        if (container) {
+          container.innerHTML = `<div class="p-4 text-red-400">加载任务失败: ${escapeHtml(err.message || err)}</div>`;
+        }
+      }
+    }
+
+    function renderTasksList() {
+      const container = document.getElementById('tasks-list-container');
+      if (!container) return;
+      if (!Array.isArray(allTasks) || allTasks.length === 0) {
+        container.innerHTML = '<div class="p-6 text-center text-slate-500">暂无匹配任务。点击上方「+ 新建任务」开始执行。</div>';
+        return;
+      }
+      container.innerHTML = allTasks.map(t => {
+        const isSelected = t.task_id === activeTaskId;
+        return `
+          <div onclick="selectTask('${escapeHtml(t.task_id)}')" class="p-2.5 rounded-lg border cursor-pointer transition ${isSelected ? 'bg-blue-600/15 border-blue-500/50' : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'}">
+            <div class="flex items-center justify-between gap-2 mb-1">
+              ${taskStatusBadgeHtml(t.status)}
+              <span class="text-[10px] text-slate-500 font-mono">${escapeHtml(formatRelativeTime(t.updated_at || t.created_at))}</span>
+            </div>
+            <div class="text-xs text-slate-200 font-medium line-clamp-2 break-words">${escapeHtml(t.query)}</div>
+            <div class="mt-1 text-[10px] font-mono text-slate-500 truncate">${escapeHtml(t.task_id)}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function createTaskFromForm() {
+      const queryEl = document.getElementById('new-task-query');
+      const query = (queryEl?.value || '').trim();
+      if (!query) {
+        alert('请输入任务目标');
+        return;
+      }
+      const colSel = document.getElementById('new-task-scope-collections');
+      const docSel = document.getElementById('new-task-scope-docs');
+      const selectedCols = colSel ? Array.from(colSel.selectedOptions).map(o => o.value).filter(Boolean) : [];
+      const selectedDocs = docSel ? Array.from(docSel.selectedOptions).map(o => o.value).filter(Boolean) : [];
+      const autoStart = Boolean(document.getElementById('new-task-autostart')?.checked);
+
+      const payload = { query, auto_start_run: false };
+      if (selectedCols.length > 0 || selectedDocs.length > 0) {
+        payload.knowledge_scope = { collections: selectedCols, doc_ids: selectedDocs };
+      }
+
+      const btn = document.getElementById('btn-submit-create-task');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch('/api/v1/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+        if (autoStart) {
+          const execRes = await fetch(`/api/v1/tasks/${encodeURIComponent(data.task_id)}/execute?background=true`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          if (!execRes.ok) {
+            const execErr = await execRes.json().catch(() => ({}));
+            throw new Error(execErr.detail || `后台启动失败 (HTTP ${execRes.status})`);
+          }
+        }
+
+        queryEl.value = '';
+        toggleCreateTaskPanel(false);
+        await loadTasks();
+        await selectTask(data.task_id);
+      } catch (err) {
+        alert(`创建任务失败: ${err.message || err}`);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function selectTask(taskId) {
+      if (!taskId) return;
+      clearTaskError();
+      closeTaskSSE();
+      activeTaskId = taskId;
+      selectedRunFilterId = null;
+      activeTaskEventsMap = new Map();
+      lastTaskEventSeq = 0;
+      taskSseRetryCount = 0;
+      try { localStorage.setItem('jarvis_active_task_id', taskId); } catch (_) {}
+
+      renderTasksList();
+      document.getElementById('task-empty-state')?.classList.add('hidden');
+      document.getElementById('task-detail-workspace')?.classList.remove('hidden');
+
+      await refreshActiveTaskDetail(false);
+      connectTaskSSEIfNeeded();
+    }
+
+    async function refreshActiveTaskDetail(reconnectSse = false) {
+      if (!activeTaskId) return;
+      try {
+        const res = await fetch(`/api/v1/tasks/${encodeURIComponent(activeTaskId)}`);
+        if (res.status === 404) {
+          closeTaskSSE();
+          activeTaskId = null;
+          activeTaskDetail = null;
+          try { localStorage.removeItem('jarvis_active_task_id'); } catch (_) {}
+          document.getElementById('task-detail-workspace')?.classList.add('hidden');
+          document.getElementById('task-empty-state')?.classList.remove('hidden');
+          await loadTasks();
+          return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const detail = await res.json();
+        activeTaskDetail = detail;
+
+        for (const ev of (detail.events || [])) {
+          if (typeof ev.seq === 'number') {
+            activeTaskEventsMap.set(ev.seq, ev);
+            if (ev.seq > lastTaskEventSeq) lastTaskEventSeq = ev.seq;
+          }
+        }
+        // Keep sidebar list item status in sync
+        const idx = allTasks.findIndex(t => t.task_id === detail.task.task_id);
+        if (idx >= 0) {
+          allTasks[idx] = detail.task;
+          renderTasksList();
+        }
+        renderTaskDetail();
+        await loadTaskApprovals();
+        if (reconnectSse) {
+          closeTaskSSE();
+          connectTaskSSEIfNeeded();
+        }
+      } catch (err) {
+        showTaskError(`同步任务详情失败: ${err.message || err}`);
+      }
+    }
+
+    function connectTaskSSEIfNeeded() {
+      if (!activeTaskId || !activeTaskDetail) return;
+      const status = activeTaskDetail.task.status;
+      if (TASK_TERMINAL_STATUSES.has(status)) {
+        setTaskSseBadge(`SSE: ${status}`, 'slate');
+        return;
+      }
+      if (taskEventSource) return;
+
+      const url = `/api/v1/tasks/${encodeURIComponent(activeTaskId)}/events/stream?since_seq=${lastTaskEventSeq}`;
+      setTaskSseBadge('SSE: CONNECTING', 'amber');
+      const es = new EventSource(url);
+      taskEventSource = es;
+
+      es.onopen = () => {
+        taskSseRetryCount = 0;
+        setTaskSseBadge('SSE: LIVE', 'emerald');
+      };
+
+      const onTaskEvent = (evt) => {
+        try {
+          const ev = JSON.parse(evt.data);
+          if (typeof ev.seq === 'number') {
+            if (activeTaskEventsMap.has(ev.seq)) return;
+            activeTaskEventsMap.set(ev.seq, ev);
+            if (ev.seq > lastTaskEventSeq) lastTaskEventSeq = ev.seq;
+          }
+          renderTaskTimeline();
+          if ([
+            'run_started', 'approval_required', 'approval_resolved',
+            'run_paused', 'run_resumed', 'task_paused', 'task_resumed',
+            'task_cancelling', 'task_cancelled', 'instruction_appended',
+            'deliverable_created', 'task_completed', 'run_failed'
+          ].includes(ev.event_type)) {
+            refreshActiveTaskDetail(false);
+          }
+        } catch (_) {}
+      };
+
+      TASK_EVENT_TYPES.forEach(evType => es.addEventListener(evType, onTaskEvent));
+      es.onmessage = onTaskEvent;
+
+      es.onerror = () => {
+        es.close();
+        if (taskEventSource === es) taskEventSource = null;
+        const curStatus = activeTaskDetail?.task?.status;
+        if (!activeTaskId || (curStatus && TASK_TERMINAL_STATUSES.has(curStatus))) {
+          setTaskSseBadge(`SSE: ${curStatus || 'CLOSED'}`, 'slate');
+          return;
+        }
+        if (taskSseRetryCount < 5) {
+          taskSseRetryCount += 1;
+          const delayMs = Math.min(8000, 1500 * taskSseRetryCount);
+          setTaskSseBadge(`SSE: RETRY (${taskSseRetryCount}/5)`, 'amber');
+          taskSseReconnectTimer = setTimeout(() => {
+            taskSseReconnectTimer = null;
+            if (activeTab === 'tasks' && activeTaskId) {
+              refreshActiveTaskDetail(true);
+            }
+          }, delayMs);
+        } else {
+          setTaskSseBadge('SSE: DISCONNECTED', 'red');
+        }
+      };
+    }
+
+    function renderTaskDetail() {
+      if (!activeTaskDetail) return;
+      const task = activeTaskDetail.task;
+      const runs = activeTaskDetail.runs || [];
+      const deliverables = activeTaskDetail.deliverables || [];
+
+      document.getElementById('task-detail-id').textContent = task.task_id;
+      document.getElementById('task-detail-status-badge').innerHTML = taskStatusBadgeHtml(task.status);
+      document.getElementById('task-detail-query').textContent = task.query;
+
+      // Metadata + KnowledgeScope badges
+      const metaParts = [
+        `<span>Agent: <code class="text-slate-200">${escapeHtml(task.assigned_agent_id)}</code></span>`,
+        `<span>Thread: <code class="text-slate-300">${escapeHtml(task.thread_id)}</code></span>`,
+        `<span>Runs: <strong class="text-slate-200">${runs.length}</strong></span>`,
+      ];
+      if (task.knowledge_scope_json) {
+        try {
+          const sc = JSON.parse(task.knowledge_scope_json);
+          const cols = (sc.collections || []).join(', ');
+          const docs = (sc.doc_ids || []).join(', ');
+          const desc = (!cols && !docs) ? 'deny-all' : [cols ? `cols:[${cols}]` : '', docs ? `docs:[${docs}]` : ''].filter(Boolean).join(' & ');
+          metaParts.push(`<span class="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-mono">Scope: ${escapeHtml(desc)}</span>`);
+        } catch (_) {}
+      } else {
+        metaParts.push('<span class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">Scope: 全库</span>');
+      }
+      if (task.error_message) {
+        metaParts.push(`<span class="text-red-400">Error: ${escapeHtml(task.error_message)}</span>`);
+      }
+      document.getElementById('task-detail-meta').innerHTML = metaParts.join(' <span class="text-slate-700">|</span> ');
+
+      // Control Buttons strictly derived from backend TaskStatus
+      const st = task.status;
+      const canExecute = ['CREATED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'INTERRUPTED'].includes(st);
+      const canPause = ['QUEUED', 'RUNNING', 'EXECUTING_TOOL'].includes(st);
+      const canResume = ['PAUSED', 'INTERRUPTED'].includes(st);
+      const canCancel = ['CREATED', 'QUEUED', 'RUNNING', 'EXECUTING_TOOL', 'PAUSED', 'WAITING_APPROVAL', 'INTERRUPTED'].includes(st);
+
+      const btns = [];
+      if (canExecute) btns.push(`<button onclick="executeActiveTask()" class="px-2.5 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition">▶ 执行</button>`);
+      if (canPause) btns.push(`<button onclick="pauseActiveTask()" class="px-2.5 py-1 text-xs bg-amber-600/80 hover:bg-amber-600 text-white rounded font-medium transition">⏸ 暂停</button>`);
+      if (canResume) btns.push(`<button onclick="resumeActiveTask()" class="px-2.5 py-1 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium transition">▶ 恢复</button>`);
+      if (canCancel) btns.push(`<button onclick="cancelActiveTask()" class="px-2.5 py-1 text-xs bg-red-600/80 hover:bg-red-600 text-white rounded font-medium transition">✕ 取消</button>`);
+      btns.push(`<button onclick="archiveActiveTask()" class="px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition">归档</button>`);
+      document.getElementById('task-control-buttons').innerHTML = btns.join('');
+
+      // Run Switcher (TaskStatus & RunStatus kept strictly distinct)
+      const runsBar = document.getElementById('task-runs-bar');
+      const allBtn = `<button onclick="setRunFilter(null)" class="px-2 py-1 rounded text-[11px] font-mono border transition ${selectedRunFilterId === null ? 'bg-blue-600/25 border-blue-500/50 text-blue-200' : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'}">全部 Runs (${runs.length})</button>`;
+      const runBtns = runs.map(r => {
+        const active = selectedRunFilterId === r.run_id;
+        return `<button onclick="setRunFilter('${escapeHtml(r.run_id)}')" class="px-2 py-1 rounded text-[11px] font-mono border transition flex items-center gap-1.5 ${active ? 'bg-blue-600/25 border-blue-500/50 text-blue-200' : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'}">
+          <span>Run #${r.run_seq}</span>
+          <span class="text-[10px] text-slate-500">(${escapeHtml(r.trigger_type)})</span>
+          ${taskStatusBadgeHtml(r.status)}
+        </button>`;
+      }).join('');
+      runsBar.innerHTML = allBtn + runBtns;
+
+      // Append instruction input gating
+      const canAppend = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'PAUSED', 'INTERRUPTED'].includes(st);
+      const appendBtn = document.getElementById('btn-task-append');
+      const appendInput = document.getElementById('task-append-input');
+      if (appendBtn) appendBtn.disabled = !canAppend;
+      if (appendInput) {
+        appendInput.disabled = !canAppend;
+        appendInput.placeholder = canAppend
+          ? '追加指令以创建下一个 Run（自动继承当前 Task Knowledge Scope）...'
+          : `当前任务状态为 ${st}，等待当前执行停稳后可追加指令`;
+      }
+
+      // Deliverables strip (Sprint 1 minimal summary; full preview/download in Sprint 2)
+      const delivStrip = document.getElementById('task-deliverables-strip');
+      if (deliverables.length > 0) {
+        delivStrip.classList.remove('hidden');
+        delivStrip.innerHTML = `<span class="text-slate-400 font-medium">交付物 (${deliverables.length}):</span>` + deliverables.map(d =>
+          `<a href="/api/v1/deliverables/${encodeURIComponent(d.deliverable_id)}/download" target="_blank" class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition font-mono text-[11px]">📄 ${escapeHtml(d.title)} (${escapeHtml(d.deliverable_id)}) ↗</a>`
+        ).join('');
+      } else {
+        delivStrip.classList.add('hidden');
+        delivStrip.innerHTML = '';
+      }
+
+      renderTaskTimeline();
+    }
+
+    function setRunFilter(runId) {
+      selectedRunFilterId = runId;
+      renderTaskDetail();
+    }
+
+    function renderTaskTimeline() {
+      const container = document.getElementById('task-timeline-container');
+      if (!container) return;
+      const events = Array.from(activeTaskEventsMap.values())
+        .sort((a, b) => (a.seq || 0) - (b.seq || 0))
+        .filter(ev => !selectedRunFilterId || ev.run_id === selectedRunFilterId);
+
+      if (events.length === 0) {
+        container.innerHTML = '<div class="p-6 text-center text-slate-500">当前视图暂无事件记录。</div>';
+        return;
+      }
+
+      container.innerHTML = events.map(ev => {
+        let payloadObj = {};
+        try { payloadObj = ev.payload_json ? JSON.parse(ev.payload_json) : {}; } catch (_) {}
+        const prettyPayload = Object.keys(payloadObj).length > 0 ? JSON.stringify(payloadObj, null, 2) : '';
+        const tsText = ev.timestamp ? new Date(ev.timestamp * 1000).toLocaleTimeString() : '';
+        const isErr = ev.event_type === 'run_failed' || payloadObj.success === false;
+        const isHitl = ev.event_type === 'approval_required' || ev.event_type === 'approval_resolved';
+        const borderCls = isErr ? 'border-red-500/30 bg-red-500/5' : (isHitl ? 'border-amber-500/30 bg-amber-500/5' : 'border-slate-800 bg-slate-900/60');
+
+        return `
+          <div class="border rounded-lg p-3 ${borderCls}">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-1">
+              <div class="flex items-center gap-2 font-mono">
+                <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">#${ev.seq}</span>
+                <span class="text-xs font-semibold ${isErr ? 'text-red-300' : (isHitl ? 'text-amber-300' : 'text-blue-300')}">${escapeHtml(ev.event_type)}</span>
+                ${ev.run_id ? `<span class="text-[10px] text-slate-500">${escapeHtml(ev.run_id)}</span>` : ''}
+              </div>
+              <span class="text-[10px] font-mono text-slate-500">${escapeHtml(tsText)}</span>
+            </div>
+            ${prettyPayload ? `<pre class="mt-1.5 p-2 rounded bg-slate-950/90 border border-slate-800/80 text-[11px] font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap break-words">${escapeHtml(prettyPayload)}</pre>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function taskControlAction(endpoint, method = 'POST', body = null) {
+      if (!activeTaskId) return;
+      clearTaskError();
+      try {
+        const opts = { method, headers: { 'Content-Type': 'application/json' } };
+        if (body !== null) opts.body = JSON.stringify(body);
+        const res = await fetch(`/api/v1/tasks/${encodeURIComponent(activeTaskId)}${endpoint}`, opts);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        await refreshActiveTaskDetail(true);
+        await loadTasks();
+      } catch (err) {
+        showTaskError(`操作失败: ${err.message || err}`);
+        await refreshActiveTaskDetail(false);
+        await loadTasks();
+      }
+    }
+
+    function executeActiveTask() { return taskControlAction('/execute?background=true', 'POST', {}); }
+    function pauseActiveTask() { return taskControlAction('/pause', 'POST', { reason: 'Paused from Tasks UI' }); }
+    function resumeActiveTask() { return taskControlAction('/resume', 'POST', {}); }
+    function cancelActiveTask() { return taskControlAction('/cancel', 'POST', { reason: 'Cancelled from Tasks UI' }); }
+
+    async function archiveActiveTask() {
+      if (!activeTaskId || !confirm(`确认归档任务 ${activeTaskId}？`)) return;
+      await taskControlAction('', 'DELETE', null);
+      closeTaskSSE();
+      activeTaskId = null;
+      activeTaskDetail = null;
+      try { localStorage.removeItem('jarvis_active_task_id'); } catch (_) {}
+      document.getElementById('task-detail-workspace')?.classList.add('hidden');
+      document.getElementById('task-empty-state')?.classList.remove('hidden');
+      await loadTasks();
+    }
+
+    async function appendTaskInstruction() {
+      const input = document.getElementById('task-append-input');
+      const instruction = (input?.value || '').trim();
+      if (!instruction || !activeTaskId) return;
+      await taskControlAction('/append-instruction', 'POST', { instruction });
+      input.value = '';
+    }
+
+    async function loadTaskApprovals() {
+      const container = document.getElementById('task-hitl-container');
+      if (!container || !activeTaskDetail?.task?.thread_id) return;
+      const tid = activeTaskDetail.task.thread_id;
+      try {
+        const res = await fetch(`/api/v1/approvals?thread_id=${encodeURIComponent(tid)}`);
+        if (!res.ok) return;
+        const pending = await res.json();
+        if (!Array.isArray(pending) || pending.length === 0) {
+          container.classList.add('hidden');
+          container.innerHTML = '';
+          return;
+        }
+        container.classList.remove('hidden');
+        container.innerHTML = pending.map(req => {
+          const busy = inFlightApprovalIds.has(req.id);
+          const argsStr = JSON.stringify(req.arguments || {}, null, 2);
+          return `
+            <div class="border border-amber-500/40 bg-amber-500/10 rounded-lg p-3 text-xs space-y-2">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="font-semibold text-amber-300">
+                  🛡️ 等待 HITL 审批: <span class="font-mono">${escapeHtml(req.tool_name)}</span>
+                  <span class="text-[10px] font-mono text-amber-400/80 ml-1">(${escapeHtml(req.id)} | ${escapeHtml(req.risk_level)})</span>
+                </div>
+                <div class="flex gap-2">
+                  <button ${busy ? 'disabled' : ''} onclick="submitTaskApproval('${escapeHtml(req.id)}', '${escapeHtml(tid)}', 'approve')" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded font-medium transition">批准执行</button>
+                  <button ${busy ? 'disabled' : ''} onclick="submitTaskApproval('${escapeHtml(req.id)}', '${escapeHtml(tid)}', 'reject')" class="px-3 py-1 bg-red-600/80 hover:bg-red-600 disabled:opacity-40 text-white rounded font-medium transition">拒绝</button>
+                </div>
+              </div>
+              <pre class="p-2 rounded bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto">${escapeHtml(argsStr)}</pre>
+            </div>
+          `;
+        }).join('');
+      } catch (_) {}
+    }
+
+    async function submitTaskApproval(approvalId, threadId, decision) {
+      if (inFlightApprovalIds.has(approvalId)) return;
+      inFlightApprovalIds.add(approvalId);
+      await loadTaskApprovals();
+      clearTaskError();
+      try {
+        const res = await fetch(`/api/v1/approvals/${encodeURIComponent(approvalId)}/decision`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Thread-ID': threadId },
+          body: JSON.stringify({
+            thread_id: threadId,
+            decision: decision,
+            reason: decision === 'approve' ? 'Approved in Tasks UI' : 'Rejected in Tasks UI',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        await refreshActiveTaskDetail(true);
+        await loadTasks();
+        checkPendingApprovals();
+      } catch (err) {
+        showTaskError(`审批提交失败（可能已过期或重复提交）: ${err.message || err}`);
+        await refreshActiveTaskDetail(false);
+        await loadTaskApprovals();
+      } finally {
+        inFlightApprovalIds.delete(approvalId);
+      }
+    }
+
     // --- RAG ---
     function ragEscape(str) {
       if (str === null || str === undefined) return '';
@@ -2150,13 +2851,22 @@
         .replace(/'/g, '&#039;');
     }
 
-    // Initial on-load checks
+    // Initial on-load checks & refresh state restoration
     loadSessions();
     fetch('/api/v1/system/status').then(r => r.json()).then(s => {
       document.getElementById('header-provider').innerText = `LLM: ${s.default_provider} (${s.default_model})`;
     }).catch(() => {});
     checkPendingApprovals();
     setInterval(checkPendingApprovals, 10000);
+    (function restoreInitialTab() {
+      const hashTab = (window.location.hash || '').replace('#', '').trim();
+      let savedTab = '';
+      try { savedTab = localStorage.getItem('jarvis_active_tab') || ''; } catch (_) {}
+      const candidate = hashTab || savedTab;
+      if (['chat', 'tasks', 'approvals', 'memory', 'rag', 'traces', 'system'].includes(candidate) && candidate !== 'chat') {
+        switchTab(candidate);
+      }
+    })();
   </script>
 </body>
 </html>
