@@ -25,14 +25,11 @@ def scoped_knowledge_context(
     scope: dict[str, Any] | None,
 ) -> Iterator[None]:
     """Bind an immutable Task Knowledge Scope for the duration of tool execution."""
-    if not scope or not isinstance(scope, dict):
+    if scope is None or not isinstance(scope, dict):
         yield
         return
     cols = [str(c) for c in (scope.get("collections") or []) if str(c).strip()]
     docs = [str(d) for d in (scope.get("doc_ids") or []) if str(d).strip()]
-    if not cols and not docs:
-        yield
-        return
     token = _ACTIVE_KNOWLEDGE_SCOPE.set({"collections": cols, "doc_ids": docs})
     try:
         yield
@@ -68,6 +65,11 @@ def search_knowledge_base(
     if active_scope is not None:
         allowed_cols = active_scope.get("collections") or []
         allowed_docs = active_scope.get("doc_ids") or []
+        if not allowed_cols and not allowed_docs:
+            return (
+                "Access denied: task has an explicit empty knowledge scope "
+                "(no collections or documents authorized)."
+            )
 
         if allowed_cols:
             if collection and collection not in allowed_cols:
@@ -108,6 +110,7 @@ def search_knowledge_base(
         doc_title = m.get("title") or m["doc_path"]
         doc_path = m["doc_path"]
         m_doc_id = m.get("doc_id", "")
+        m_chunk_id = m.get("chunk_id", "")
         score = m["score"]
         chunk_idx = m.get("chunk_index", 0)
         page_num = meta.get("page_number")
@@ -118,7 +121,7 @@ def search_knowledge_base(
             loc_parts.append(f"Page: {page_num}")
         if section_title:
             loc_parts.append(f"Section: {section_title}")
-        loc_parts.append(f"Chunk: #{chunk_idx}")
+        loc_parts.append(f"Chunk: #{chunk_idx} ({m_chunk_id})" if m_chunk_id else f"Chunk: #{chunk_idx}")
         loc_parts.append(f"Score: {score}")
 
         output.append(f"--- [Match {i}] {' | '.join(loc_parts)} ---")
@@ -178,6 +181,11 @@ def list_indexed_documents(collection: str | None = None) -> str:
     if active_scope is not None:
         allowed_cols = active_scope.get("collections") or []
         allowed_docs = active_scope.get("doc_ids") or []
+        if not allowed_cols and not allowed_docs:
+            return (
+                "Access denied: task has an explicit empty knowledge scope "
+                "(no collections or documents authorized)."
+            )
         if collection and allowed_cols and collection not in allowed_cols:
             return (
                 f"Access denied: collection '{collection}' is outside the task's "

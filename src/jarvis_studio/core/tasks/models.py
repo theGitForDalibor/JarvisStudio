@@ -160,7 +160,12 @@ class AgentTask(BaseModel):
     error_message: str | None = None
 
     def get_knowledge_scope(self) -> dict[str, list[str]] | None:
-        """Return parsed knowledge scope if non-empty, else None."""
+        """Return parsed knowledge scope if configured, else None (unrestricted).
+
+        Note: An explicit empty scope ``{"collections": [], "doc_ids": []}`` is
+        preserved as a non-None dict so callers enforce deny-all rather than
+        silently falling back to full-library access.
+        """
         if not self.knowledge_scope_json:
             return None
         try:
@@ -171,8 +176,6 @@ class AgentTask(BaseModel):
             return None
         cols = [str(c) for c in (raw.get("collections") or []) if str(c).strip()]
         docs = [str(d) for d in (raw.get("doc_ids") or []) if str(d).strip()]
-        if not cols and not docs:
-            return None
         return {"collections": cols, "doc_ids": docs}
 
 

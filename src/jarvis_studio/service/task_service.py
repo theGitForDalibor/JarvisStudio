@@ -83,8 +83,8 @@ class TaskService:
                 scope_obj = KnowledgeScope(**knowledge_scope)
             else:
                 raise ValueError("Invalid knowledge_scope format")
-            if scope_obj.collections or scope_obj.doc_ids:
-                scope_json = json.dumps(scope_obj.model_dump(), ensure_ascii=False)
+            # Persist even an explicit empty scope so it enforces deny-all instead of NULL (unrestricted)
+            scope_json = json.dumps(scope_obj.model_dump(), ensure_ascii=False)
 
         task = self.coordinator.create_task(
             session_id=session_id,
