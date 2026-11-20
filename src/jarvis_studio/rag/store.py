@@ -357,6 +357,8 @@ class SqliteVecStore:
         doc_path_prefix: str | None,
         collection: str | None,
         doc_id: str | None,
+        collections: list[str] | None = None,
+        doc_ids: list[str] | None = None,
     ) -> bool:
         doc_status = row["doc_status"]
         if doc_status is not None and doc_status != "READY":
@@ -366,9 +368,15 @@ class SqliteVecStore:
             doc_path.startswith(doc_path_prefix) or doc_path_prefix in doc_path
         ):
             return False
-        if collection and (row["collection"] or "default") != collection:
+        row_col = row["collection"] or "default"
+        if collection and row_col != collection:
             return False
-        if doc_id and row["doc_id"] != doc_id:
+        if collections is not None and row_col not in collections:
+            return False
+        row_doc_id = row["doc_id"] or _make_doc_id(doc_path)
+        if doc_id and row_doc_id != doc_id:
+            return False
+        if doc_ids is not None and row_doc_id not in doc_ids:
             return False
         return True
 
@@ -381,69 +389,89 @@ class SqliteVecStore:
         query_text: str | None = None,
         collection: str | None = None,
         doc_id: str | None = None,
+        collections: list[str] | None = None,
+        doc_ids: list[str] | None = None,
         min_score: float = 0.0,
+        search_mode: str = "hybrid",
     ) -> list[dict[str, Any]]:
-        """Perform hybrid vector (sqlite-vec) + keyword (FTS5) similarity search."""
+        """Perform hybrid (vector + FTS5), vector-only, or FTS5-only similarity search."""
+        mode = (search_mode or "hybrid").lower().strip()
+        if mode not in ("hybrid", "vector", "fts"):
+            raise ValueError(f"Unsupported search_mode '{search_mode}'; expected hybrid, vector, or fts")
+
         serialized_query = sqlite_vec.serialize_float32(query_embedding)
-        has_scope_filter = bool(doc_path_prefix or collection or doc_id)
+        has_scope_filter = bool(
+            doc_path_prefix or collection or doc_id or collections or doc_ids
+        )
         candidate_k = max(top_k * 6, 30) if has_scope_filter else max(top_k * 2, 10)
 
         candidates: dict[str, dict[str, Any]] = {}
 
         with self._db.read_connection() as conn:
             # 1. Vector KNN retrieval via sqlite-vec
-            vec_rows = conn.execute(
-                """
-                SELECT
-                    v.chunk_id,
-                    v.distance,
-                    c.doc_path,
-                    c.chunk_index,
-                    c.content,
-                    c.metadata,
-                    f.doc_id,
-                    f.title,
-                    f.collection,
-                    f.status AS doc_status
-                FROM vec_chunks v
-                JOIN doc_chunks c ON v.chunk_id = c.chunk_id
-                LEFT JOIN doc_files f ON c.doc_path = f.doc_path
-                WHERE v.embedding MATCH ? AND k = ?
-                ORDER BY v.distance ASC
-                """,
-                (serialized_query, candidate_k),
-            ).fetchall()
+            if mode in ("hybrid", "vector"):
+                vec_rows = conn.execute(
+                    """
+                    SELECT
+                        v.chunk_id,
+                        v.distance,
+                        c.doc_path,
+                        c.chunk_index,
+                        c.content,
+                        c.metadata,
+                        f.doc_id,
+                        f.title,
+                        f.collection,
+                        f.status AS doc_status
+                    FROM vec_chunks v
+                    JOIN doc_chunks c ON v.chunk_id = c.chunk_id
+                    LEFT JOIN doc_files f ON c.doc_path = f.doc_path
+                    WHERE v.embedding MATCH ? AND k = ?
+                    ORDER BY v.distance ASC
+                    """,
+                    (serialized_query, candidate_k),
+                ).fetchall()
 
-            for vec_rank, r in enumerate(vec_rows, start=1):
-                if not self._matches_scope(
-                    r, doc_path_prefix=doc_path_prefix, collection=collection, doc_id=doc_id
-                ):
-                    continue
-                dist = float(r["distance"])
-                vec_score = 1.0 / (1.0 + max(0.0, dist))
-                meta = {}
-                if r["metadata"]:
-                    try:
-                        meta = json.loads(r["metadata"])
-                    except Exception:
-                        meta = {}
-                candidates[r["chunk_id"]] = {
-                    "chunk_id": r["chunk_id"],
-                    "doc_id": r["doc_id"] or _make_doc_id(r["doc_path"]),
-                    "title": r["title"] or r["doc_path"].rsplit("/", 1)[-1],
-                    "collection": r["collection"] or "default",
-                    "doc_path": r["doc_path"],
-                    "chunk_index": r["chunk_index"],
-                    "content": r["content"],
-                    "metadata": meta,
-                    "distance": dist,
-                    "vec_score": vec_score,
-                    "vec_rank": vec_rank,
-                    "fts_rank": None,
-                }
+                for vec_rank, r in enumerate(vec_rows, start=1):
+                    if not self._matches_scope(
+                        r,
+                        doc_path_prefix=doc_path_prefix,
+                        collection=collection,
+                        doc_id=doc_id,
+                        collections=collections,
+                        doc_ids=doc_ids,
+                    ):
+                        continue
+                    dist = float(r["distance"])
+                    vec_score = 1.0 / (1.0 + max(0.0, dist))
+                    meta = {}
+                    if r["metadata"]:
+                        try:
+                            meta = json.loads(r["metadata"])
+                        except Exception:
+                            meta = {}
+                    candidates[r["chunk_id"]] = {
+                        "chunk_id": r["chunk_id"],
+                        "doc_id": r["doc_id"] or _make_doc_id(r["doc_path"]),
+                        "title": r["title"] or r["doc_path"].rsplit("/", 1)[-1],
+                        "collection": r["collection"] or "default",
+                        "doc_path": r["doc_path"],
+                        "chunk_index": r["chunk_index"],
+                        "content": r["content"],
+                        "metadata": meta,
+                        "distance": dist,
+                        "vec_score": vec_score,
+                        "vec_rank": vec_rank,
+                        "fts_bm25": None,
+                        "fts_rank": None,
+                    }
 
-            # 2. FTS5 keyword retrieval (BM25) when query_text is supplied
-            fts_query = _tokenize_fts_query(query_text) if (query_text and self._fts5_enabled) else ""
+            # 2. FTS5 keyword retrieval (BM25)
+            fts_query = (
+                _tokenize_fts_query(query_text)
+                if (mode in ("hybrid", "fts") and query_text and self._fts5_enabled)
+                else ""
+            )
             if fts_query:
                 try:
                     fts_rows = conn.execute(
@@ -471,12 +499,19 @@ class SqliteVecStore:
 
                     for fts_rank, r in enumerate(fts_rows, start=1):
                         if not self._matches_scope(
-                            r, doc_path_prefix=doc_path_prefix, collection=collection, doc_id=doc_id
+                            r,
+                            doc_path_prefix=doc_path_prefix,
+                            collection=collection,
+                            doc_id=doc_id,
+                            collections=collections,
+                            doc_ids=doc_ids,
                         ):
                             continue
                         cid = r["chunk_id"]
+                        bm25_raw = float(r["bm25_score"])
                         if cid in candidates:
                             candidates[cid]["fts_rank"] = fts_rank
+                            candidates[cid]["fts_bm25"] = bm25_raw
                         else:
                             meta = {}
                             if r["metadata"]:
@@ -493,25 +528,41 @@ class SqliteVecStore:
                                 "chunk_index": r["chunk_index"],
                                 "content": r["content"],
                                 "metadata": meta,
-                                "distance": 1.0,
-                                "vec_score": 0.45,
+                                "distance": None,
+                                "vec_score": None,
                                 "vec_rank": None,
+                                "fts_bm25": bm25_raw,
                                 "fts_rank": fts_rank,
                             }
                 except sqlite3.OperationalError as fts_err:
                     logger.debug(f"FTS5 search skipped: {fts_err}")
 
-        # 3. Combine scores (Vector similarity + FTS5 RRF boost)
+        # 3. Score & sort according to mode, keeping separate explainability metrics
+        rrf_k = 60.0
         ranked: list[dict[str, Any]] = []
         for item in candidates.values():
-            base_score = float(item["vec_score"])
-            rrf_boost = 0.0
-            if item["fts_rank"] is not None:
-                # Boost exact/keyword hits cleanly while keeping score in (0, 1]
-                rrf_boost = 0.25 / (1.0 + 0.2 * (item["fts_rank"] - 1))
-            final_score = round(min(1.0, base_score + rrf_boost), 4)
-            if final_score < min_score:
+            v_rank = item["vec_rank"]
+            f_rank = item["fts_rank"]
+            v_sim = item["vec_score"]
+            f_bm25 = item["fts_bm25"]
+
+            rrf_vec = (1.0 / (rrf_k + v_rank)) if v_rank is not None else 0.0
+            rrf_fts = (1.0 / (rrf_k + f_rank)) if f_rank is not None else 0.0
+            rrf_total = rrf_vec + rrf_fts
+
+            if mode == "vector":
+                display_score = round(float(v_sim or 0.0), 4)
+            elif mode == "fts":
+                # Monotonic transform of rank for threshold filtering only; raw BM25 preserved in explain
+                display_score = round(1.0 / (1.0 + 0.15 * ((f_rank or 1) - 1)), 4)
+            else:
+                base_v = float(v_sim) if v_sim is not None else 0.45
+                fts_boost = (0.25 / (1.0 + 0.2 * (f_rank - 1))) if f_rank is not None else 0.0
+                display_score = round(min(1.0, base_v + fts_boost), 4)
+
+            if display_score < min_score:
                 continue
+
             ranked.append(
                 {
                     "chunk_id": item["chunk_id"],
@@ -522,13 +573,38 @@ class SqliteVecStore:
                     "chunk_index": item["chunk_index"],
                     "content": item["content"],
                     "metadata": item["metadata"],
-                    "distance": item["distance"],
-                    "score": final_score,
+                    "distance": item["distance"] if item["distance"] is not None else 1.0,
+                    "score": display_score,
+                    "explain": {
+                        "search_mode": mode,
+                        "vector_similarity": round(float(v_sim), 4) if v_sim is not None else None,
+                        "vector_distance": round(float(item["distance"]), 4)
+                        if item["distance"] is not None
+                        else None,
+                        "vector_rank": v_rank,
+                        "fts_bm25": round(float(f_bm25), 4) if f_bm25 is not None else None,
+                        "fts_rank": f_rank,
+                        "rrf_score": round(rrf_total, 6),
+                    },
                 }
             )
 
-        ranked.sort(key=lambda x: (-x["score"], x["distance"]))
-        return ranked[:top_k]
+        if mode == "hybrid":
+            ranked.sort(
+                key=lambda x: (
+                    -x["explain"]["rrf_score"],
+                    -(x["explain"]["vector_similarity"] or 0.0),
+                )
+            )
+        elif mode == "fts":
+            ranked.sort(key=lambda x: (x["explain"]["fts_rank"] or 999999))
+        else:
+            ranked.sort(key=lambda x: (-x["score"], x["distance"]))
+
+        top_results = ranked[:top_k]
+        for final_rank, item in enumerate(top_results, start=1):
+            item["explain"]["final_rank"] = final_rank
+        return top_results
 
     def _delete_doc_internal(self, conn: sqlite3.Connection, doc_path: str) -> None:
         """Internal helper to wipe a document's chunks from doc_chunks, vec_chunks, fts_chunks, and doc_files."""
