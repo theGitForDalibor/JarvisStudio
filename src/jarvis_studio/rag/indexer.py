@@ -1,5 +1,7 @@
 """Workspace and documentation indexer for local RAG knowledge base."""
 
+from __future__ import annotations
+
 import hashlib
 import os
 from pathlib import Path
@@ -10,12 +12,16 @@ from langchain_core.embeddings import Embeddings
 from jarvis_studio.config.settings import get_settings
 from jarvis_studio.core.observability.logger import logger
 from jarvis_studio.rag.embeddings import EmbeddingsFactory
+from jarvis_studio.rag.parser import parse_document
 from jarvis_studio.rag.splitter import DocumentSplitter
 from jarvis_studio.rag.store import SqliteVecStore
 
 DEFAULT_SUPPORTED_EXTENSIONS: set[str] = {
+    ".pdf",
+    ".docx",
     ".py",
     ".md",
+    ".markdown",
     ".txt",
     ".json",
     ".yaml",
@@ -23,6 +29,7 @@ DEFAULT_SUPPORTED_EXTENSIONS: set[str] = {
     ".toml",
     ".rst",
     ".html",
+    ".htm",
     ".js",
     ".ts",
     ".sh",
@@ -47,7 +54,7 @@ DEFAULT_IGNORE_DIRECTORIES: set[str] = {
 
 
 class WorkspaceIndexer:
-    """Recursively scans, chunks, and indexes files into the local vector database."""
+    """Recursively scans, parses, chunks, and indexes documents into the local vector database."""
 
     def __init__(
         self,
@@ -75,45 +82,116 @@ class WorkspaceIndexer:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def index_file(self, file_path: str | Path, force: bool = False) -> dict[str, Any]:
-        """Index or update a single file."""
+    def index_file(
+        self,
+        file_path: str | Path,
+        force: bool = False,
+        *,
+        collection: str = "default",
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Parse, chunk, embed, and index (or update) a single document file."""
         path = Path(file_path).resolve()
         if not path.is_file():
             return {"status": "error", "error": f"File '{path}' does not exist"}
 
         norm_path = str(path).replace("\\", "/")
         current_hash = self._calculate_file_hash(path)
+        file_size = path.stat().st_size
 
         if not force:
             existing_hash = self.store.get_file_hash(norm_path)
             if existing_hash == current_hash:
-                return {"status": "skipped", "file": norm_path, "reason": "unchanged"}
+                doc_info = self.store.get_document(norm_path)
+                return {
+                    "status": "skipped",
+                    "doc_id": doc_info["doc_id"] if doc_info else None,
+                    "file": norm_path,
+                    "reason": "unchanged",
+                }
 
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-        except Exception as e:
-            return {"status": "error", "file": norm_path, "error": str(e)}
-
-        chunks = self.splitter.split(
-            text=content,
-            doc_path=norm_path,
-            metadata={"filename": path.name, "suffix": path.suffix},
+        doc_id = self.store.record_document_status(
+            norm_path,
+            status="INDEXING",
+            file_hash=current_hash,
+            title=title or path.name,
+            file_type=path.suffix.lower().lstrip(".") or "text",
+            collection=collection,
+            file_size_bytes=file_size,
         )
 
-        if not chunks:
-            return {"status": "skipped", "file": norm_path, "reason": "empty"}
+        try:
+            parsed = parse_document(path)
+            effective_title = title or parsed.title or path.name
+            chunks = self.splitter.split_sections(
+                sections=parsed.sections,
+                doc_path=norm_path,
+                metadata={
+                    "filename": path.name,
+                    "suffix": path.suffix.lower(),
+                    "title": effective_title,
+                    "file_type": parsed.file_type,
+                    "collection": collection,
+                },
+            )
 
-        texts = [c.content for c in chunks]
-        vecs = self.embeddings.embed_documents(texts)
-        count = self.store.add_chunks(chunks, vecs, file_hash=current_hash)
+            if not chunks:
+                self.store.record_document_status(
+                    norm_path,
+                    status="FAILED",
+                    file_hash=current_hash,
+                    title=effective_title,
+                    file_type=parsed.file_type,
+                    collection=collection,
+                    file_size_bytes=file_size,
+                    error_message="No readable text content extracted",
+                    doc_id=doc_id,
+                )
+                return {"status": "skipped", "doc_id": doc_id, "file": norm_path, "reason": "empty"}
 
-        return {"status": "indexed", "file": norm_path, "chunks": count}
+            texts = [c.content for c in chunks]
+            vecs = self.embeddings.embed_documents(texts)
+            count = self.store.add_chunks(
+                chunks,
+                vecs,
+                file_hash=current_hash,
+                title=effective_title,
+                file_type=parsed.file_type,
+                collection=collection,
+                file_size_bytes=file_size,
+                doc_id=doc_id,
+            )
+
+            return {
+                "status": "indexed",
+                "doc_id": doc_id,
+                "title": effective_title,
+                "file": norm_path,
+                "file_type": parsed.file_type,
+                "collection": collection,
+                "chunks": count,
+            }
+        except Exception as exc:  # noqa: BLE001
+            self.store.record_document_status(
+                norm_path,
+                status="FAILED",
+                file_hash=current_hash,
+                title=title or path.name,
+                file_type=path.suffix.lower().lstrip(".") or "text",
+                collection=collection,
+                file_size_bytes=file_size,
+                error_message=str(exc),
+                doc_id=doc_id,
+            )
+            logger.error(f"Failed indexing '{norm_path}': {exc}")
+            return {"status": "error", "doc_id": doc_id, "file": norm_path, "error": str(exc)}
 
     def index_directory(
         self,
         directory_path: str | None = None,
         force: bool = False,
+        *,
+        collection: str = "default",
     ) -> dict[str, Any]:
         """Recursively scan directory and index eligible source and document files."""
         settings = get_settings()
@@ -138,7 +216,6 @@ class WorkspaceIndexer:
         logger.info(f"Scanning directory for indexing: {target_dir}")
 
         for root, dirs, files in os.walk(target_dir):
-            # In-place prune ignored directories
             dirs[:] = [d for d in dirs if d not in self.ignore_dirs]
 
             for file in files:
@@ -147,7 +224,7 @@ class WorkspaceIndexer:
                     continue
 
                 scanned += 1
-                res = self.index_file(file_path, force=force)
+                res = self.index_file(file_path, force=force, collection=collection)
                 match res.get("status"):
                     case "indexed":
                         indexed += 1

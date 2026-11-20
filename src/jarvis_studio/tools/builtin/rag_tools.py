@@ -1,5 +1,7 @@
 """Built-in Tools for RAG local knowledge base and code/document retrieval."""
 
+from __future__ import annotations
+
 import json
 
 from langchain_core.tools import tool
@@ -15,13 +17,21 @@ def search_knowledge_base(
     query: str,
     top_k: int = 4,
     path_filter: str | None = None,
+    collection: str | None = None,
+    doc_id: str | None = None,
+    min_score: float = 0.0,
 ) -> str:
-    """Search the local knowledge base and indexed workspace documents/code using semantic vector search.
+    """Search the local knowledge base and indexed documents using hybrid vector + keyword retrieval.
+
+    Returns grounded chunks with exact document title, path, page number, and section heading.
 
     Args:
         query: Natural language or technical query to search for.
         top_k: Number of most relevant chunk matches to return (default 4).
         path_filter: Optional path substring or prefix to constrain search scope.
+        collection: Optional knowledge collection name to restrict search scope.
+        doc_id: Optional specific document ID (e.g. 'doc_...') to restrict search scope.
+        min_score: Minimum similarity score threshold in [0.0, 1.0] (default 0.0).
     """
     store = SqliteVecStore()
     embeddings = EmbeddingsFactory.create_embeddings()
@@ -29,29 +39,48 @@ def search_knowledge_base(
 
     matches = store.search(
         query_embedding=query_vec,
-        top_k=top_k,
+        top_k=max(1, min(20, top_k)),
         doc_path_prefix=path_filter,
+        query_text=query,
+        collection=collection,
+        doc_id=doc_id,
+        min_score=min_score,
     )
 
     if not matches:
         return f"No relevant documents or code chunks found in local knowledge base for query: '{query}'."
 
-    output = [f"Found {len(matches)} relevant match(es) for '{query}':\n"]
+    output = [f"Found {len(matches)} relevant match(es) in local knowledge base for '{query}':\n"]
     for i, m in enumerate(matches, 1):
-        doc_name = m["doc_path"]
+        meta = m.get("metadata") or {}
+        doc_title = m.get("title") or m["doc_path"]
+        doc_path = m["doc_path"]
+        m_doc_id = m.get("doc_id", "")
         score = m["score"]
-        content = m["content"]
-        output.append(f"--- [Match {i}] Source: {doc_name} (Similarity: {score}) ---")
-        output.append(content)
+        chunk_idx = m.get("chunk_index", 0)
+        page_num = meta.get("page_number")
+        section_title = meta.get("section_title")
+
+        loc_parts = [f"Doc: {doc_title} ({m_doc_id})", f"Path: {doc_path}"]
+        if page_num is not None:
+            loc_parts.append(f"Page: {page_num}")
+        if section_title:
+            loc_parts.append(f"Section: {section_title}")
+        loc_parts.append(f"Chunk: #{chunk_idx}")
+        loc_parts.append(f"Score: {score}")
+
+        output.append(f"--- [Match {i}] {' | '.join(loc_parts)} ---")
+        output.append(m["content"])
         output.append("")
 
+    output.append("Cite exact document titles, page numbers, and section names from above when answering.")
     return "\n".join(output)
 
 
 mark_tool_metadata(
     search_knowledge_base,
     name="search_knowledge_base",
-    description="Search the local knowledge base and indexed workspace documents/code using semantic vector search.",
+    description="Search the local knowledge base and indexed documents/code using hybrid vector + keyword search.",
     risk_level=RiskLevel.SAFE,
     requires_approval=False,
     category="RAG",
@@ -62,16 +91,20 @@ mark_tool_metadata(
 def index_workspace_directory(
     directory_path: str | None = None,
     force_reindex: bool = False,
+    collection: str = "default",
 ) -> str:
     """Scan and index files in a directory or workspace into the local vector database.
 
     Args:
         directory_path: Absolute or relative directory path to index. If omitted, uses configured workspace root.
         force_reindex: Whether to re-embed and overwrite already indexed files even if unchanged.
+        collection: Logical collection name to group indexed documents (default 'default').
     """
     indexer = WorkspaceIndexer()
     summary = indexer.index_directory(
-        directory_path=directory_path, force=force_reindex
+        directory_path=directory_path,
+        force=force_reindex,
+        collection=collection,
     )
     return json.dumps(summary, indent=2, ensure_ascii=False)
 
@@ -87,12 +120,12 @@ mark_tool_metadata(
 
 
 @tool
-def list_indexed_documents() -> str:
-    """List all source files and documents currently indexed in the local RAG knowledge base."""
+def list_indexed_documents(collection: str | None = None) -> str:
+    """List all documents currently indexed in the local RAG knowledge base with status and provenance."""
     store = SqliteVecStore()
-    files = store.list_indexed_files()
+    files = store.list_indexed_files(collection=collection)
     if not files:
-        return "The local knowledge base is currently empty. Run 'index_workspace_directory' to index files."
+        return "The local knowledge base is currently empty. Run 'index_workspace_directory' or upload documents to index files."
 
     return json.dumps(files, indent=2, ensure_ascii=False)
 
@@ -100,7 +133,7 @@ def list_indexed_documents() -> str:
 mark_tool_metadata(
     list_indexed_documents,
     name="list_indexed_documents",
-    description="List all source files and documents currently indexed in the local RAG knowledge base.",
+    description="List all documents currently indexed in the local RAG knowledge base.",
     risk_level=RiskLevel.SAFE,
     requires_approval=False,
     category="RAG",
