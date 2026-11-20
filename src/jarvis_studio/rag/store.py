@@ -358,6 +358,9 @@ class SqliteVecStore:
         collection: str | None,
         doc_id: str | None,
     ) -> bool:
+        doc_status = row["doc_status"]
+        if doc_status is not None and doc_status != "READY":
+            return False
         doc_path = row["doc_path"]
         if doc_path_prefix and not (
             doc_path.startswith(doc_path_prefix) or doc_path_prefix in doc_path
@@ -400,7 +403,8 @@ class SqliteVecStore:
                     c.metadata,
                     f.doc_id,
                     f.title,
-                    f.collection
+                    f.collection,
+                    f.status AS doc_status
                 FROM vec_chunks v
                 JOIN doc_chunks c ON v.chunk_id = c.chunk_id
                 LEFT JOIN doc_files f ON c.doc_path = f.doc_path
@@ -453,7 +457,8 @@ class SqliteVecStore:
                             c.metadata,
                             f.doc_id,
                             f.title,
-                            f.collection
+                            f.collection,
+                            f.status AS doc_status
                         FROM fts_chunks fts
                         JOIN doc_chunks c ON fts.chunk_id = c.chunk_id
                         LEFT JOIN doc_files f ON c.doc_path = f.doc_path

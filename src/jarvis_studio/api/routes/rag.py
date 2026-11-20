@@ -83,12 +83,19 @@ async def search_rag(payload: RAGSearchRequest) -> list[dict[str, Any]]:
 
 @router.post("/index", response_model=dict[str, Any])
 async def index_workspace(payload: RAGIndexRequest) -> dict[str, Any]:
-    """Scan and index local documents and code files."""
+    """Scan and index local documents and code files within workspace root."""
+    ws_root = Path(get_settings().storage.workspace_root).resolve()
+    target_dir = Path(payload.directory_path).resolve() if payload.directory_path else ws_root
+    if not target_dir.is_relative_to(ws_root):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Directory '{payload.directory_path}' is outside workspace root.",
+        )
     indexer = WorkspaceIndexer()
     return indexer.index_directory(
-        directory_path=payload.directory_path,
+        directory_path=str(target_dir),
         force=payload.force,
-        collection=payload.collection,
+        collection=_sanitize_collection_name(payload.collection),
     )
 
 
@@ -142,8 +149,14 @@ async def upload_document(
 
 @router.post("/documents/ingest", response_model=dict[str, Any])
 async def ingest_local_document(payload: RAGIngestFileRequest) -> dict[str, Any]:
-    """Ingest or re-index an existing local document file by path."""
+    """Ingest or re-index an existing local document file within workspace root."""
+    ws_root = Path(get_settings().storage.workspace_root).resolve()
     target = Path(payload.file_path).resolve()
+    if not target.is_relative_to(ws_root):
+        raise HTTPException(
+            status_code=403,
+            detail=f"File '{payload.file_path}' is outside workspace root.",
+        )
     if not target.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: '{payload.file_path}'")
     if target.suffix.lower() not in DEFAULT_SUPPORTED_EXTENSIONS:
