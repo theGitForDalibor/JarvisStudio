@@ -269,8 +269,9 @@ class ExecutionEngine:
             if task_id in self._running_tasks:
                 handle, req = self._running_tasks[task_id]
                 req.is_pause = False
-                self.coordinator.mark_cancelling(task_id, req.run_id)
-                self.coordinator.record_event(
+                await asyncio.to_thread(self.coordinator.mark_cancelling, task_id, req.run_id)
+                await asyncio.to_thread(
+                    self.coordinator.record_event,
                     task_id=task_id,
                     event_type=EventType.TASK_CANCELLING,
                     run_id=req.run_id,

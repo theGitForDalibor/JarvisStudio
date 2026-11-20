@@ -21,6 +21,7 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from jarvis_studio.agent.graph import build_agent_graph
+from jarvis_studio.agent.hitl.models import ApprovalDecision
 from jarvis_studio.api.app import create_app
 from jarvis_studio.config.models import RAGConfig, StorageConfig
 from jarvis_studio.config.settings import Settings, get_settings
@@ -210,7 +211,8 @@ class _MultiRunWorkflowMockModel:
             return AIMessage(content="Run 1 completed with Architecture Report v1.")
 
         # Run 2 (Follow-up instruction)
-        if not is_tool or getattr(last_msg, "name", "") == "publish_research_report":
+        tool_call_ids = [getattr(m, "tool_call_id", "") for m in messages if getattr(m, "type", "") == "tool"]
+        if "r2_search" not in tool_call_ids:
             # Need fresh retrieval in Run 2
             return AIMessage(
                 content="",
@@ -222,7 +224,7 @@ class _MultiRunWorkflowMockModel:
                     }
                 ],
             )
-        if getattr(last_msg, "tool_call_id", "") == "r2_search":
+        if "r2_pub" not in tool_call_ids:
             tool_text = str(getattr(last_msg, "content", ""))
             doc_m = re.search(r"(doc_[a-zA-Z0-9]+)", tool_text)
             chk_m = re.search(r"(chk_[a-zA-Z0-9]+)", tool_text)
@@ -569,10 +571,18 @@ async def test_e2e_deterministic_pause_resume_cancel_and_hitl_with_scope_inherit
                 assert c_resp.status_code == 200
                 cancel_llm.release.set()
 
-                res_c = await asyncio.wait_for(fut_c, timeout=5.0)
-                assert res_c.status == "cancelled"
+                try:
+                    res_c = await asyncio.wait_for(fut_c, timeout=5.0)
+                    assert res_c.status == "cancelled"
+                except asyncio.CancelledError:
+                    pass
+                for _ in range(50):
+                    if rt.task_coordinator.get_task(tid_c).status == TaskStatus.CANCELLED:
+                        break
+                    await asyncio.sleep(0.02)
                 assert rt.task_coordinator.get_task(tid_c).status == TaskStatus.CANCELLED
                 ev_types_c = [e.event_type for e in rt.task_coordinator.list_events_for_task(tid_c)]
+                assert EventType.TASK_CANCELLING in ev_types_c
                 assert EventType.TASK_CANCELLED in ev_types_c
 
                 # --- C. HITL Interrupt -> Approve -> Resume ---
@@ -591,21 +601,19 @@ async def test_e2e_deterministic_pause_resume_cancel_and_hitl_with_scope_inherit
                 ).json()["task_id"]
                 _, fut_h1 = await rt.execution_engine.submit_task(tid_h, return_future=True)
                 res_h1 = await asyncio.wait_for(fut_h1, timeout=5.0)
-                assert res_h1.status == "waiting_approval"
+                assert res_h1.status == "interrupted"
                 assert rt.task_coordinator.get_task(tid_h).status == TaskStatus.WAITING_APPROVAL
 
-                pending = rt.hitl_manager.get_pending_by_thread(tid_h)
+                pending = rt.hitl_manager.list_pending(thread_id=tid_h)
                 assert len(pending) == 1
-                approval_id = pending[0].approval_id
+                approval_id = pending[0].id
 
-                # Approve and resume via AgentService
-                rt.hitl_manager.resolve_approval(approval_id, approved=True, resolved_by="e2e_user")
-                _, fut_h2 = await rt.execution_engine.submit_task(
+                # Approve and resume via AgentService.resume_task_approval
+                res_h2 = await rt.agent_service.resume_task_approval(
                     tid_h,
-                    resume_payload={"decisions": [{"approval_id": approval_id, "approved": True}]},
-                    return_future=True,
+                    approval_id,
+                    ApprovalDecision(decision="approve", reason="e2e_user"),
                 )
-                res_h2 = await asyncio.wait_for(fut_h2, timeout=5.0)
                 assert res_h2.status == "completed"
                 assert (ws_dir / "scoped_note.txt").read_text(encoding="utf-8") == "approved output"
                 assert rt.task_coordinator.get_task(tid_h).get_knowledge_scope() == {
