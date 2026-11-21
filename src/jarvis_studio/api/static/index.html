@@ -26,74 +26,251 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <style>
-    /* Custom Scrollbars */
+    /* 4 Mainstream Minimalist Themes: noir (Vercel), github (GitHub Dark), claude (Claude Warm), clean (Apple/OpenAI Light) */
+    :root,
+    html[data-theme="noir"] {
+      --bg-canvas: #09090b;
+      --bg-surface: #111113;
+      --bg-elevated: #1a1a1e;
+      --bg-hover: #242429;
+      --border-subtle: #242428;
+      --border-strong: #38383f;
+      --text-primary: #fafafa;
+      --text-secondary: #d4d4d8;
+      --text-muted: #a1a1aa;
+      --text-faint: #71717a;
+      --accent: #fafafa;
+      --accent-fg: #09090b;
+      --accent-hover: #e4e4e7;
+      --accent-soft: rgba(255, 255, 255, 0.08);
+      --accent-text: #f4f4f5;
+      --accent-border: rgba(255, 255, 255, 0.16);
+      --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --code-inline-bg: rgba(255, 255, 255, 0.08);
+      --code-inline-text: #e4e4e7;
+      --code-inline-border: rgba(255, 255, 255, 0.12);
+      --scroll-thumb: rgba(82, 82, 91, 0.6);
+    }
+
+    html[data-theme="github"] {
+      --bg-canvas: #0d1117;
+      --bg-surface: #161b22;
+      --bg-elevated: #21262d;
+      --bg-hover: #292e36;
+      --border-subtle: #30363d;
+      --border-strong: #484f58;
+      --text-primary: #e6edf3;
+      --text-secondary: #c9d1d9;
+      --text-muted: #8b949e;
+      --text-faint: #6e7681;
+      --accent: #2f81f7;
+      --accent-fg: #ffffff;
+      --accent-hover: #1f6feb;
+      --accent-soft: rgba(47, 129, 247, 0.12);
+      --accent-text: #58a6ff;
+      --accent-border: rgba(47, 129, 247, 0.35);
+      --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+      --code-inline-bg: rgba(110, 118, 129, 0.2);
+      --code-inline-text: #e6edf3;
+      --code-inline-border: rgba(110, 118, 129, 0.3);
+      --scroll-thumb: rgba(110, 118, 129, 0.45);
+    }
+
+    html[data-theme="claude"] {
+      --bg-canvas: #f9f8f6;
+      --bg-surface: #ffffff;
+      --bg-elevated: #f2efe9;
+      --bg-hover: #e8e3da;
+      --border-subtle: #e7e2d9;
+      --border-strong: #d4cdc0;
+      --text-primary: #1f1e1b;
+      --text-secondary: #383630;
+      --text-muted: #6b675f;
+      --text-faint: #8c877d;
+      --accent: #c96442;
+      --accent-fg: #ffffff;
+      --accent-hover: #b55332;
+      --accent-soft: rgba(201, 100, 66, 0.10);
+      --accent-text: #b55332;
+      --accent-border: rgba(201, 100, 66, 0.28);
+      --card-shadow: 0 1px 3px rgba(28, 25, 23, 0.05);
+      --code-inline-bg: #f2efe9;
+      --code-inline-text: #9a3412;
+      --code-inline-border: #e5ddd0;
+      --scroll-thumb: rgba(168, 162, 158, 0.55);
+    }
+
+    html[data-theme="clean"] {
+      --bg-canvas: #ffffff;
+      --bg-surface: #f7f7f8;
+      --bg-elevated: #ececf1;
+      --bg-hover: #e3e3e8;
+      --border-subtle: #e5e5e8;
+      --border-strong: #d1d1d6;
+      --text-primary: #111827;
+      --text-secondary: #374151;
+      --text-muted: #6b7280;
+      --text-faint: #9ca3af;
+      --accent: #18181b;
+      --accent-fg: #ffffff;
+      --accent-hover: #27272a;
+      --accent-soft: rgba(24, 24, 27, 0.07);
+      --accent-text: #18181b;
+      --accent-border: rgba(24, 24, 27, 0.18);
+      --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+      --code-inline-bg: #f1f5f9;
+      --code-inline-text: #0f172a;
+      --code-inline-border: #e2e8f0;
+      --scroll-thumb: rgba(156, 163, 175, 0.55);
+    }
+
+    html, body {
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      background-color: var(--bg-canvas);
+      color: var(--text-primary);
+      transition: background-color 0.18s ease, color 0.18s ease;
+    }
+
+    /* Minimal Scrollbars */
     ::-webkit-scrollbar { width: 5px; height: 5px; }
-    ::-webkit-scrollbar-track { background: #0f172a; }
-    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: #475569; }
-    .markdown-body pre { background-color: #0b0f19 !important; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin: 0.5rem 0; border: 1px solid #1e293b; }
-    .markdown-body code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .markdown-body p { margin-bottom: 0.5rem; line-height: 1.6; }
-    .markdown-body ul, .markdown-body ol { margin-left: 1.5rem; margin-bottom: 0.5rem; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 9999px; }
+
+    /* Unified Theme Surface & Accent Mapping */
+    .bg-slate-950, .bg-slate-950\/80, .bg-slate-950\/70, .bg-slate-950\/60, .bg-slate-950\/50 { background-color: var(--bg-canvas) !important; }
+    .bg-slate-900, .bg-slate-900\/90, .bg-slate-900\/80, .bg-slate-900\/75, .bg-slate-900\/60, .bg-slate-900\/40 { background-color: var(--bg-surface) !important; }
+    .bg-slate-800, .bg-slate-800\/80, .bg-slate-800\/60 { background-color: var(--bg-elevated) !important; }
+    .border-slate-800, .border-slate-800\/90, .border-slate-800\/80, .border-slate-800\/70,
+    .border-slate-700, .border-slate-700\/80, .border-slate-700\/50,
+    .divide-slate-800 > :not([hidden]) ~ :not([hidden]) { border-color: var(--border-subtle) !important; }
+
+    .text-slate-100 { color: var(--text-primary) !important; }
+    .text-slate-200 { color: var(--text-secondary) !important; }
+    .text-slate-300 { color: var(--text-secondary) !important; }
+    .text-slate-400 { color: var(--text-muted) !important; }
+    .text-slate-500 { color: var(--text-faint) !important; }
+
+    .hover\:bg-slate-800:hover, .hover\:bg-slate-800\/60:hover, .hover\:bg-slate-800\/30:hover, .hover\:bg-slate-700:hover { background-color: var(--bg-hover) !important; }
+    .hover\:text-white:hover { color: var(--text-primary) !important; }
+
+    /* Clean Solid Accent System (No noisy gradients or neon glows) */
+    .bg-blue-600 { background-color: var(--accent) !important; color: var(--accent-fg) !important; }
+    .hover\:bg-blue-500:hover { background-color: var(--accent-hover) !important; }
+    .bg-gradient-to-r.from-blue-600 { background-image: none !important; background-color: var(--accent) !important; color: var(--accent-fg) !important; }
+    .bg-gradient-to-r.from-blue-600:hover { background-color: var(--accent-hover) !important; }
+    .text-blue-400, .text-blue-300 { color: var(--accent-text) !important; }
+    .hover\:text-blue-400:hover, .hover\:text-blue-300:hover { color: var(--text-primary) !important; }
+    .bg-blue-500\/10, .bg-blue-500\/20, .bg-blue-600\/20, .bg-blue-950\/40 { background-color: var(--accent-soft) !important; }
+    .border-blue-500\/20, .border-blue-500\/25, .border-blue-500\/30, .border-blue-500\/60, .border-blue-900\/40 { border-color: var(--accent-border) !important; }
+    .focus\:border-blue-500:focus { border-color: var(--border-strong) !important; }
+    .shadow-blue-600\/20, .shadow-blue-600\/25, .shadow-blue-500\/20 { --tw-shadow-color: transparent !important; box-shadow: none !important; }
+
+    .brand-mark { background-color: var(--accent); color: var(--accent-fg); }
+    .chat-ambient { background-color: var(--bg-canvas); }
+
+    .markdown-body pre { background-color: #0d1117 !important; color: #e6edf3; padding: 0.9rem 1rem; border-radius: 0.5rem; overflow-x: auto; margin: 0.6rem 0; border: 1px solid var(--border-subtle); }
+    .markdown-body code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85em; }
+    .markdown-body :not(pre) > code { background-color: var(--code-inline-bg); color: var(--code-inline-text); padding: 0.12rem 0.38rem; border-radius: 0.3rem; border: 1px solid var(--code-inline-border); }
+    .markdown-body p { margin-bottom: 0.55rem; line-height: 1.7; }
+    .markdown-body ul, .markdown-body ol { margin-left: 1.5rem; margin-bottom: 0.55rem; }
     .markdown-body ul { list-style-type: disc; }
     .markdown-body ol { list-style-type: decimal; }
+    .markdown-body table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.85em; }
+    .markdown-body th, .markdown-body td { border: 1px solid var(--border-subtle); padding: 0.45rem 0.7rem; text-align: left; }
+    .markdown-body th { background-color: var(--bg-elevated); color: var(--text-primary); font-weight: 600; }
+    .markdown-body tbody tr:nth-child(even) { background-color: var(--bg-surface); }
+    .markdown-body blockquote { border-left: 2px solid var(--border-strong); padding: 0.2rem 0.8rem; color: var(--text-muted); margin: 0.5rem 0; }
+    .markdown-body hr { border-color: var(--border-subtle); margin: 0.9rem 0; }
+
     .session-item-actions { opacity: 0; transition: opacity 0.15s ease-in-out; }
     .session-item:hover .session-item-actions { opacity: 1; }
+    .card-elevated { background: var(--bg-surface) !important; box-shadow: var(--card-shadow); transition: border-color 0.18s ease, background 0.18s ease; }
+    .composer-box { transition: border-color 0.18s ease, box-shadow 0.18s ease; }
+    .nav-item { color: var(--text-muted); transition: background-color 0.15s ease, color 0.15s ease; }
+    .nav-item:hover { background-color: var(--bg-hover); color: var(--text-primary); }
+    .nav-item-active { background-color: var(--bg-elevated) !important; color: var(--text-primary) !important; font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+    .starter-card { background: var(--bg-surface); border: 1px solid var(--border-subtle); transition: border-color 0.15s ease, background-color 0.15s ease; }
+    .starter-card:hover { border-color: var(--border-strong); background: var(--bg-elevated); }
   </style>
 </head>
-<body class="bg-slate-950 text-slate-100 flex flex-col h-screen overflow-hidden font-sans">
+<body class="bg-slate-950 text-slate-100 flex flex-row h-screen overflow-hidden font-sans">
 
-  <!-- Top Navigation Header -->
-  <header class="h-14 border-b border-slate-800 bg-slate-900/90 backdrop-blur px-4 flex items-center justify-between shrink-0 z-20">
-    <div class="flex items-center gap-3">
-      <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">
-        A
+  <!-- Left Primary Navigation Rail (Linear / Cursor Studio Layout) -->
+  <aside id="app-nav-rail" class="w-52 bg-slate-900 border-r border-slate-800 flex flex-col justify-between shrink-0 z-20 select-none">
+    <div class="p-3 space-y-5">
+      <!-- Brand -->
+      <div class="flex items-center gap-2.5 px-2 pt-1">
+        <div class="w-7 h-7 rounded-lg brand-mark flex items-center justify-center font-bold text-xs shrink-0">
+          A
+        </div>
+        <div class="min-w-0 flex items-baseline gap-1.5">
+          <span class="font-semibold text-sm tracking-tight text-slate-100 truncate">AgentStudio</span>
+          <span class="text-[10px] font-mono text-slate-500">v0.1</span>
+        </div>
       </div>
+
+      <!-- Primary Workspace Navigation -->
+      <nav class="space-y-0.5 text-[13px]">
+        <button onclick="switchTab('chat')" id="tab-btn-chat" class="nav-item nav-item-active w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+          <span>对话</span>
+        </button>
+        <button onclick="switchTab('tasks')" id="tab-btn-tasks" class="nav-item w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+          <span>任务</span>
+        </button>
+        <button onclick="switchTab('deliverables')" id="tab-btn-deliverables" class="nav-item w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          <span>交付物</span>
+        </button>
+        <button onclick="switchTab('approvals')" id="tab-btn-approvals" class="nav-item w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-left">
+          <span class="flex items-center gap-2.5">
+            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+            <span>审批</span>
+          </span>
+          <span id="pending-badge" class="hidden px-1.5 py-0.5 text-[10px] font-mono bg-red-500 text-white rounded-full leading-none">0</span>
+        </button>
+        <button onclick="switchTab('memory')" id="tab-btn-memory" class="nav-item w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+          <span>记忆</span>
+        </button>
+        <button onclick="switchTab('rag')" id="tab-btn-rag" class="nav-item w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+          <span>知识库</span>
+        </button>
+        <button onclick="switchTab('traces')" id="tab-btn-traces" class="nav-item w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          <span>追踪</span>
+        </button>
+        <button onclick="switchTab('system')" id="tab-btn-system" class="nav-item w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          <span>系统</span>
+        </button>
+      </nav>
+    </div>
+
+    <!-- Bottom Rail: Theme Selector + Model Status + Docs -->
+    <div class="p-3 border-t border-slate-800 space-y-2.5">
+      <!-- 4 Mainstream Theme Selector -->
       <div>
-        <h1 class="font-bold text-sm tracking-wide flex items-center gap-2">
-          AgentStudio
-          <span class="text-[11px] font-normal px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">v0.1.0</span>
-        </h1>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 px-1 mb-1.5">外观主题</div>
+        <div id="theme-switcher" class="grid grid-cols-2 gap-1 bg-slate-950 border border-slate-800 rounded-lg p-1 text-[11px]">
+          <button type="button" onclick="setThemeMode('noir')" data-theme-btn="noir" class="px-2 py-1 rounded transition text-slate-400 hover:text-white text-center">极简黑</button>
+          <button type="button" onclick="setThemeMode('github')" data-theme-btn="github" class="px-2 py-1 rounded transition text-slate-400 hover:text-white text-center">深空灰</button>
+          <button type="button" onclick="setThemeMode('claude')" data-theme-btn="claude" class="px-2 py-1 rounded transition text-slate-400 hover:text-white text-center">暖白</button>
+          <button type="button" onclick="setThemeMode('clean')" data-theme-btn="clean" class="px-2 py-1 rounded transition text-slate-400 hover:text-white text-center">纯净白</button>
+        </div>
       </div>
-    </div>
 
-    <!-- Active Navigation Tabs -->
-    <nav class="flex items-center space-x-1 bg-slate-800/60 p-1 rounded-lg border border-slate-700/50 text-xs font-medium whitespace-nowrap overflow-x-auto">
-      <button onclick="switchTab('chat')" id="tab-btn-chat" class="px-2.5 py-1.5 rounded-md transition bg-blue-600 text-white shadow">
-        💬 对话
+      <!-- Runtime Status & Docs -->
+      <button onclick="switchTab('system')" class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 transition text-left" title="查看模型与系统状态">
+        <span id="header-provider-dot" class="w-1.5 h-1.5 rounded-full bg-slate-400 shrink-0"></span>
+        <span id="header-provider" class="font-mono text-[10px] truncate">LLM: 检测中...</span>
       </button>
-      <button onclick="switchTab('tasks')" id="tab-btn-tasks" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        📋 任务 (Tasks)
-      </button>
-      <button onclick="switchTab('deliverables')" id="tab-btn-deliverables" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        📄 交付物
-      </button>
-      <button onclick="switchTab('approvals')" id="tab-btn-approvals" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white flex items-center gap-1.5">
-        🛡️ 审批 <span id="pending-badge" class="hidden px-1.5 py-0.2 text-[10px] bg-red-500 text-white rounded-full">0</span>
-      </button>
-      <button onclick="switchTab('memory')" id="tab-btn-memory" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        🧠 记忆
-      </button>
-      <button onclick="switchTab('rag')" id="tab-btn-rag" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        📚 知识库
-      </button>
-      <button onclick="switchTab('traces')" id="tab-btn-traces" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        ⚡ 追踪
-      </button>
-      <button onclick="switchTab('system')" id="tab-btn-system" class="px-2.5 py-1.5 rounded-md transition text-slate-400 hover:text-white">
-        ⚙️ 系统
-      </button>
-    </nav>
-
-    <!-- Top Status Info -->
-    <div class="flex items-center gap-3 text-xs">
-      <div class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-300">
-        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-        <span id="header-provider">LLM: loading...</span>
-      </div>
-      <a href="/docs" target="_blank" class="text-slate-400 hover:text-blue-400 transition" title="OpenAPI Docs">API 文档 ↗</a>
+      <a href="/docs" target="_blank" class="block px-2 text-[11px] text-slate-500 hover:text-slate-200 transition">OpenAPI 接口文档 ↗</a>
     </div>
-  </header>
+  </aside>
 
   <!-- Main View Container -->
   <main class="flex-1 relative overflow-hidden flex flex-col">
@@ -114,7 +291,7 @@
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
             </button>
           </div>
-          <button onclick="createNewSession()" class="w-full py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 shadow transition">
+          <button onclick="createNewSession()" class="w-full py-2 px-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 shadow-md shadow-blue-600/20 transition">
             <span>+</span> 新建会话
           </button>
           <!-- Search box -->
@@ -143,7 +320,7 @@
       </aside>
 
       <!-- Right: Chat Arena -->
-      <div class="flex-1 flex flex-col h-full overflow-hidden bg-slate-950">
+      <div class="flex-1 flex flex-col h-full overflow-hidden bg-slate-950 chat-ambient">
 
         <!-- Chat Header Bar -->
         <div class="h-11 px-4 bg-slate-900/40 border-b border-slate-800/80 flex items-center justify-between text-xs text-slate-400 shrink-0">
@@ -171,15 +348,33 @@
         </div>
 
         <!-- Messages Stream Window -->
-        <div id="messages-container" class="flex-1 overflow-y-auto p-4 space-y-4">
-          <!-- Welcome Message Rendered by JS or default -->
-          <div class="flex items-start gap-3 max-w-4xl mx-auto">
-            <div class="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center font-bold text-xs shrink-0">
-              AI
+        <div id="messages-container" class="flex-1 overflow-y-auto px-6 py-8 space-y-6">
+          <!-- Centered Minimalist Studio Hero -->
+          <div class="max-w-2xl mx-auto pt-10 pb-4 text-center space-y-6">
+            <div class="inline-flex items-center justify-center w-11 h-11 rounded-2xl brand-mark font-bold text-base">
+              A
             </div>
-            <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm leading-relaxed max-w-2xl shadow-sm">
-              <p class="font-medium text-slate-200 mb-1">你好！我是 AgentStudio 个人 AI Agent 工作空间助理。</p>
-              <p class="text-slate-400 text-xs">我已接入 <strong>LangGraph</strong> 运行时、<strong>HITL 安全审批</strong>、<strong>长期记忆 (LTM)</strong> 与 <strong>本地轻量向量知识库 (sqlite-vec)</strong>。请随时向我发送任务！</p>
+            <div class="space-y-1.5">
+              <h2 class="text-xl font-semibold tracking-tight text-slate-100">有什么可以帮您？</h2>
+              <p class="text-xs text-slate-400">基于 LangGraph 运行时、HITL 安全审批、长期记忆与本地知识库构建</p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-left pt-2">
+              <button type="button" onclick="useStarterPrompt('请扫描当前工作区目录结构并概括核心模块')" class="starter-card rounded-xl p-3.5 space-y-1">
+                <div class="text-xs font-medium text-slate-200">代码库概览</div>
+                <div class="text-[11px] text-slate-400">扫描工作区目录并梳理核心架构</div>
+              </button>
+              <button type="button" onclick="useStarterPrompt('请在知识库中检索 HITL 人工审批机制的设计规范')" class="starter-card rounded-xl p-3.5 space-y-1">
+                <div class="text-xs font-medium text-slate-200">知识库检索</div>
+                <div class="text-[11px] text-slate-400">基于本地混合检索查询文档规范</div>
+              </button>
+              <button type="button" onclick="useStarterPrompt('调研 LangGraph 状态机持久化最佳实践并生成研究报告')" class="starter-card rounded-xl p-3.5 space-y-1">
+                <div class="text-xs font-medium text-slate-200">深度研究报告</div>
+                <div class="text-[11px] text-slate-400">联网检索、核验来源并沉淀交付物</div>
+              </button>
+              <button type="button" onclick="useStarterPrompt('保存偏好：Python 代码统一使用类型注解与简洁函数')" class="starter-card rounded-xl p-3.5 space-y-1">
+                <div class="text-xs font-medium text-slate-200">写入长期记忆</div>
+                <div class="text-[11px] text-slate-400">跨会话记住你的开发规范与偏好</div>
+              </button>
             </div>
           </div>
         </div>
@@ -207,24 +402,24 @@
         </div>
 
         <!-- Chat Input Area -->
-        <div class="p-3 bg-slate-900/90 border-t border-slate-800 shrink-0">
-          <form id="chat-form" onsubmit="handleSend(event)" class="max-w-4xl mx-auto flex items-end gap-2">
+        <div class="px-4 py-3 bg-slate-950/80 backdrop-blur border-t border-slate-800/80 shrink-0">
+          <form id="chat-form" onsubmit="handleSend(event)" class="max-w-4xl mx-auto composer-box bg-slate-900/90 border border-slate-800 rounded-2xl p-2 flex items-end gap-2">
             <textarea
               id="chat-input"
               rows="2"
               placeholder="输入自然语言指令（例如：'请在 docs 知识库中检索关于 HITL 的设计' 或 '帮我写一个 Python 脚本'）..."
-              class="flex-1 bg-slate-950 text-sm text-slate-100 rounded-xl p-3 border border-slate-800 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-none leading-relaxed"
+              class="flex-1 bg-transparent text-sm text-slate-100 px-2.5 py-2 outline-none resize-none leading-relaxed placeholder:text-slate-500"
               onkeydown="handleInputKeydown(event)"
             ></textarea>
             <button
               type="submit"
               id="send-btn"
-              class="h-11 px-5 bg-blue-600 hover:bg-blue-500 text-white font-medium text-sm rounded-xl transition flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/20 disabled:opacity-50"
+              class="h-10 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium text-xs rounded-xl transition flex items-center justify-center gap-1.5 shadow-md shadow-blue-600/25 disabled:opacity-50 shrink-0"
             >
               发送 ↵
             </button>
           </form>
-          <div class="max-w-4xl mx-auto mt-1 flex justify-between items-center text-[10px] text-slate-500 px-1">
+          <div class="max-w-4xl mx-auto mt-1.5 flex justify-between items-center text-[10px] text-slate-500 px-1">
             <span>支持 Markdown 解析 · 工具调用自动拦截</span>
             <span>Enter 发送，Shift + Enter 换行</span>
           </div>
@@ -590,26 +785,47 @@
       </div>
 
       <!-- Stats Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+        <div class="card-elevated border border-slate-800 rounded-xl p-4">
           <div class="text-slate-400 text-xs">模型与适配引擎</div>
           <div id="sys-model" class="text-base font-bold text-slate-100 mt-1 font-mono">加载中...</div>
         </div>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="card-elevated border border-slate-800 rounded-xl p-4">
           <div class="text-slate-400 text-xs">HITL 拦截状态</div>
           <div id="sys-hitl" class="text-base font-bold text-emerald-400 mt-1">加载中...</div>
         </div>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="card-elevated border border-slate-800 rounded-xl p-4">
           <div class="text-slate-400 text-xs">MCP 扩展服务</div>
           <div id="sys-mcp" class="text-base font-bold text-blue-400 mt-1">加载中...</div>
         </div>
       </div>
 
-      <!-- Tools List Table -->
-      <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+      <!-- MCP Server Details -->
+      <div class="card-elevated border border-slate-800 rounded-xl overflow-hidden mb-5">
         <div class="p-3 border-b border-slate-800 flex justify-between items-center">
+          <span class="text-xs font-bold text-slate-300">🔌 MCP 服务器连接明细</span>
+          <span class="text-[10px] text-slate-500 font-mono">config/mcp_servers.json</span>
+        </div>
+        <div id="sys-mcp-list" class="p-3 grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
+          <div class="text-slate-500">加载中...</div>
+        </div>
+      </div>
+
+      <!-- Tools List Table -->
+      <div class="card-elevated border border-slate-800 rounded-xl overflow-hidden">
+        <div class="p-3 border-b border-slate-800 flex flex-wrap gap-2 justify-between items-center">
           <span class="text-xs font-bold text-slate-300">已注册工具总览 (Registry)</span>
-          <button onclick="loadSystemInfo()" class="text-xs text-slate-400 hover:text-white transition">刷新</button>
+          <div class="flex items-center gap-2">
+            <input type="text" id="sys-tools-search" oninput="renderSystemToolsList()" placeholder="搜索工具名或描述..." class="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1 text-[11px] text-slate-200 outline-none focus:border-blue-500 w-44">
+            <select id="sys-tools-filter" onchange="renderSystemToolsList()" class="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-slate-300 outline-none focus:border-blue-500">
+              <option value="ALL">全部风险等级</option>
+              <option value="SAFE">SAFE (安全只读)</option>
+              <option value="MEDIUM">MEDIUM (中等风险)</option>
+              <option value="HIGH">HIGH (高危审批)</option>
+              <option value="MCP">MCP 外部工具</option>
+            </select>
+            <button onclick="loadSystemInfo()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs text-slate-300 hover:text-white transition">刷新</button>
+          </div>
         </div>
         <div id="sys-tools-list" class="divide-y divide-slate-800 text-xs">
           <!-- Rendered by JS -->
@@ -619,7 +835,7 @@
 
     <!-- 6. TRACES TAB (Lifecycle Observability & Waterfall) -->
     <div id="view-traces" class="hidden flex-1 p-6 overflow-y-auto max-w-6xl mx-auto w-full">
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex flex-wrap gap-3 items-center justify-between mb-4">
         <div>
           <div class="flex items-center gap-2">
             <h2 class="text-lg font-bold">端到端链路追踪 (Lifecycle Traces)</h2>
@@ -628,34 +844,59 @@
           <p class="text-xs text-slate-400 mt-0.5">记录会话完整 5 阶段生命周期：输入规整 → 规则守卫 → 上下文预热 → 渐进思考与工具编排 → 流式输出，提供全链路 TTFT / TTFA / TTLT 延迟指标。</p>
         </div>
         <div class="flex items-center gap-2">
+          <input type="file" id="eval-report-file" accept=".json" class="hidden" onchange="handleImportEvalReport(event)">
+          <button onclick="document.getElementById('eval-report-file').click()" class="px-3 py-1.5 text-xs bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 rounded-lg transition flex items-center gap-1">
+            <span>📊</span> 导入评测报告
+          </button>
           <label class="text-xs text-slate-400 flex items-center gap-1.5 cursor-pointer select-none bg-slate-900 border border-slate-800 px-2.5 py-1.5 rounded-lg hover:border-slate-700">
             <input type="checkbox" id="traces-filter-session" onchange="loadTraces()" class="rounded bg-slate-950 border-slate-700 text-blue-600 focus:ring-0">
             <span>仅看当前会话</span>
           </label>
-          <button onclick="loadTraces()" class="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-700 rounded transition flex items-center gap-1">
+          <button onclick="loadTraces()" class="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-700 rounded-lg transition flex items-center gap-1">
             <span>↻</span> 刷新链路
           </button>
         </div>
       </div>
 
+      <!-- Imported Eval Benchmark Report Drawer -->
+      <div id="eval-report-panel" class="hidden mb-5 card-elevated border border-indigo-500/30 rounded-xl p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-bold text-indigo-300">📊 自动化评测报告概览 (eval_benchmark.py)</span>
+            <span id="eval-report-summary-badge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-200"></span>
+          </div>
+          <button onclick="document.getElementById('eval-report-panel').classList.add('hidden')" class="text-xs text-slate-400 hover:text-white">✕ 关闭</button>
+        </div>
+        <div id="eval-report-body" class="space-y-3 text-xs"></div>
+      </div>
+
       <!-- Traces Metric Cards -->
       <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mb-5">
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
-          <div class="text-slate-400 text-xs">平均首字延迟 (Avg TTFT)</div>
+        <div class="card-elevated border border-slate-800 rounded-xl p-3.5">
+          <div class="flex items-center justify-between text-slate-400 text-xs">
+            <span>首字延迟 (TTFT)</span>
+            <span id="stat-ttft-p90" class="text-[10px] font-mono text-blue-300/80">TP90: --</span>
+          </div>
           <div id="stat-ttft" class="text-base font-bold text-blue-400 mt-1 font-mono">-- ms</div>
           <div class="text-[10px] text-slate-500 mt-0.5">目标: &lt;100ms 规则直出 / 渐进反馈</div>
         </div>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
-          <div class="text-slate-400 text-xs">平均首次生成 (Avg TTFA)</div>
+        <div class="card-elevated border border-slate-800 rounded-xl p-3.5">
+          <div class="flex items-center justify-between text-slate-400 text-xs">
+            <span>首次生成 (TTFA)</span>
+            <span id="stat-ttfa-p90" class="text-[10px] font-mono text-amber-300/80">TP90: --</span>
+          </div>
           <div id="stat-ttfa" class="text-base font-bold text-amber-400 mt-1 font-mono">-- ms</div>
           <div class="text-[10px] text-slate-500 mt-0.5">大模型首个有效答案 Token 耗时</div>
         </div>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
-          <div class="text-slate-400 text-xs">平均总执行时长 (Avg TTLT)</div>
+        <div class="card-elevated border border-slate-800 rounded-xl p-3.5">
+          <div class="flex items-center justify-between text-slate-400 text-xs">
+            <span>总执行时长 (TTLT)</span>
+            <span id="stat-ttlt-p90" class="text-[10px] font-mono text-emerald-300/80">TP90: --</span>
+          </div>
           <div id="stat-ttlt" class="text-base font-bold text-emerald-400 mt-1 font-mono">-- ms</div>
           <div class="text-[10px] text-slate-500 mt-0.5">端到端完整请求处理闭环时长</div>
         </div>
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5">
+        <div class="card-elevated border border-slate-800 rounded-xl p-3.5">
           <div class="text-slate-400 text-xs">规则快速通道命中率</div>
           <div id="stat-fast-path" class="text-base font-bold text-purple-400 mt-1 font-mono">--%</div>
           <div class="text-[10px] text-slate-500 mt-0.5">0 Token 消耗直出的快速回复比例</div>
@@ -726,21 +967,28 @@
     let sidebarCollapsed = false;
 
     // --- Tab Switching ---
+    function useStarterPrompt(text) {
+      const input = document.getElementById('chat-input');
+      if (!input) return;
+      input.value = text;
+      input.focus();
+    }
+
     function switchTab(tab) {
       ['chat', 'tasks', 'deliverables', 'approvals', 'memory', 'rag', 'traces', 'system'].forEach(t => {
         const viewEl = document.getElementById(`view-${t}`);
         const btn = document.getElementById(`tab-btn-${t}`);
         if (viewEl) viewEl.classList.add('hidden');
         if (btn) {
-          btn.classList.remove('bg-blue-600', 'text-white', 'shadow');
-          btn.classList.add('text-slate-400');
+          btn.classList.remove('nav-item-active', 'bg-blue-600', 'text-white', 'shadow');
         }
       });
 
       document.getElementById(`view-${tab}`).classList.remove('hidden');
       const activeBtn = document.getElementById(`tab-btn-${tab}`);
-      activeBtn.classList.remove('text-slate-400');
-      activeBtn.classList.add('bg-blue-600', 'text-white', 'shadow');
+      if (activeBtn) {
+        activeBtn.classList.add('nav-item-active');
+      }
       activeTab = tab;
       try { localStorage.setItem('jarvis_active_tab', tab); } catch (_) {}
 
@@ -1328,6 +1576,9 @@
               <span>⚡ 链路:</span>
               <span class="trace-id-label font-mono text-slate-400"></span>
               <span class="trace-tag px-1.5 py-0.2 rounded text-[10px]"></span>
+            </button>
+            <button class="convert-task-btn hover:text-emerald-400 flex items-center gap-1 transition text-[11px]" onclick="convertLastQueryToTask(this)" title="将当前对话指令转为持久化后台任务">
+              <span>📋 转为任务</span>
             </button>
           </div>
         `;
@@ -2805,43 +3056,100 @@
       }
     }
 
+    function computePercentile(values, p) {
+      if (!values || values.length === 0) return null;
+      const sorted = [...values].sort((a, b) => a - b);
+      if (sorted.length === 1) return Math.round(sorted[0]);
+      const rank = (p / 100) * (sorted.length - 1);
+      const lo = Math.floor(rank);
+      const hi = Math.min(lo + 1, sorted.length - 1);
+      const frac = rank - lo;
+      return Math.round(sorted[lo] + (sorted[hi] - sorted[lo]) * frac);
+    }
+
     function updateTracesStats(traces) {
       if (!traces || traces.length === 0) {
         document.getElementById('stat-ttft').innerText = '-- ms';
         document.getElementById('stat-ttfa').innerText = '-- ms';
         document.getElementById('stat-ttlt').innerText = '-- ms';
+        document.getElementById('stat-ttft-p90').innerText = 'TP90: --';
+        document.getElementById('stat-ttfa-p90').innerText = 'TP90: --';
+        document.getElementById('stat-ttlt-p90').innerText = 'TP90: --';
         document.getElementById('stat-fast-path').innerText = '--%';
         return;
       }
 
-      let ttftSum = 0, ttftCount = 0;
-      let ttfaSum = 0, ttfaCount = 0;
-      let ttltSum = 0, ttltCount = 0;
+      const ttfts = [], ttfas = [], ttlts = [];
       let fastPathHits = 0;
 
       for (const t of traces) {
-        if (t.ttft_ms !== null && t.ttft_ms !== undefined) {
-          ttftSum += t.ttft_ms;
-          ttftCount++;
-        }
-        if (t.ttfa_ms !== null && t.ttfa_ms !== undefined) {
-          ttfaSum += t.ttfa_ms;
-          ttfaCount++;
-        }
+        if (t.ttft_ms !== null && t.ttft_ms !== undefined) ttfts.push(t.ttft_ms);
+        if (t.ttfa_ms !== null && t.ttfa_ms !== undefined) ttfas.push(t.ttfa_ms);
         const total = t.total_duration_ms || t.ttlt_ms;
-        if (total !== null && total !== undefined) {
-          ttltSum += total;
-          ttltCount++;
-        }
-        if (t.status === 'rule_direct') {
-          fastPathHits++;
-        }
+        if (total !== null && total !== undefined) ttlts.push(total);
+        if (t.status === 'rule_direct') fastPathHits++;
       }
 
-      document.getElementById('stat-ttft').innerText = ttftCount > 0 ? `${Math.round(ttftSum / ttftCount)} ms` : '-- ms';
-      document.getElementById('stat-ttfa').innerText = ttfaCount > 0 ? `${Math.round(ttfaSum / ttfaCount)} ms` : '-- ms';
-      document.getElementById('stat-ttlt').innerText = ttltCount > 0 ? `${Math.round(ttltSum / ttltCount)} ms` : '-- ms';
+      const avg = arr => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : null;
+      const ttftAvg = avg(ttfts), ttfaAvg = avg(ttfas), ttltAvg = avg(ttlts);
+      const ttftP90 = computePercentile(ttfts, 90);
+      const ttfaP90 = computePercentile(ttfas, 90);
+      const ttltP90 = computePercentile(ttlts, 90);
+
+      document.getElementById('stat-ttft').innerText = ttftAvg !== null ? `${ttftAvg} ms` : '-- ms';
+      document.getElementById('stat-ttfa').innerText = ttfaAvg !== null ? `${ttfaAvg} ms` : '-- ms';
+      document.getElementById('stat-ttlt').innerText = ttltAvg !== null ? `${ttltAvg} ms` : '-- ms';
+      document.getElementById('stat-ttft-p90').innerText = ttftP90 !== null ? `TP90: ${ttftP90}ms` : 'TP90: --';
+      document.getElementById('stat-ttfa-p90').innerText = ttfaP90 !== null ? `TP90: ${ttfaP90}ms` : 'TP90: --';
+      document.getElementById('stat-ttlt-p90').innerText = ttltP90 !== null ? `TP90: ${ttltP90}ms` : 'TP90: --';
       document.getElementById('stat-fast-path').innerText = `${Math.round((fastPathHits / traces.length) * 100)}%`;
+    }
+
+    function handleImportEvalReport(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const report = JSON.parse(String(reader.result || '{}'));
+          const panel = document.getElementById('eval-report-panel');
+          const badge = document.getElementById('eval-report-summary-badge');
+          const body = document.getElementById('eval-report-body');
+          const m = report.metrics_ms || {};
+          badge.innerText = `${report.passed || 0}/${report.total || 0} 通过 · 工具召回 ${Math.round((report.avg_tool_recall || 0) * 100)}%`;
+          const rows = (report.results || []).map(r => `
+            <tr class="border-t border-slate-800/80 hover:bg-slate-900/60">
+              <td class="py-1.5 px-2 font-mono text-slate-200">${escapeHtml(r.case_id)}</td>
+              <td class="py-1.5 px-2 text-slate-300 truncate max-w-[200px]" title="${escapeHtml(r.query)}">${escapeHtml(r.query)}</td>
+              <td class="py-1.5 px-2 font-mono text-blue-400">${r.ttft_ms ?? '-'}ms</td>
+              <td class="py-1.5 px-2 font-mono text-amber-400">${r.ttfa_ms ?? '-'}ms</td>
+              <td class="py-1.5 px-2 font-mono text-emerald-400">${r.ttlt_ms ?? '-'}ms</td>
+              <td class="py-1.5 px-2 font-mono text-purple-300">${Math.round((r.tool_recall ?? 1) * 100)}%</td>
+              <td class="py-1.5 px-2 font-mono ${r.error ? 'text-red-400' : 'text-emerald-400'}">${r.error ? 'FAIL' : 'PASS'}</td>
+            </tr>
+          `).join('');
+          body.innerHTML = `
+            <div class="grid grid-cols-3 gap-2 font-mono text-[11px]">
+              <div class="bg-slate-950/70 border border-slate-800 rounded p-2">TTFT avg/TP90/TP95: <span class="text-blue-400">${m.ttft?.avg ?? '-'} / ${m.ttft?.tp90 ?? '-'} / ${m.ttft?.tp95 ?? '-'} ms</span></div>
+              <div class="bg-slate-950/70 border border-slate-800 rounded p-2">TTFA avg/TP90/TP95: <span class="text-amber-400">${m.ttfa?.avg ?? '-'} / ${m.ttfa?.tp90 ?? '-'} / ${m.ttfa?.tp95 ?? '-'} ms</span></div>
+              <div class="bg-slate-950/70 border border-slate-800 rounded p-2">TTLT avg/TP90/TP95: <span class="text-emerald-400">${m.ttlt?.avg ?? '-'} / ${m.ttlt?.tp90 ?? '-'} / ${m.ttlt?.tp95 ?? '-'} ms</span></div>
+            </div>
+            <div class="overflow-x-auto max-h-56 border border-slate-800 rounded-lg">
+              <table class="w-full text-left text-[11px]">
+                <thead class="bg-slate-950 text-slate-400">
+                  <tr><th class="py-1.5 px-2">Case</th><th class="py-1.5 px-2">Query</th><th class="py-1.5 px-2">TTFT</th><th class="py-1.5 px-2">TTFA</th><th class="py-1.5 px-2">TTLT</th><th class="py-1.5 px-2">Recall</th><th class="py-1.5 px-2">Status</th></tr>
+                </thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>
+          `;
+          panel.classList.remove('hidden');
+        } catch (err) {
+          alert('解析评测报告 JSON 失败: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+      event.target.value = '';
     }
 
     function renderTracesList(traces) {
@@ -3002,13 +3310,26 @@
                 <span class="w-4 h-4 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center text-[10px]">3</span>
                 上下文预热与长期记忆 (Context Preload)
               </span>
-              <span class="text-[10px] font-mono text-slate-400">历史载入: ${preloadStage.history_loaded_count || 0} 条</span>
+              <div class="flex items-center gap-2 text-[10px] font-mono text-slate-400">
+                <span>历史载入: ${preloadStage.history_loaded_count || 0} 条</span>
+                <span>·</span>
+                <span class="text-cyan-400">RAG 预取: ${preloadStage.preloaded_rag_count || 0} 片段</span>
+              </div>
             </div>
-            <div class="text-[11px] text-slate-400">
+            <div class="text-[11px] text-slate-400 space-y-1.5">
               ${preloadStage.sticky_context && Object.keys(preloadStage.sticky_context).length > 0
                 ? `<div class="bg-slate-900/60 p-2 rounded font-mono text-blue-300">吸附上下文: ${escapeHtml(JSON.stringify(preloadStage.sticky_context))}</div>`
                 : '<div class="text-slate-500">无额外吸附实体，使用标准对话上下文注入。</div>'
               }
+              ${Array.isArray(preloadStage.preloaded_sources) && preloadStage.preloaded_sources.length > 0 ? `
+                <div class="flex flex-wrap gap-1.5 pt-1">
+                  ${preloadStage.preloaded_sources.map(src => `
+                    <span class="px-2 py-0.5 rounded bg-cyan-950/60 border border-cyan-500/30 text-cyan-300 font-mono text-[10px]">
+                      📚 ${escapeHtml(src.doc_path || src.doc_id || 'doc')} ${src.score !== undefined && src.score !== null ? `(${Number(src.score).toFixed(3)})` : ''}
+                    </span>
+                  `).join('')}
+                </div>
+              ` : ''}
             </div>
           </div>
 
@@ -3026,39 +3347,80 @@
               <div class="text-[11px] text-slate-500 p-2 bg-slate-900/60 rounded">
                 ${isFastPath ? '⚡ 规则守卫直出，无需调用工具与大模型编排。' : '本轮对话无独立工具调用。'}
               </div>
-            ` : `
-              <div class="space-y-2">
-                ${steps.map(s => {
-                  let badge = 'bg-blue-500/10 text-blue-400 border-blue-500/20';
-                  if (s.step_type === 'tool') badge = 'bg-amber-500/10 text-amber-400 border-amber-500/20';
-                  if (s.step_type === 'organize') badge = 'bg-purple-500/10 text-purple-400 border-purple-500/20';
-
-                  return `
-                    <div class="bg-slate-900/80 border border-slate-800 rounded p-2.5 space-y-1.5">
-                      <div class="flex items-center justify-between text-[11px]">
-                        <div class="flex items-center gap-1.5">
-                          <span class="px-1.5 py-0.2 rounded border text-[10px] ${badge}">#${s.seq} ${s.step_type}</span>
-                          <span class="font-mono font-medium text-slate-200">${escapeHtml(s.name)}</span>
-                        </div>
-                        <span class="font-mono text-slate-400 text-[10px]">${s.duration_ms || 0} ms</span>
+            ` : (() => {
+              const totalMs = Math.max(trace.total_duration_ms || trace.ttlt_ms || 1, 1);
+              const renderStepCard = (s) => {
+                let badge = 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+                let barColor = 'bg-blue-500/60';
+                let icon = '💭';
+                if (s.step_type === 'tool') {
+                  badge = 'bg-amber-500/10 text-amber-400 border-amber-500/20';
+                  barColor = 'bg-amber-500/70';
+                  icon = '🔧';
+                } else if (s.step_type === 'mcp') {
+                  badge = 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30';
+                  barColor = 'bg-cyan-500/70';
+                  icon = '🔌';
+                } else if (s.step_type === 'organize') {
+                  badge = 'bg-purple-500/10 text-purple-400 border-purple-500/20';
+                  barColor = 'bg-purple-500/60';
+                  icon = '✨';
+                }
+                const pct = Math.min(100, Math.max(2, Math.round(((s.duration_ms || 0) / totalMs) * 100)));
+                return `
+                  <div class="bg-slate-900/80 border border-slate-800 rounded p-2.5 space-y-1.5">
+                    <div class="flex items-center justify-between text-[11px]">
+                      <div class="flex items-center gap-1.5">
+                        <span class="px-1.5 py-0.2 rounded border text-[10px] ${badge}">${icon} #${s.seq} ${s.step_type}</span>
+                        <span class="font-mono font-medium text-slate-200">${escapeHtml(s.name)}</span>
                       </div>
-                      ${s.arguments ? `
-                        <div class="text-[10.5px] font-mono bg-slate-950/80 p-1.5 rounded text-slate-400 overflow-x-auto max-h-24">
-                          <span class="text-slate-500 block">入参 (Arguments):</span>
-                          ${escapeHtml(typeof s.arguments === 'object' ? JSON.stringify(s.arguments, null, 2) : String(s.arguments))}
-                        </div>
-                      ` : ''}
-                      ${s.result ? `
-                        <div class="text-[10.5px] font-mono bg-slate-950/80 p-1.5 rounded text-emerald-300 overflow-x-auto max-h-24">
-                          <span class="text-slate-500 block">返回结果 (Result Preview):</span>
-                          ${escapeHtml(typeof s.result === 'object' ? JSON.stringify(s.result, null, 2) : String(s.result))}
-                        </div>
-                      ` : ''}
+                      <span class="font-mono text-slate-400 text-[10px]">${s.duration_ms || 0} ms (${pct}%)</span>
                     </div>
-                  `;
-                }).join('')}
-              </div>
-            `}
+                    <div class="w-full h-1 bg-slate-950 rounded-full overflow-hidden">
+                      <div class="h-full ${barColor} rounded-full" style="width: ${pct}%"></div>
+                    </div>
+                    ${s.arguments ? `
+                      <div class="text-[10.5px] font-mono bg-slate-950/80 p-1.5 rounded text-slate-400 overflow-x-auto max-h-24">
+                        <span class="text-slate-500 block">入参 (Arguments):</span>
+                        ${escapeHtml(typeof s.arguments === 'object' ? JSON.stringify(s.arguments, null, 2) : String(s.arguments))}
+                      </div>
+                    ` : ''}
+                    ${s.result ? `
+                      <div class="text-[10.5px] font-mono bg-slate-950/80 p-1.5 rounded text-emerald-300 overflow-x-auto max-h-24">
+                        <span class="text-slate-500 block">返回结果 (Result Preview):</span>
+                        ${escapeHtml(typeof s.result === 'object' ? JSON.stringify(s.result, null, 2) : String(s.result))}
+                      </div>
+                    ` : ''}
+                  </div>
+                `;
+              };
+
+              const blocks = [];
+              let i = 0;
+              while (i < steps.length) {
+                const grp = steps[i].group;
+                if (grp) {
+                  const grouped = [];
+                  while (i < steps.length && steps[i].group === grp) {
+                    grouped.push(steps[i]);
+                    i++;
+                  }
+                  blocks.push(`
+                    <div class="border border-dashed border-cyan-500/40 bg-cyan-950/10 rounded-lg p-2 space-y-2">
+                      <div class="flex items-center justify-between text-[10px] font-mono text-cyan-300 px-1">
+                        <span>⿻ 并行执行 (${escapeHtml(grp)})</span>
+                        <span>${grouped.length} 个并发步骤</span>
+                      </div>
+                      ${grouped.map(renderStepCard).join('')}
+                    </div>
+                  `);
+                } else {
+                  blocks.push(renderStepCard(steps[i]));
+                  i++;
+                }
+              }
+              return `<div class="space-y-2">${blocks.join('')}</div>`;
+            })()}
           </div>
 
           <!-- Stage 5: Output Delivery -->
@@ -3086,6 +3448,84 @@
     }
 
     // --- System & Tools ---
+    let cachedSystemTools = [];
+
+    async function convertLastQueryToTask(btnEl) {
+      const msgWrapper = btnEl.closest('.flex');
+      let queryText = '';
+      if (msgWrapper && msgWrapper.previousElementSibling) {
+        const prevContent = msgWrapper.previousElementSibling.querySelector('.msg-content');
+        if (prevContent) queryText = (prevContent.innerText || '').trim();
+      }
+      if (!queryText) {
+        alert('未找到对应的用户提问文本');
+        return;
+      }
+      try {
+        const res = await fetch('/api/v1/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: queryText.slice(0, 60),
+            query: queryText,
+            session_id: currentThreadId,
+            auto_execute: true,
+          }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const task = await res.json();
+        switchTab('tasks');
+        await loadTasks();
+        if (task && task.task_id && typeof selectTask === 'function') {
+          selectTask(task.task_id);
+        }
+      } catch (err) {
+        alert('转为后台任务失败: ' + err.message);
+      }
+    }
+
+    function renderSystemToolsList() {
+      const toolsList = document.getElementById('sys-tools-list');
+      if (!toolsList) return;
+      const filterVal = (document.getElementById('sys-tools-filter')?.value || 'ALL').toUpperCase();
+      const searchVal = (document.getElementById('sys-tools-search')?.value || '').trim().toLowerCase();
+
+      const filtered = cachedSystemTools.filter(t => {
+        if (filterVal === 'MCP' && String(t.category || '').toLowerCase() !== 'mcp') return false;
+        if (['SAFE', 'MEDIUM', 'HIGH'].includes(filterVal) && t.risk_level !== filterVal) return false;
+        if (searchVal) {
+          const hay = `${t.name} ${t.category} ${t.description}`.toLowerCase();
+          if (!hay.includes(searchVal)) return false;
+        }
+        return true;
+      });
+
+      if (filtered.length === 0) {
+        toolsList.innerHTML = '<div class="p-4 text-center text-slate-500 text-xs">没有匹配的工具</div>';
+        return;
+      }
+
+      toolsList.innerHTML = filtered.map(t => `
+        <div class="p-3 flex items-center justify-between hover:bg-slate-800/30 transition">
+          <div>
+            <span class="font-bold text-slate-200">${escapeHtml(t.name)}</span>
+            <span class="text-[10px] text-slate-500 ml-2 font-mono">[${escapeHtml(t.category)}]</span>
+            <p class="text-slate-400 text-[11px] mt-0.5">${escapeHtml(t.description)}</p>
+          </div>
+          <div class="flex items-center gap-2 shrink-0 ml-3">
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${
+              t.risk_level === 'HIGH' ? 'bg-red-950 text-red-400 border border-red-800' :
+              t.risk_level === 'MEDIUM' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+              'bg-emerald-950 text-emerald-400 border border-emerald-800'
+            }">${t.risk_level}</span>
+            <span class="text-[10px] ${t.requires_approval ? 'text-red-400' : 'text-emerald-400'}">
+              ${t.requires_approval ? '强制审批' : '自动放行'}
+            </span>
+          </div>
+        </div>
+      `).join('');
+    }
+
     async function loadSystemInfo() {
       try {
         const [sysRes, toolsRes, mcpRes] = await Promise.all([
@@ -3097,30 +3537,49 @@
         const tools = await toolsRes.json();
         const mcp = await mcpRes.json();
 
-        document.getElementById('sys-model').innerText = `${sys.default_provider} (${sys.default_model})`;
+        const modelLabel = `${sys.default_provider} · ${sys.default_model}`;
+        const modelEl = document.getElementById('sys-model');
+        if (sys.llm_configured === false) {
+          modelEl.innerHTML = `${escapeHtml(modelLabel)} <span class="ml-1.5 text-[10px] font-sans font-normal px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">未配置密钥</span>`;
+        } else {
+          modelEl.innerText = modelLabel;
+        }
         document.getElementById('sys-hitl').innerText = sys.hitl_enabled ? '已开启 (ACTIVE)' : '未开启';
         document.getElementById('sys-mcp').innerText = `${sys.active_mcp_servers_count} 活跃 / ${mcp.total_servers} 已配置`;
 
-        const toolsList = document.getElementById('sys-tools-list');
-        toolsList.innerHTML = tools.map(t => `
-          <div class="p-3 flex items-center justify-between">
-            <div>
-              <span class="font-bold text-slate-200">${t.name}</span>
-              <span class="text-[10px] text-slate-500 ml-2 font-mono">[${t.category}]</span>
-              <p class="text-slate-400 text-[11px] mt-0.5">${t.description}</p>
-            </div>
-            <div class="flex items-center gap-2">
-              <span class="px-2 py-0.5 rounded text-[10px] font-bold ${
-                t.risk_level === 'HIGH' ? 'bg-red-950 text-red-400 border border-red-800' :
-                t.risk_level === 'MEDIUM' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
-                'bg-emerald-950 text-emerald-400 border border-emerald-800'
-              }">${t.risk_level}</span>
-              <span class="text-[10px] ${t.requires_approval ? 'text-red-400' : 'text-emerald-400'}">
-                ${t.requires_approval ? '强制审批' : '自动放行'}
-              </span>
-            </div>
-          </div>
-        `).join('');
+        const mcpListEl = document.getElementById('sys-mcp-list');
+        if (mcpListEl) {
+          const servers = mcp.servers || {};
+          const entries = Object.entries(servers);
+          if (entries.length === 0) {
+            mcpListEl.innerHTML = '<div class="text-slate-500 col-span-3">未配置外部 MCP 服务</div>';
+          } else {
+            mcpListEl.innerHTML = entries.map(([name, info]) => {
+              const connected = Boolean(info.connected);
+              const enabled = Boolean(info.enabled);
+              const statusBadge = connected
+                ? '<span class="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">已连接</span>'
+                : (enabled
+                  ? '<span class="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/30">未连接</span>'
+                  : '<span class="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700">已禁用</span>');
+              return `
+                <div class="bg-slate-950/70 border border-slate-800 rounded-lg p-2.5 flex flex-col gap-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-mono font-bold text-slate-200 truncate">${escapeHtml(name)}</span>
+                    ${statusBadge}
+                  </div>
+                  <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                    <span>transport: ${escapeHtml(info.transport || 'stdio')}</span>
+                    <span>tools: ${(info.registered_tools || []).length}</span>
+                  </div>
+                </div>
+              `;
+            }).join('');
+          }
+        }
+
+        cachedSystemTools = Array.isArray(tools) ? tools : [];
+        renderSystemToolsList();
       } catch (e) {}
     }
 
@@ -3146,11 +3605,54 @@
         .replace(/'/g, '&#039;');
     }
 
+    // Theme Mode Management (noir | github | claude | clean)
+    const THEME_STORAGE_KEY = 'agentstudio_theme_mode';
+    const VALID_THEMES = ['noir', 'github', 'claude', 'clean'];
+
+    function applyTheme(mode) {
+      const target = VALID_THEMES.includes(mode) ? mode : 'noir';
+      const isDark = target === 'noir' || target === 'github';
+      const root = document.documentElement;
+      root.setAttribute('data-theme', target);
+      root.classList.toggle('dark', isDark);
+
+      document.querySelectorAll('[data-theme-btn]').forEach(btn => {
+        const isActive = btn.getAttribute('data-theme-btn') === target;
+        btn.classList.toggle('bg-slate-800', isActive);
+        btn.classList.toggle('text-slate-100', isActive);
+        btn.classList.toggle('font-semibold', isActive);
+        btn.classList.toggle('text-slate-400', !isActive);
+      });
+    }
+
+    function setThemeMode(mode) {
+      const normalized = VALID_THEMES.includes(mode) ? mode : 'noir';
+      try { localStorage.setItem(THEME_STORAGE_KEY, normalized); } catch (_) {}
+      applyTheme(normalized);
+    }
+
+    (function initThemeMode() {
+      let saved = 'noir';
+      try { saved = localStorage.getItem(THEME_STORAGE_KEY) || 'noir'; } catch (_) {}
+      applyTheme(saved);
+    })();
+
     // Initial on-load checks & refresh state restoration
     loadSessions();
     fetch('/api/v1/system/status').then(r => r.json()).then(s => {
-      document.getElementById('header-provider').innerText = `LLM: ${s.default_provider} (${s.default_model})`;
-    }).catch(() => {});
+      const labelEl = document.getElementById('header-provider');
+      const dotEl = document.getElementById('header-provider-dot');
+      if (s.llm_configured === false) {
+        labelEl.innerText = `LLM: ${s.default_provider} (未配置密钥)`;
+        if (dotEl) dotEl.className = 'w-2 h-2 rounded-full bg-amber-400';
+      } else {
+        labelEl.innerText = `LLM: ${s.default_provider} · ${s.default_model}`;
+        if (dotEl) dotEl.className = 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
+      }
+    }).catch(() => {
+      const labelEl = document.getElementById('header-provider');
+      if (labelEl) labelEl.innerText = 'LLM: 未连接';
+    });
     checkPendingApprovals();
     setInterval(checkPendingApprovals, 10000);
     (function restoreInitialTab() {

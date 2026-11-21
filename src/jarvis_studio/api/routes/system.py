@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from jarvis_studio.api.schemas.response import SystemStatusResponse
 from jarvis_studio.config.settings import get_settings
+from jarvis_studio.core.llm.factory import LLMFactory
 from jarvis_studio.core.observability.trace_logger import get_trace_store
 from jarvis_studio.tools.base import get_tool_metadata
 from jarvis_studio.tools.mcp.client import get_mcp_manager
@@ -28,11 +29,13 @@ async def system_status() -> SystemStatusResponse:
     mcp_mgr = get_mcp_manager()
 
     active_count = len([c for c in mcp_mgr.connections.values() if c.is_connected])
+    llm_info = LLMFactory.resolve_active_model_info(settings.llm)
 
     return SystemStatusResponse(
         version=settings.app.version,
-        default_provider=settings.llm.default_provider.value,
-        default_model=settings.llm.default_model,
+        default_provider=str(llm_info["provider"]),
+        default_model=str(llm_info["model"]),
+        llm_configured=bool(llm_info["configured"]),
         hitl_enabled=settings.security.hitl_enabled,
         registered_tools_count=len(registry.list_tools()),
         active_mcp_servers_count=active_count,

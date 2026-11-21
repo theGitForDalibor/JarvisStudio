@@ -15,6 +15,47 @@ class LLMFactory:
     """Factory creating configured ChatModel instances."""
 
     @classmethod
+    def resolve_active_model_info(cls, config: LLMConfig | None = None) -> dict[str, object]:
+        """Resolve the effective provider, model name, and configuration readiness."""
+        cfg = config or get_settings().llm
+        provider_type = cfg.default_provider
+        match provider_type:
+            case LLMProviderType.OPENAI:
+                model_name = cfg.default_model
+                configured = bool(
+                    cfg.openai_api_key
+                    or os.getenv("OPENAI_API_KEY")
+                    or (
+                        cfg.openai_base_url
+                        and ("localhost" in cfg.openai_base_url or "127.0.0.1" in cfg.openai_base_url)
+                    )
+                )
+            case LLMProviderType.DEEPSEEK:
+                model_name = cfg.deepseek_model_name
+                configured = bool(cfg.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY"))
+            case LLMProviderType.OLLAMA:
+                model_name = cfg.ollama_model_name
+                configured = True
+            case LLMProviderType.CUSTOM:
+                model_name = cfg.default_model
+                configured = bool(cfg.openai_base_url)
+            case LLMProviderType.ANTHROPIC:
+                model_name = cfg.anthropic_model_name
+                configured = bool(cfg.anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"))
+            case LLMProviderType.GEMINI:
+                model_name = cfg.gemini_model_name
+                configured = bool(cfg.google_api_key or os.getenv("GOOGLE_API_KEY"))
+            case _:
+                model_name = cfg.default_model
+                configured = False
+
+        return {
+            "provider": provider_type.value,
+            "model": model_name,
+            "configured": configured,
+        }
+
+    @classmethod
     def create_model(
         cls,
         provider: LLMProviderType | None = None,

@@ -315,6 +315,152 @@ class AgentService:
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"Could not record event {event_type.value} for task {task_id}: {exc}")
 
+    def _resolve_tool_step_type(self, tool_name: str) -> str:
+        """Distinguish external MCP tools from local built-in tools for trace steps."""
+        try:
+            tool = self.registry.get_tool(tool_name)
+            if tool is not None:
+                if hasattr(tool, "server_name"):
+                    return "mcp"
+                meta = self.registry.get_metadata(tool_name)
+                if meta is not None and str(meta.category).lower() == "mcp":
+                    return "mcp"
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"Could not resolve tool step type for '{tool_name}': {exc}")
+        return "tool"
+
+    @staticmethod
+    def _preload_rag_context_sync(
+        query: str,
+        knowledge_scope: dict[str, Any] | None,
+        *,
+        top_k: int = 3,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Synchronously query local RAG store for speculative preloading (fail-open)."""
+        from pathlib import Path
+
+        from jarvis_studio.config.settings import get_settings
+        from jarvis_studio.rag.embeddings import EmbeddingsFactory
+        from jarvis_studio.rag.store import SqliteVecStore
+
+        settings = get_settings()
+        if not settings.rag.enabled or not query.strip():
+            return "", []
+
+        vec_path = Path(settings.rag.vector_db_path)
+        if not vec_path.exists():
+            return "", []
+
+        cols: list[str] | None = None
+        doc_ids: list[str] | None = None
+        if isinstance(knowledge_scope, dict):
+            cols = [str(c) for c in (knowledge_scope.get("collections") or []) if str(c).strip()]
+            doc_ids = [str(d) for d in (knowledge_scope.get("doc_ids") or []) if str(d).strip()]
+            if not cols and not doc_ids:
+                return "", []
+
+        store = SqliteVecStore()
+        try:
+            docs = store.list_documents(collections=cols or None, doc_ids=doc_ids or None)
+            if not docs:
+                return "", []
+            embeddings = EmbeddingsFactory.create_embeddings()
+            query_vec = embeddings.embed_query(query)
+            matches = store.search(
+                query_embedding=query_vec,
+                top_k=top_k,
+                query_text=query,
+                collections=cols or None,
+                doc_ids=doc_ids or None,
+            )
+        finally:
+            store.close()
+
+        if not matches:
+            return "", []
+
+        lines: list[str] = []
+        sources: list[dict[str, Any]] = []
+        for idx, m in enumerate(matches, start=1):
+            doc_path = m.get("doc_path") or m.get("doc_id") or "unknown"
+            snippet = str(m.get("content") or "").strip()[:400]
+            if not snippet:
+                continue
+            lines.append(f"[{idx}] {doc_path}: {snippet}")
+            sources.append(
+                {
+                    "doc_id": m.get("doc_id"),
+                    "doc_path": doc_path,
+                    "score": m.get("score"),
+                }
+            )
+        return "\n".join(lines), sources
+
+    async def _preload_rag_context(
+        self,
+        query: str,
+        knowledge_scope: dict[str, Any] | None,
+        *,
+        timeout_seconds: float = 1.2,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Run lightweight speculative RAG preload with a strict timeout (fail-open)."""
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._preload_rag_context_sync,
+                    query,
+                    knowledge_scope,
+                ),
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"Speculative RAG preload skipped: {exc}")
+            return "", []
+
+    @staticmethod
+    async def _iter_graph_with_thinking(
+        graph_stream: AsyncGenerator[dict[str, Any], None],
+        thinking_engine: ThinkingEngine,
+    ) -> AsyncGenerator[tuple[str, dict[str, Any]], None]:
+        """Yield ('graph', ev) and ('thinking', ev) concurrently so heartbeats flush in real time."""
+        graph_iter = graph_stream.__aiter__()
+        next_graph: asyncio.Task[dict[str, Any]] | None = asyncio.create_task(graph_iter.__anext__())
+        next_think: asyncio.Task[dict[str, Any]] | None = asyncio.create_task(
+            thinking_engine._event_queue.get()
+        )
+        try:
+            while next_graph is not None:
+                wait_set = {next_graph}
+                if next_think is not None:
+                    wait_set.add(next_think)
+                done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+
+                if next_think in done:
+                    try:
+                        think_ev = next_think.result()
+                        yield ("thinking", think_ev)
+                    except asyncio.CancelledError:
+                        pass
+                    next_think = asyncio.create_task(thinking_engine._event_queue.get())
+
+                if next_graph in done:
+                    try:
+                        graph_ev = next_graph.result()
+                        yield ("graph", graph_ev)
+                        next_graph = asyncio.create_task(graph_iter.__anext__())
+                    except StopAsyncIteration:
+                        next_graph = None
+        finally:
+            for pending in (next_graph, next_think):
+                if pending is not None and not pending.done():
+                    pending.cancel()
+                    try:
+                        await pending
+                    except (asyncio.CancelledError, StopAsyncIteration):
+                        pass
+            for ev in await thinking_engine.get_queued_events():
+                yield ("thinking", ev)
+
     async def invoke_agent(
         self,
         thread_id: str,
@@ -513,7 +659,7 @@ class AgentService:
             trace.mark_ttfa()
             trace.finish(output=reply_text, status="rule_direct")
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
 
             return AgentExecutionResult(
                 thread_id=effective_thread_id,
@@ -613,7 +759,7 @@ class AgentService:
                 )
                 trace.finish(output="[Paused by user]", status="paused")
                 trace_store.save_trace(trace)
-                trace_store.prune_old_traces()
+                trace_store.maybe_prune_old_traces()
 
                 return AgentExecutionResult(
                     thread_id=effective_thread_id,
@@ -648,7 +794,7 @@ class AgentService:
                 )
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
-                trace_store.prune_old_traces()
+                trace_store.maybe_prune_old_traces()
 
                 return AgentExecutionResult(
                     thread_id=effective_thread_id,
@@ -690,7 +836,7 @@ class AgentService:
             )
             trace.finish(output=output, status="completed")
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
 
             return AgentExecutionResult(
                 thread_id=effective_thread_id,
@@ -729,7 +875,7 @@ class AgentService:
                 status="unknown" if is_unknown else "cancelled",
             )
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
             raise
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error during agent invocation on thread {effective_thread_id}: {e}")
@@ -742,7 +888,7 @@ class AgentService:
             )
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
             return AgentExecutionResult(
                 thread_id=effective_thread_id,
                 run_id=effective_run_id,
@@ -897,7 +1043,7 @@ class AgentService:
             trace.mark_ttfa()
             trace.finish(output=reply_text, status="rule_direct")
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
 
             yield {
                 "event": "thinking",
@@ -948,6 +1094,11 @@ class AgentService:
                         history_msgs.append(AIMessage(content=rec.content))
                 messages_input = history_msgs + [HumanMessage(content=actual_input_message)]
 
+        preloaded_text, preloaded_sources = await self._preload_rag_context(
+            actual_input_message,
+            task.get_knowledge_scope(),
+        )
+
         trace.preload_stage = {
             "history_loaded_count": len(messages_input) - 1,
             "sticky_context": (
@@ -955,17 +1106,23 @@ class AgentService:
                 if is_chat_thread and effective_session_id is not None
                 else {}
             ),
+            "preloaded_rag_count": len(preloaded_sources),
+            "preloaded_sources": preloaded_sources,
         }
+
+        run_context: dict[str, Any] = {
+            "thread_id": effective_thread_id,
+            "session_id": effective_session_id,
+            "run_id": effective_run_id,
+            "task_id": task.task_id,
+            "knowledge_scope": task.get_knowledge_scope(),
+        }
+        if preloaded_text:
+            run_context["preloaded_context"] = preloaded_text
 
         input_state = {
             "messages": messages_input,
-            "run_context": {
-                "thread_id": effective_thread_id,
-                "session_id": effective_session_id,
-                "run_id": effective_run_id,
-                "task_id": task.task_id,
-                "knowledge_scope": task.get_knowledge_scope(),
-            },
+            "run_context": run_context,
         }
 
         thinking_engine = ThinkingEngine(effective_thread_id)
@@ -976,7 +1133,9 @@ class AgentService:
         for ev in await thinking_engine.get_queued_events():
             yield ev
 
-        active_tools: dict[str, tuple[float, Any]] = {}
+        active_tools: dict[str, tuple[float, Any, str, str | None]] = {}
+        parallel_batch_seq = 0
+        current_parallel_group: str | None = None
         trace.add_step(
             step_type="understand",
             name="意图分析与上下文检查",
@@ -986,13 +1145,17 @@ class AgentService:
         )
 
         try:
-            async for event in self.graph.astream_events(
+            graph_stream = self.graph.astream_events(
                 input_state, config=config, version="v2"
+            )
+            async for source_kind, item in self._iter_graph_with_thinking(
+                graph_stream, thinking_engine
             ):
-                # Drain any heartbeat or thinking events
-                for ev in await thinking_engine.get_queued_events():
-                    yield ev
+                if source_kind == "thinking":
+                    yield item
+                    continue
 
+                event = item
                 kind = event.get("event")
                 if kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
@@ -1003,8 +1166,22 @@ class AgentService:
 
                 elif kind == "on_tool_start":
                     t_name = str(event.get("name") or "tool")
+                    tool_run_id = str(event.get("run_id") or t_name)
                     t_input = event.get("data", {}).get("input")
-                    active_tools[t_name] = (time.time(), t_input)
+                    if len(active_tools) == 0:
+                        parallel_batch_seq += 1
+                        current_parallel_group = None
+                    else:
+                        current_parallel_group = f"parallel_{parallel_batch_seq}"
+                        # Retroactively tag already-active tools in this concurrent batch
+                        for k, (st, args, nm, _) in list(active_tools.items()):
+                            active_tools[k] = (st, args, nm, current_parallel_group)
+                    active_tools[tool_run_id] = (
+                        time.time(),
+                        t_input,
+                        t_name,
+                        current_parallel_group,
+                    )
                     self.task_coordinator.set_task_status(task.task_id, TaskStatus.EXECUTING_TOOL)
                     self._safe_record_event(
                         task.task_id,
@@ -1025,9 +1202,12 @@ class AgentService:
 
                 elif kind == "on_tool_end":
                     t_name = str(event.get("name") or "tool")
+                    tool_run_id = str(event.get("run_id") or t_name)
                     raw_out = event.get("data", {}).get("output")
                     out_str = str(raw_out)[:2000] if raw_out is not None else ""
-                    start_t, t_args = active_tools.pop(t_name, (time.time(), None))
+                    start_t, t_args, _, group_label = active_tools.pop(
+                        tool_run_id, (time.time(), None, t_name, None)
+                    )
                     t_duration_ms = int((time.time() - start_t) * 1000)
                     if not active_tools:
                         self.task_coordinator.set_task_status(task.task_id, TaskStatus.RUNNING)
@@ -1039,11 +1219,12 @@ class AgentService:
                     )
 
                     trace.add_step(
-                        step_type="tool",
+                        step_type=self._resolve_tool_step_type(t_name),
                         name=t_name,
                         arguments=t_args,
                         result=out_str[:500],
                         duration_ms=t_duration_ms,
+                        group=group_label,
                     )
                     await thinking_engine.emit_tool_end(t_name, out_str)
                     for ev in await thinking_engine.get_queued_events():
@@ -1086,7 +1267,7 @@ class AgentService:
                 )
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
-                trace_store.prune_old_traces()
+                trace_store.maybe_prune_old_traces()
                 yield {
                     "event": "approval_required",
                     "data": interrupt_val or {"status": "pending_approval"},
@@ -1120,7 +1301,7 @@ class AgentService:
                 )
                 trace.finish(output=output, status="completed")
                 trace_store.save_trace(trace)
-                trace_store.prune_old_traces()
+                trace_store.maybe_prune_old_traces()
 
                 yield {
                     "event": "completed",
@@ -1157,7 +1338,7 @@ class AgentService:
                 status="unknown" if is_unknown else "cancelled",
             )
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
             raise
         except Exception as e:  # noqa: BLE001
             thinking_engine.close()
@@ -1171,7 +1352,7 @@ class AgentService:
             )
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
             yield {"event": "error", "data": {"error": str(e), "trace_id": trace.trace_id}}
 
     async def verify_approval_context(self, thread_id: str, approval_id: str) -> bool:
@@ -1449,7 +1630,7 @@ class AgentService:
                 )
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
-                trace_store.prune_old_traces()
+                trace_store.maybe_prune_old_traces()
                 return AgentExecutionResult(
                     thread_id=thread_id,
                     run_id=effective_run_id,
@@ -1487,7 +1668,7 @@ class AgentService:
             )
             trace.finish(output=output, status="completed")
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
 
             return AgentExecutionResult(
                 thread_id=thread_id,
@@ -1525,7 +1706,7 @@ class AgentService:
                 status="unknown" if is_unknown else "cancelled",
             )
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
             raise
         except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to resume thread {thread_id}: {e}")
@@ -1538,7 +1719,7 @@ class AgentService:
             )
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
             return AgentExecutionResult(
                 thread_id=thread_id,
                 run_id=effective_run_id,
@@ -1645,7 +1826,9 @@ class AgentService:
             "modified_arguments": decision.modified_arguments,
         }
 
-        active_tools: dict[str, tuple[float, Any]] = {}
+        active_tools: dict[str, tuple[float, Any, str, str | None]] = {}
+        parallel_batch_seq = 0
+        current_parallel_group: str | None = None
         try:
             async for event in self.graph.astream_events(
                 Command(resume=resume_payload), config=config, version="v2"
@@ -1658,8 +1841,21 @@ class AgentService:
                         yield {"event": "token", "data": {"token": str(chunk.content)}}
                 elif kind == "on_tool_start":
                     t_name = str(event.get("name") or "tool")
+                    tool_run_id = str(event.get("run_id") or t_name)
                     t_input = event.get("data", {}).get("input")
-                    active_tools[t_name] = (time.time(), t_input)
+                    if len(active_tools) == 0:
+                        parallel_batch_seq += 1
+                        current_parallel_group = None
+                    else:
+                        current_parallel_group = f"parallel_{parallel_batch_seq}"
+                        for k, (st, args, nm, _) in list(active_tools.items()):
+                            active_tools[k] = (st, args, nm, current_parallel_group)
+                    active_tools[tool_run_id] = (
+                        time.time(),
+                        t_input,
+                        t_name,
+                        current_parallel_group,
+                    )
                     self.task_coordinator.set_task_status(task.task_id, TaskStatus.EXECUTING_TOOL)
                     yield {
                         "event": "tool_start",
@@ -1670,19 +1866,29 @@ class AgentService:
                     }
                 elif kind == "on_tool_end":
                     t_name = str(event.get("name") or "tool")
+                    tool_run_id = str(event.get("run_id") or t_name)
                     raw_out = event.get("data", {}).get("output")
                     out_str = str(raw_out)[:2000] if raw_out is not None else ""
-                    start_t, t_args = active_tools.pop(t_name, (time.time(), None))
+                    start_t, t_args, _, group_label = active_tools.pop(
+                        tool_run_id, (time.time(), None, t_name, None)
+                    )
                     t_duration_ms = int((time.time() - start_t) * 1000)
                     if not active_tools:
                         self.task_coordinator.set_task_status(task.task_id, TaskStatus.RUNNING)
 
+                    step_args = (
+                        decision.modified_arguments
+                        if decision.decision == "modify"
+                        and decision.modified_arguments is not None
+                        else t_args
+                    )
                     trace.add_step(
-                        step_type="tool",
+                        step_type=self._resolve_tool_step_type(t_name),
                         name=t_name,
-                        arguments=t_args,
+                        arguments=step_args,
                         result=out_str[:500],
                         duration_ms=t_duration_ms,
+                        group=group_label,
                     )
                     yield {
                         "event": "tool_end",
@@ -1711,7 +1917,7 @@ class AgentService:
                 )
                 trace.finish(output="[Pending Approval]", status="interrupted")
                 trace_store.save_trace(trace)
-                trace_store.prune_old_traces()
+                trace_store.maybe_prune_old_traces()
                 yield {
                     "event": "approval_required",
                     "data": interrupt_val or {"status": "pending_approval"},
@@ -1745,7 +1951,7 @@ class AgentService:
                 )
                 trace.finish(output=output, status="completed")
                 trace_store.save_trace(trace)
-                trace_store.prune_old_traces()
+                trace_store.maybe_prune_old_traces()
                 yield {
                     "event": "completed",
                     "data": {
@@ -1776,7 +1982,7 @@ class AgentService:
                 status="unknown" if is_unknown else "cancelled",
             )
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
             raise
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error during streaming resume on thread {thread_id}: {e}")
@@ -1789,7 +1995,7 @@ class AgentService:
             )
             trace.finish(output="", error=str(e), status="error")
             trace_store.save_trace(trace)
-            trace_store.prune_old_traces()
+            trace_store.maybe_prune_old_traces()
             yield {"event": "error", "data": {"error": str(e), "trace_id": trace.trace_id}}
 
 

@@ -57,6 +57,13 @@ def create_assistant_node(
             )
         if memory_context:
             effective_system_prompt = f"{effective_system_prompt}\n{memory_context}"
+        preloaded_context = run_context.get("preloaded_context")
+        if preloaded_context:
+            effective_system_prompt = (
+                f"{effective_system_prompt}\n\n"
+                f"[Preloaded Knowledge Context]\n"
+                f"{preloaded_context}"
+            )
 
         # Prepend system prompt if not already present
         if not messages or not isinstance(messages[0], SystemMessage):

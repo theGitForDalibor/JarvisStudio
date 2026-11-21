@@ -122,3 +122,81 @@ def test_trace_store_lifecycle_metrics():
     assert detail is not None
     assert detail["output_text"] == "Test completed successfully"
     assert len(detail["thinking_steps"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_thinking_engine_fingerprint_dedup_and_new_labels():
+    """Verify consecutive identical thinking events are deduplicated and new tool labels exist."""
+    engine = ThinkingEngine(session_id="test_dedup_01", heartbeat_interval=5.0)
+    await engine.emit_understand("正在理解...")
+    await engine.emit_understand("正在理解...")  # duplicate consecutive fingerprint
+    await engine.emit_tool_start("search_web", {"query": "test"})
+    await engine.emit_tool_start("search_web", {"query": "test2"})  # same phase|status|text
+
+    events = await engine.get_queued_events()
+    assert len(events) == 2
+    assert events[0]["data"]["phase"] == ThinkingPhase.UNDERSTAND.value
+    assert "正在联网检索相关资料" in events[1]["data"]["text"]
+    engine.close()
+
+
+def test_trace_sanitization_parallel_group_and_argument_alignment():
+    """Verify secret redaction, parallel group tagging, and HITL argument alignment."""
+    trace = ConversationTrace(
+        session_id="sess_sec",
+        run_id="run_sec",
+        query="Check Bearer abcdefghij1234567890",
+    )
+    step = trace.add_step(
+        step_type="mcp",
+        name="github_search",
+        arguments={"token": "secret_123", "query": "langgraph"},
+        result="ok sk-1234567890abcdef1234",
+        duration_ms=25,
+        group="parallel_1",
+    )
+    assert step.group == "parallel_1"
+    assert step.arguments["token"] == "[REDACTED]"
+    assert "[REDACTED]" in step.result
+
+    updated = trace.update_last_tool_arguments(
+        "github_search", {"token": "new_secret", "query": "langgraph_v2"}
+    )
+    assert updated is True
+    assert trace.thinking_steps[0].arguments["query"] == "langgraph_v2"
+    assert trace.thinking_steps[0].arguments["token"] == "[REDACTED]"
+
+    payload = trace.to_dict()
+    assert "[REDACTED]" in payload["query"]
+
+
+@pytest.mark.asyncio
+async def test_iter_graph_with_thinking_flushes_heartbeat_during_silent_wait():
+    """Verify heartbeats are yielded in real time while graph_stream is silent."""
+    import asyncio
+
+    from jarvis_studio.service.agent_service import AgentService
+
+    engine = ThinkingEngine(session_id="hb_test", heartbeat_interval=0.05)
+    engine.start_heartbeat()
+
+    async def slow_graph():
+        await asyncio.sleep(0.18)
+        yield {"event": "on_chat_model_stream", "data": {}}
+
+    seen: list[tuple[str, dict]] = []
+    try:
+        async for kind, ev in AgentService._iter_graph_with_thinking(slow_graph(), engine):
+            seen.append((kind, ev))
+    finally:
+        engine.close()
+
+    thinking_events = [ev for k, ev in seen if k == "thinking"]
+    graph_events = [ev for k, ev in seen if k == "graph"]
+    assert len(thinking_events) >= 1
+    assert len(graph_events) == 1
+    # Heartbeat arrived before the slow graph event
+    first_think_idx = next(i for i, (k, _) in enumerate(seen) if k == "thinking")
+    first_graph_idx = next(i for i, (k, _) in enumerate(seen) if k == "graph")
+    assert first_think_idx < first_graph_idx
+

@@ -33,6 +33,10 @@ TOOL_LABEL_MAP: dict[str, str] = {
     "search_knowledge_base": "正在检索本地向量知识库 (sqlite-vec)...",
     "index_workspace_directory": "正在扫描并增量构建向量索引...",
     "list_indexed_documents": "正在获取已索引的知识库文档列表...",
+    "search_web": "正在联网检索相关资料...",
+    "fetch_web_page": "正在安全抓取并解析网页正文...",
+    "publish_research_report": "正在发布并校验研究报告交付物...",
+    "verify_report_provenance": "正在核验研究报告引用来源...",
 }
 
 
@@ -71,11 +75,19 @@ class ThinkingEngine:
             },
         }
 
+    async def _enqueue_event(self, event: dict[str, Any]) -> None:
+        """Enqueue event with consecutive fingerprint deduplication."""
+        fp = str(event.get("data", {}).get("fingerprint") or "")
+        if fp and fp == self._last_fingerprint:
+            return
+        self._last_fingerprint = fp
+        await self._event_queue.put(event)
+
     async def emit_understand(self, text: str = "正在理解您的指令与上下文...") -> None:
         """Phase 1: Emit immediate understanding event (<100ms first token experience)."""
         self._current_phase = ThinkingPhase.UNDERSTAND
         event = self._format_event(text, "start", ThinkingPhase.UNDERSTAND)
-        await self._event_queue.put(event)
+        await self._enqueue_event(event)
 
     async def emit_tool_start(self, tool_name: str, tool_args: Any = None) -> None:
         """Phase 2: Emit translated tool execution start event."""
@@ -87,7 +99,7 @@ class ThinkingEngine:
             ThinkingPhase.TOOL,
             details={"tool_name": tool_name, "arguments": tool_args},
         )
-        await self._event_queue.put(event)
+        await self._enqueue_event(event)
 
     async def emit_tool_end(self, tool_name: str, output_snippet: str = "") -> None:
         """Phase 2: Emit tool completion step."""
@@ -98,7 +110,7 @@ class ThinkingEngine:
             ThinkingPhase.TOOL,
             details={"tool_name": tool_name, "snippet": output_snippet[:200]},
         )
-        await self._event_queue.put(event)
+        await self._enqueue_event(event)
 
     def start_heartbeat(self) -> None:
         """Phase 3: Start background keepalive rotation when model synthesizes text."""
@@ -122,7 +134,7 @@ class ThinkingEngine:
                 text = rotation_messages[idx % len(rotation_messages)]
                 idx += 1
                 event = self._format_event(text, "running", ThinkingPhase.ORGANIZE)
-                await self._event_queue.put(event)
+                await self._enqueue_event(event)
         except asyncio.CancelledError:
             pass
 
@@ -143,7 +155,7 @@ class ThinkingEngine:
             ThinkingPhase.COMPLETED,
             details={"total_duration_ms": self.get_elapsed_ms()},
         )
-        await self._event_queue.put(event)
+        await self._enqueue_event(event)
 
     def close(self) -> None:
         """Shut down engine and any background tasks."""

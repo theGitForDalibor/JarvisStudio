@@ -23,6 +23,7 @@ class SystemStatusResponse(BaseModel):
     version: str
     default_provider: str
     default_model: str
+    llm_configured: bool = True
     hitl_enabled: bool
     registered_tools_count: int
     active_mcp_servers_count: int

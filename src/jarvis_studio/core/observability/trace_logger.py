@@ -12,6 +12,7 @@ Implements the agent-lifecycle-observability specification from the AI Engineeri
 
 import json
 import logging
+import re
 import sqlite3
 import time
 import uuid
@@ -27,6 +28,47 @@ from jarvis_studio.core.persistence.sqlite import (
 
 _logger = logging.getLogger(__name__)
 
+_SENSITIVE_KEY_TOKENS = (
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "passwd",
+    "authorization",
+    "access_token",
+    "refresh_token",
+    "cookie",
+)
+_SECRET_VALUE_PATTERN = re.compile(
+    r"(Bearer\s+[A-Za-z0-9\-_\.]+|sk-[A-Za-z0-9]{12,})", re.IGNORECASE
+)
+
+
+def sanitize_trace_data(data: Any, *, max_str_len: int = 8000) -> Any:
+    """Recursively redact sensitive credentials and truncate oversized strings."""
+    if data is None or isinstance(data, (bool, int, float)):
+        return data
+    if isinstance(data, str):
+        redacted = _SECRET_VALUE_PATTERN.sub("[REDACTED]", data)
+        if len(redacted) > max_str_len:
+            return redacted[:max_str_len] + "... [truncated]"
+        return redacted
+    if isinstance(data, dict):
+        sanitized: dict[str, Any] = {}
+        for k, v in data.items():
+            key_str = str(k)
+            lowered = key_str.lower()
+            if lowered == "token" or lowered.endswith("_token") or any(
+                tok in lowered for tok in _SENSITIVE_KEY_TOKENS
+            ):
+                sanitized[key_str] = "[REDACTED]"
+            else:
+                sanitized[key_str] = sanitize_trace_data(v, max_str_len=max_str_len)
+        return sanitized
+    if isinstance(data, (list, tuple)):
+        return [sanitize_trace_data(item, max_str_len=max_str_len) for item in data]
+    return sanitize_trace_data(str(data), max_str_len=max_str_len)
+
 
 @dataclass
 class ThinkingStep:
@@ -41,6 +83,7 @@ class ThinkingStep:
     status: str = "success"  # "success" | "error"
     duration_ms: int = 0
     timestamp: float = field(default_factory=time.time)
+    group: str | None = None
 
 
 @dataclass
@@ -105,20 +148,30 @@ class ConversationTrace:
         duration_ms: int = 0,
         status: str = "success",
         error: str | None = None,
+        group: str | None = None,
     ) -> ThinkingStep:
         """Append a thinking step to the trace."""
         step = ThinkingStep(
             seq=len(self.thinking_steps) + 1,
             step_type=step_type,
             name=name,
-            arguments=arguments,
-            result=result,
+            arguments=sanitize_trace_data(arguments),
+            result=sanitize_trace_data(result),
             duration_ms=duration_ms,
             status=status,
-            error=error,
+            error=sanitize_trace_data(error) if error is not None else None,
+            group=group,
         )
         self.thinking_steps.append(step)
         return step
+
+    def update_last_tool_arguments(self, tool_name: str, actual_arguments: Any) -> bool:
+        """Align the most recent matching tool step's arguments with ground-truth values."""
+        for step in reversed(self.thinking_steps):
+            if step.step_type in ("tool", "mcp") and step.name == tool_name:
+                step.arguments = sanitize_trace_data(actual_arguments)
+                return True
+        return False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert trace to JSON-serializable dictionary."""
@@ -127,16 +180,16 @@ class ConversationTrace:
             "session_id": self.session_id,
             "run_id": self.run_id,
             "task_id": self.task_id,
-            "query": self.query,
+            "query": sanitize_trace_data(self.query),
             "start_time": self.start_time,
             "updated_at": self.updated_at,
             "status": self.status,
-            "input_stage": self.input_stage,
-            "guard_stage": self.guard_stage,
-            "preload_stage": self.preload_stage,
+            "input_stage": sanitize_trace_data(self.input_stage),
+            "guard_stage": sanitize_trace_data(self.guard_stage),
+            "preload_stage": sanitize_trace_data(self.preload_stage),
             "thinking_steps": [asdict(s) for s in self.thinking_steps],
-            "output_text": self.output_text,
-            "error": self.error,
+            "output_text": sanitize_trace_data(self.output_text, max_str_len=32000),
+            "error": sanitize_trace_data(self.error) if self.error is not None else None,
             "ttft_ms": self.ttft_ms,
             "ttfa_ms": self.ttfa_ms,
             "ttlt_ms": self.ttlt_ms,
@@ -150,6 +203,7 @@ class TraceStore:
     def __init__(self, db_path: str | None = None) -> None:
         resolved_path = db_path or get_settings().storage.sqlite_path
         self._db = SyncSQLiteSession(resolved_path, enable_foreign_keys=True)
+        self._save_counter = 0
         self.db_path = self._db.db_path
         if not self._db.is_memory:
             initialize_sqlite_database(
@@ -246,6 +300,21 @@ class TraceStore:
                     updated_at,
                 ),
             )
+
+    def maybe_prune_old_traces(
+        self,
+        every_n: int = 20,
+        max_age_days: int = 30,
+        max_rows_per_session: int = 200,
+    ) -> int:
+        """Periodically prune old traces (every_n saves) to avoid per-request table scans."""
+        self._save_counter += 1
+        if every_n > 1 and (self._save_counter % every_n) != 0:
+            return 0
+        return self.prune_old_traces(
+            max_age_days=max_age_days,
+            max_rows_per_session=max_rows_per_session,
+        )
 
     def prune_old_traces(
         self,
