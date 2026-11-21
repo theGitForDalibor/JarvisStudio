@@ -34,7 +34,7 @@ def test_web_ui_endpoint():
         resp = client.get("/app")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
-        assert "Jarvis Studio" in resp.text
+        assert "AgentStudio" in resp.text
         assert "messages-container" in resp.text
 
 

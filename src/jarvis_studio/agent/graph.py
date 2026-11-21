@@ -51,7 +51,7 @@ def build_agent_graph(
             bound_model,
             system_prompt=system_prompt or create_assistant_node.__defaults__[0]
             if create_assistant_node.__defaults__
-            else "You are Jarvis Studio personal assistant.",
+            else "You are AgentStudio personal assistant.",
         ),
     )
     workflow.add_node("approval_gate", create_approval_node(tool_registry, hitl_mgr=hitl_mgr))

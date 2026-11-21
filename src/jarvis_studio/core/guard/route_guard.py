@@ -47,7 +47,7 @@ _GREETING_PATTERNS = [
     (
         re.compile(r"^(你好|您好|hi|hello|hey|哈喽|在吗|在不在|早|早上好|晚上好)[\s!！?？~～]*$", re.IGNORECASE),
         (
-            "你好！我是 **Jarvis**，您的个人 AI 操作系统助理。\n\n"
+            "你好！我是 **AgentStudio**，您的个人 AI Agent 工作空间助理。\n\n"
             "我已就绪并接入本地源码工程、长期记忆 (LTM)、向量知识库 (sqlite-vec) 与 HITL 安全审批机制。\n"
             "请随时向我发送任务指令（例如：*检索代码库*、*编写新功能*、*执行系统命令* 或 *保存个人偏好*）。"
         ),
@@ -56,7 +56,7 @@ _GREETING_PATTERNS = [
     (
         re.compile(r"^(你是谁|介绍一下自己|你的功能|你叫什么|自我介绍)[\s!！?？~～]*$", re.IGNORECASE),
         (
-            "我是 **Jarvis Studio** 个人生产级 AI 操作系统助理。\n\n"
+            "我是 **AgentStudio** 个人生产级 AI Agent 工作空间助理。\n\n"
             "### 核心能力特性：\n"
             "- 🛠️ **多源工具生态**：支持文件读写、目录扫描、终端命令执行与 MCP 跨进程集成\n"
             "- 🛡️ **HITL 安全审批**：高危操作（写文件、执行 Shell）需经您人工授权确认\n"
@@ -68,13 +68,13 @@ _GREETING_PATTERNS = [
     ),
     (
         re.compile(r"^(ping|test|测试|pong)[\s!！?？~～]*$", re.IGNORECASE),
-        "pong 🏓 Jarvis Studio 运行正常，模型与工具链路已连通！",
+        "pong 🏓 AgentStudio 运行正常，模型与工具链路已连通！",
         "ping_fast_reply",
     ),
     (
         re.compile(r"^(帮助|help|使用说明|指令清单)[\s!！?？~～]*$", re.IGNORECASE),
         (
-            "### Jarvis Studio 常用指令与能力指引：\n\n"
+            "### AgentStudio 常用指令与能力指引：\n\n"
             "- 🔍 **知识库检索**：*“请在 docs 知识库中检索 HITL 的设计规范”*\n"
             "- 📂 **代码与文件操作**：*“帮我查看 src/jarvis_studio/api/app.py 的路由注册”*\n"
             "- ⚡ **系统与终端**：*“运行 pytest 跑一遍测试”*\n"

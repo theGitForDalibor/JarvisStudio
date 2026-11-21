@@ -1,9 +1,9 @@
-# Jarvis Studio Default Runtime Configuration
+# AgentStudio Default Runtime Configuration
 
 app:
-  name: "Jarvis Studio"
+  name: "AgentStudio"
   version: "0.1.0"
-  description: "Personal Production AI Operating Assistant"
+  description: "Personal AI Agent Workspace"
 
 llm:
   default_provider: "openai"

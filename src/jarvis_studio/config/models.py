@@ -128,7 +128,7 @@ class SearchConfig(BaseModel):
 class AppConfig(BaseModel):
     """Application metadata."""
 
-    name: str = "Jarvis Studio"
+    name: str = "AgentStudio"
     version: str = "0.1.0"
     environment: str = "development"
     host: str = "0.0.0.0"

@@ -82,7 +82,7 @@ def create_app() -> FastAPI:
 
     @app.get("/app", response_class=FileResponse, include_in_schema=False)
     async def web_ui():
-        """Serve the modern Jarvis Studio Single-Page Web UI."""
+        """Serve the modern AgentStudio Single-Page Web UI."""
         index_file = static_dir / "index.html"
         return FileResponse(index_file)
 

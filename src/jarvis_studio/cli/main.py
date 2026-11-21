@@ -21,7 +21,7 @@ console = Console()
 
 @click.group()
 def cli():
-    """Jarvis Studio - Personal Production AI Assistant CLI."""
+    """AgentStudio - Personal AI Agent Workspace CLI."""
 
 
 @cli.command()
@@ -43,7 +43,7 @@ def info():
             f"[dim]MCP Servers:[/dim] [cyan]{mcp_status['active_servers']}[/cyan] active / [dim]{mcp_status['total_servers']} configured[/dim]\n"
             f"[dim]RAG Knowledge:[/dim] [{'green' if settings.rag.enabled else 'red'}]{'ENABLED' if settings.rag.enabled else 'DISABLED'}[/] (backend: sqlite-vec)\n"
             f"[dim]Checkpointer:[/dim] {settings.storage.checkpoint_backend} ({settings.storage.sqlite_path})",
-            title="Jarvis Studio Status",
+            title="AgentStudio Status",
             border_style="cyan",
         )
     )
@@ -352,7 +352,7 @@ def serve(host: str, port: int, reload: bool):
     import uvicorn
 
     console.print(
-        f"[bold green]Starting Jarvis Studio API Gateway on http://{host}:{port}...[/bold green]"
+        f"[bold green]Starting AgentStudio API Gateway on http://{host}:{port}...[/bold green]"
     )
     uvicorn.run(
         "jarvis_studio.api.app:create_app",
@@ -372,7 +372,7 @@ def serve(host: str, port: int, reload: bool):
     help="Auto-connect enabled MCP servers",
 )
 def chat(session: str, connect_mcp: bool):
-    """Launch an interactive terminal chat session with Jarvis."""
+    """Launch an interactive terminal chat session with AgentStudio."""
     from jarvis_studio.core.runtime import AgentRuntime
 
     registry = get_default_registry()
@@ -470,7 +470,7 @@ def chat(session: str, connect_mcp: bool):
             tool_count = len(registry.list_tools())
             console.print(
                 Panel(
-                    f"[bold cyan]Jarvis Studio Terminal Assistant[/bold cyan]\n"
+                    f"[bold cyan]AgentStudio Terminal Assistant[/bold cyan]\n"
                     f"[dim]Session ID:[/dim] [yellow]{thread_id}[/yellow]\n"
                     f"[dim]LLM Model :[/dim] {settings.llm.default_provider.value} ({settings.llm.default_model})\n"
                     f"[dim]Active Tools:[/dim] {tool_count} registered (Builtin & MCP)\n"
@@ -521,7 +521,7 @@ def chat(session: str, connect_mcp: bool):
                     )
                     continue
 
-                with console.status("[cyan]Jarvis is thinking...[/cyan]"):
+                with console.status("[cyan]AgentStudio is thinking...[/cyan]"):
                     result = await agent_service.invoke_agent(thread_id, user_input)
 
                 # Process any HITL approvals in a loop (supports chained tool calls)
@@ -542,7 +542,7 @@ def chat(session: str, connect_mcp: bool):
                     )
                 else:
                     console.print(
-                        f"\n[bold cyan]Jarvis > [/bold cyan]{result.output_text}"
+                        f"\n[bold cyan]AgentStudio > [/bold cyan]{result.output_text}"
                     )
 
     asyncio.run(_chat_loop())

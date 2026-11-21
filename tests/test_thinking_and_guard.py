@@ -49,12 +49,12 @@ def test_intent_route_guard_fast_path():
     # 1. Greetings
     res_hi = guard.evaluate("你好", "sess_01")
     assert res_hi.action == GuardAction.DIRECT_REPLY
-    assert "Jarvis" in res_hi.reply_text
+    assert "AgentStudio" in res_hi.reply_text
 
     # 2. Identity
     res_id = guard.evaluate("你是谁？", "sess_01")
     assert res_id.action == GuardAction.DIRECT_REPLY
-    assert "Jarvis Studio" in res_id.reply_text
+    assert "AgentStudio" in res_id.reply_text
 
     # 3. Ping
     res_ping = guard.evaluate("ping", "sess_01")

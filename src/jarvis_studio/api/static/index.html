@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis Studio - 个人生产级 AI 操作系统助理</title>
+  <title>AgentStudio - 个人 AI Agent 工作空间</title>
   <!-- Tailwind CSS & Fonts -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -47,11 +47,11 @@
   <header class="h-14 border-b border-slate-800 bg-slate-900/90 backdrop-blur px-4 flex items-center justify-between shrink-0 z-20">
     <div class="flex items-center gap-3">
       <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">
-        J
+        A
       </div>
       <div>
         <h1 class="font-bold text-sm tracking-wide flex items-center gap-2">
-          Jarvis Studio
+          AgentStudio
           <span class="text-[11px] font-normal px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">v0.1.0</span>
         </h1>
       </div>
@@ -178,7 +178,7 @@
               AI
             </div>
             <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm leading-relaxed max-w-2xl shadow-sm">
-              <p class="font-medium text-slate-200 mb-1">你好！我是 Jarvis Studio 个人 AI 操作系统助理。</p>
+              <p class="font-medium text-slate-200 mb-1">你好！我是 AgentStudio 个人 AI Agent 工作空间助理。</p>
               <p class="text-slate-400 text-xs">我已接入 <strong>LangGraph</strong> 运行时、<strong>HITL 安全审批</strong>、<strong>长期记忆 (LTM)</strong> 与 <strong>本地轻量向量知识库 (sqlite-vec)</strong>。请随时向我发送任务！</p>
             </div>
           </div>
@@ -1009,7 +1009,7 @@
                 AI
               </div>
               <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm leading-relaxed max-w-2xl shadow-sm">
-                <p class="font-medium text-slate-200 mb-1">你好！我是 Jarvis Studio 个人 AI 操作系统助理。</p>
+                <p class="font-medium text-slate-200 mb-1">你好！我是 AgentStudio 个人 AI Agent 工作空间助理。</p>
                 <p class="text-slate-400 text-xs">当前为全新会话，请随时向我发送任务、查询代码或检索知识库！</p>
               </div>
             </div>
@@ -1509,7 +1509,7 @@
         const res = await fetch('/api/v1/memory');
         const list = await res.json();
         if (list.length === 0) {
-          container.innerHTML = '<div class="text-xs text-slate-500 col-span-2 text-center py-8">记忆库为空。你可以点击右上角新增记忆或在聊天中告诉 Jarvis。</div>';
+          container.innerHTML = '<div class="text-xs text-slate-500 col-span-2 text-center py-8">记忆库为空。你可以点击右上角新增记忆或在聊天中告诉 AgentStudio。</div>';
           return;
         }
         container.innerHTML = list.map(m => `

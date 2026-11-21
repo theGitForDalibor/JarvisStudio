@@ -1,4 +1,4 @@
-# Multi-stage production container build for Jarvis Studio
+# Multi-stage production container build for AgentStudio
 FROM python:3.12-slim AS base
 
 # Prevent Python from writing .pyc files and enable unbuffered output
