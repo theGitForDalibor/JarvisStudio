@@ -1,6 +1,6 @@
 # AgentStudio
 
-> **个人 AI Agent 工作空间与生产级运行时系统（原 Jarvis Studio）**  
+> **个人 AI Agent 工作空间与生产级运行时系统**  
 > *Personal AI Agent Workspace — Create · Orchestrate · Execute · Deliver. Powered by LangGraph, Model Context Protocol (MCP), sqlite-vec, and Durable Checkpointing.*
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
