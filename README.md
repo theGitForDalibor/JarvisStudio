@@ -30,10 +30,10 @@ AgentStudio 代表了自主智能体从“学习型原型”到“生产级实�
 
 | 项目代号 | 底层技术 | 项目目标 | 当前状态 |
 | :--- | :--- | :--- | :--- |
-| **AgentCore** (原 Jarvis Agent) | 自研 Python 运行时 | 深度探究 ReAct 循环与 Agent 底层机制 | 已归档 (完成探索) |
-| **AgentFlow** (原 Jarvis Agent Plus) | LangChain Core | 学习 Framework 抽象与工具绑定体系 | 独立项目 |
-| **AgentGraph** (原 Jarvis Agent Pro) | LangGraph 原语 | 学习基于图的状态机编排与循环流转 | 独立项目 |
-| **AgentStudio** (原 Jarvis Studio) | **LangGraph + MCP + sqlite-vec + FTS5** | **构建可长期使用的个人 AI Agent 工作空间** | **活跃主开发项目** |
+| **AgentCore** | 自研 Python 运行时 | 深度探究 ReAct 循环与 Agent 底层机制 | 独立项目 |
+| **AgentFlow** | LangChain Core | 学习 Framework 抽象与工具绑定体系 | 独立项目 |
+| **AgentGraph** | LangGraph 原语 | 学习基于图的状态机编排与循环流转 | 独立项目 |
+| **AgentStudio** | **LangGraph + MCP + sqlite-vec + FTS5** | **构建可长期使用的个人 AI Agent 工作空间** | **活跃主开发项目** |
 
 > **核心哲学**：不为了学习而重复造 Runtime。直接采用成熟框架（**LangGraph**、**LangChain** 与 **MCP**），将工程精力聚焦于真实业务场景、Task/Run 持久化调度、交付物溯源、安全边界控制、人机协同安全性与长久可扩展性。
 

@@ -30,10 +30,10 @@ AgentStudio represents the engineering evolution from experimental agent prototy
 
 | Project | Underlying Tech | Purpose | Status |
 | :--- | :--- | :--- | :--- |
-| **AgentCore** (formerly Jarvis Agent) | In-house Python Runtime | Deep exploration of ReAct and loop internals | Archived |
-| **AgentFlow** (formerly Jarvis Agent Plus) | LangChain Core | Framework abstraction & tool binding study | Separate Project |
-| **AgentGraph** (formerly Jarvis Agent Pro) | LangGraph Primitives | Graph-based state machine orchestration | Separate Project |
-| **AgentStudio** (formerly Jarvis Studio) | **LangGraph + MCP + sqlite-vec + FTS5** | **Personal AI Agent Workspace for daily work** | **Active Project** |
+| **AgentCore** | In-house Python Runtime | Deep exploration of ReAct and loop internals | Separate Project |
+| **AgentFlow** | LangChain Core | Framework abstraction & tool binding study | Separate Project |
+| **AgentGraph** | LangGraph Primitives | Graph-based state machine orchestration | Separate Project |
+| **AgentStudio** | **LangGraph + MCP + sqlite-vec + FTS5** | **Personal AI Agent Workspace for daily work** | **Active Project** |
 
 > **Core Philosophy**: Do not reinvent the agent runtime. Leverage mature, battle-tested production frameworks (**LangGraph**, **LangChain**, and **MCP**) to focus engineering efforts on real-world workflows, durable Task/Run scheduling, deliverable provenance, safety boundaries, human-in-the-loop controls, and long-term maintainability.
 
